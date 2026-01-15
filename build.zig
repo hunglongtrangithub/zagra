@@ -4,10 +4,19 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const mod = b.addModule("zagra", .{
+    const znpy_dep = b.dependency("znpy", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const znpy_mod = znpy_dep.module("znpy");
+
+    const zagra_mod = b.addModule("zagra", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
+
+    zagra_mod.addImport("znpy", znpy_mod);
 
     const exe = b.addExecutable(.{
         .name = "zagra",
@@ -16,7 +25,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "zagra", .module = mod },
+                .{ .name = "zagra", .module = zagra_mod },
+                .{ .name = "znpy", .module = znpy_mod },
             },
         }),
     });
@@ -35,7 +45,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const mod_tests = b.addTest(.{
-        .root_module = mod,
+        .root_module = zagra_mod,
     });
 
     const run_mod_tests = b.addRunArtifact(mod_tests);
