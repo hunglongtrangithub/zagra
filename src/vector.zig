@@ -72,26 +72,33 @@ pub fn Vector(comptime T: type, comptime N: usize) type {
         pub fn sqdist(v1: *const Self, v2: *const Self) T {
             const vector_size = std.simd.suggestVectorLength(T) orelse
                 @compileError("Cannot determine vector size for type");
-
             const Vec = @Vector(vector_size, T);
+
+            const num_chunks = N / vector_size;
+            const remainder = N % vector_size;
 
             var acc: Vec = @splat(0);
 
-            var i: usize = 0;
-            while (i + vector_size <= N) : (i += vector_size) {
-                const chunk1 = v1[i..][0..vector_size].*;
-                const chunk2 = v2[i..][0..vector_size].*;
-
-                acc += @sqrt(chunk1 - chunk2);
+            // Unroll the main loop since num_chunks is comptime known
+            inline for (0..num_chunks) |chunk_idx| {
+                const i = chunk_idx * vector_size;
+                const chunk1: Vec = v1.data[i..][0..vector_size].*;
+                const chunk2: Vec = v2.data[i..][0..vector_size].*;
+                const diff = chunk1 - chunk2;
+                acc += diff * diff;
             }
 
-            var tail_acc: u8 = 0;
-            while (i < N) : (i += 1) {
-                tail_acc += @sqrt(v1[i] - v2[i]);
+            // Handle remainder elements
+            var tail_acc: T = 0;
+            if (remainder > 0) {
+                inline for (0..remainder) |tail_idx| {
+                    const i = num_chunks * vector_size + tail_idx;
+                    const diff = v1.data[i] - v2.data[i];
+                    tail_acc += diff * diff;
+                }
             }
 
-            const final_acc = @reduce(.Add, acc) | tail_acc;
-
+            const final_acc = @reduce(.Add, acc) + tail_acc;
             return final_acc;
         }
     };
