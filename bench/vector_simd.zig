@@ -4,8 +4,8 @@ const zagra = @import("zagra");
 
 /// Benchmark configuration
 const BenchmarkConfig = struct {
-    warmup_iterations: usize = 1000,
-    measurement_iterations: usize = 1000000,
+    warmup_iterations: usize = 1000_000,
+    measurement_iterations: usize = 100_000_000,
     name: []const u8,
 };
 

@@ -72,7 +72,7 @@ pub fn Vector(comptime T: type, comptime N: usize) type {
             var vec: Self = undefined;
             for (0..N) |i| {
                 vec.data[i] = switch (elem_type) {
-                    .UInt8 => rng.int(T),
+                    // .UInt8 => rng.int(T),
                     .Int8 => rng.int(T),
                     .Float => rng.float(T) * 100,
                     .Half => rng.float(T) * 100,
@@ -101,8 +101,8 @@ pub fn Vector(comptime T: type, comptime N: usize) type {
 
             var acc: Vec = @splat(0);
 
-            // Unroll the main loop since num_chunks is comptime known
-            inline for (0..num_chunks) |chunk_idx| {
+            // Handle chunks with SIMD
+            for (0..num_chunks) |chunk_idx| {
                 const i = chunk_idx * vector_size;
                 const chunk1: Vec = v1.data[i..][0..vector_size].*;
                 const chunk2: Vec = v2.data[i..][0..vector_size].*;
@@ -113,7 +113,7 @@ pub fn Vector(comptime T: type, comptime N: usize) type {
             // Handle remainder elements
             var tail_acc: T = 0;
             if (remainder > 0) {
-                inline for (0..remainder) |tail_idx| {
+                for (0..remainder) |tail_idx| {
                     const i = num_chunks * vector_size + tail_idx;
                     const diff = v1.data[i] - v2.data[i];
                     tail_acc += diff * diff;
