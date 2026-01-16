@@ -1,5 +1,9 @@
 const std = @import("std");
 
+const benches = [1][]const u8{
+    "vector_simd",
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -14,9 +18,29 @@ pub fn build(b: *std.Build) void {
     const zagra_mod = b.addModule("zagra", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "znpy", .module = znpy_mod },
+        },
     });
 
-    zagra_mod.addImport("znpy", znpy_mod);
+    inline for (benches) |bench_name| {
+        const bench_exe = b.addExecutable(.{
+            .name = bench_name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("bench/" ++ bench_name ++ ".zig"),
+                .target = target,
+                // Always compile to ReleaseFast
+                .optimize = std.builtin.OptimizeMode.ReleaseFast,
+                .imports = &.{
+                    .{ .name = "zagra", .module = zagra_mod },
+                },
+            }),
+        });
+
+        const run_cmd = b.addRunArtifact(bench_exe);
+        const run_step = b.step("bench_" ++ bench_name, "Run the " ++ bench_name ++ " bench");
+        run_step.dependOn(&run_cmd.step);
+    }
 
     const exe = b.addExecutable(.{
         .name = "zagra",

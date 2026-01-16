@@ -61,14 +61,36 @@ pub fn Vector(comptime T: type, comptime N: usize) type {
     const elem_type = ElemType.fromZigType(T) orelse @compileError("Unsupported element type");
     const dim_type = DimType.fromDim(N) orelse @compileError("Unsupported vector dimension");
 
-    _ = elem_type;
     _ = dim_type;
     return struct {
         data: [N]T,
 
         const Self = @This();
 
-        /// Calculate squared distance between two vectors
+        /// Fill all elements of the vector with random values
+        pub fn initRandom(rng: *std.Random) Self {
+            var vec: Self = undefined;
+            for (0..N) |i| {
+                vec.data[i] = switch (elem_type) {
+                    .UInt8 => rng.int(T),
+                    .Int8 => rng.int(T),
+                    .Float => rng.float(T) * 100,
+                    .Half => rng.float(T) * 100,
+                };
+            }
+            return vec;
+        }
+        /// Naive implementation (no SIMD)
+        pub fn sqdistNaive(v1: *const Self, v2: *const Self) T {
+            var acc: T = 0;
+            for (v1.data, v2.data) |a, b| {
+                const diff = a - b;
+                acc += diff * diff;
+            }
+            return acc;
+        }
+
+        /// Calculate squared distance between two vectors with SIMD optimization
         pub fn sqdist(v1: *const Self, v2: *const Self) T {
             const vector_size = std.simd.suggestVectorLength(T) orelse
                 @compileError("Cannot determine vector size for type");
