@@ -1,5 +1,11 @@
-# ZAGRA
+# ZAGRA: Zig Approximate Graph Retrieval Algorithm
 [CAGRA](https://arxiv.org/pdf/2308.15136) implementation on CPU, written in Zig.
+
+## Why?
+
+ZAGRA is an attempt to explore the upper limits of CPU performance in graph-based vector search, aiming to achieve competitive search recall compared to other ANNS algorithms, while trying to squeeze every bit of performance out of the CPU.
+
+To achieve this, I chose Zig to leverages Zig's unique capabilities, such as **comptime**, first-class **SIMD** support, and **explicit memory management**, to implement fast, parallelized algorithms with mechanical sympathy.
 
 ## Roadmap
 
@@ -33,3 +39,9 @@
 
 ### Phase 5: Benchmarking & Evaluation (Planned)
 - [ ] Benchmark against HNSW
+
+## Acknowledgements
+- [CAGRA paper](https://arxiv.org/pdf/2308.15136)
+- [PyNNDescent](https://github.com/lmcinnes/pynndescent)
+- [Znpy: Npy file reading and writing library in Zig](https://github.com/hunglongtrangithub/znpy)
+- [Zig](https://ziglang.org/)
