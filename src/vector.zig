@@ -3,67 +3,18 @@ const log = std.log.scoped(.vector);
 
 const znpy = @import("znpy");
 
-const ElemType = enum {
-    Int8,
-    // UInt8,
-    Float,
-    Half,
-
-    const Self = @This();
-
-    pub fn fromZigType(comptime T: type) ?Self {
-        return switch (T) {
-            i8 => Self.Int8,
-            // u8 => Self.UInt8,
-            f32 => Self.Float,
-            f16 => Self.Half,
-            else => null,
-        };
-    }
-
-    pub fn toZigType(self: Self) type {
-        return switch (self) {
-            .Int8 => i8,
-            // .UInt8 => u8,
-            .Float => f32,
-            .Half => f16,
-        };
-    }
-};
-
-const DimType = enum {
-    D128,
-    D256,
-    D512,
-
-    const Self = @This();
-
-    pub fn fromDim(n: usize) ?Self {
-        return switch (n) {
-            128 => Self.D128,
-            256 => Self.D256,
-            512 => Self.D512,
-            else => null,
-        };
-    }
-
-    pub fn toDim(self: Self) usize {
-        return switch (self) {
-            .D128 => 128,
-            .D256 => 256,
-            .D512 => 512,
-        };
-    }
-};
+const types = @import("types.zig");
 
 /// A generic N-dimensional vector type with elements of type T
 pub fn Vector(comptime T: type, comptime N: usize) type {
-    const elem_type = ElemType.fromZigType(T) orelse @compileError("Unsupported element type");
-    const dim_type = DimType.fromDim(N) orelse @compileError("Unsupported vector dimension");
+    const elem_type = types.ElemType.fromZigType(T) orelse @compileError("Unsupported element type: " ++ @typeName(T));
+    const dim_type = types.DimType.fromDim(N) orelse @compileError("Unsupported vector dimension");
 
     _ = dim_type;
     return struct {
-        data: [N]T,
+        /// Aligned storage for the vector elements.
+        /// 64 bytes alignment for SIMD performance.
+        data: [N]T align(64),
 
         const Self = @This();
 
@@ -80,6 +31,7 @@ pub fn Vector(comptime T: type, comptime N: usize) type {
             }
             return vec;
         }
+
         /// Naive implementation (no SIMD)
         pub fn sqdistNaive(v1: *const Self, v2: *const Self) T {
             var acc: T = 0;
@@ -92,7 +44,10 @@ pub fn Vector(comptime T: type, comptime N: usize) type {
 
         /// Calculate squared distance between two vectors with SIMD optimization
         pub fn sqdist(v1: *const Self, v2: *const Self) T {
+            // TODO: Handle potential overflow for high-dimensional or large-magnitude data.
+            // Consider using a wider accumulator (f64 or u64) or pre-normalizing vectors.
             const vector_size = std.simd.suggestVectorLength(T) orelse
+                // TODO: Fallback to some default vector size?
                 @compileError("Cannot determine vector size for type");
             const Vec = @Vector(vector_size, T);
 
@@ -102,7 +57,7 @@ pub fn Vector(comptime T: type, comptime N: usize) type {
             var acc: Vec = @splat(0);
 
             // Handle chunks with SIMD
-            for (0..num_chunks) |chunk_idx| {
+            inline for (0..num_chunks) |chunk_idx| {
                 const i = chunk_idx * vector_size;
                 const chunk1: Vec = v1.data[i..][0..vector_size].*;
                 const chunk2: Vec = v2.data[i..][0..vector_size].*;
@@ -113,7 +68,7 @@ pub fn Vector(comptime T: type, comptime N: usize) type {
             // Handle remainder elements
             var tail_acc: T = 0;
             if (remainder > 0) {
-                for (0..remainder) |tail_idx| {
+                inline for (0..remainder) |tail_idx| {
                     const i = num_chunks * vector_size + tail_idx;
                     const diff = v1.data[i] - v2.data[i];
                     tail_acc += diff * diff;

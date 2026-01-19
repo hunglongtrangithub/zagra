@@ -3,10 +3,12 @@ const std = @import("std");
 
 const vector = @import("vector.zig");
 const dataset = @import("dataset.zig");
+const types = @import("types.zig");
 
 pub const Vector = vector.Vector;
 
 test {
     _ = vector;
     _ = dataset;
+    _ = types;
 }
