@@ -23,8 +23,7 @@ pub fn Vector(comptime T: type, comptime N: usize) type {
             var vec: Self = undefined;
             for (0..N) |i| {
                 vec.data[i] = switch (elem_type) {
-                    // .UInt8 => rng.int(T),
-                    .Int8 => rng.int(T),
+                    .Int32 => rng.int(T),
                     .Float => rng.float(T) * 100,
                     .Half => rng.float(T) * 100,
                 };
