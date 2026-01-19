@@ -10,7 +10,6 @@ const Vector = mod_vector.Vector;
 /// A dataset of fixed-size vectors loaded from a .npy file.
 pub fn Dataset(comptime T: type, comptime N: usize) type {
     const Vec = Vector(T, N);
-    const Array = znpy.array.static.StaticArray(T, 2);
 
     return struct {
         /// Buffer containing the dataset's data.
@@ -29,37 +28,61 @@ pub fn Dataset(comptime T: type, comptime N: usize) type {
 
         /// Load a dataset of fixed-size vectors from a .npy file reader.
         /// The .npy file must contain a 2D array where one dimension is of size N.
-        /// Return an error if the shape is invalid. A shape is valid if:
-        /// - The array is 2-dimensional.
-        /// - For C-order arrays, the second dimension is N.
-        /// - For F-order arrays, the first dimension is N.
         pub fn fromNpyFileReader(reader: *std.io.Reader, allocator: std.mem.Allocator) (FromFileReaderError || error.InvalidShape)!Self {
-            const array = try Array.fromFileAllocAligned(
+            const array = try znpy.array.static.StaticArray(T, 2).fromFileAllocAligned(
                 reader,
                 std.mem.Alignment.@"64",
                 allocator,
             );
 
-            const dataset_len = blk: switch (array.shape.order) {
-                .C => {
-                    if (array.shape.dims[1] != N) {
-                        return error.InvalidShape;
-                    }
-
-                    break :blk array.shape.dims[0];
-                },
-                .F => {
-                    if (array.shape.dims[0] != N) {
-                        return error.InvalidShape;
-                    }
-                    break :blk array.shape.dims[1];
-                },
-            };
+            const dataset_len = try verifyShape(array.shape);
 
             return Self{
                 .data_buffer = @as([]align(64) const T, @alignCast(array.data_buffer)),
                 .len = dataset_len,
             };
+        }
+
+        /// Load a dataset of fixed-size vectors from a .npy file buffer in memory (using mmap or similar).
+        /// The .npy file must contain a 2D array where one dimension is of size N.
+        pub fn fromNpyFileBuffer(file_budder: []const u8, allocator: std.mem.Allocator) (FromFileReaderError || error{ InvalidShape, MisalignedData })!Self {
+            const array = try znpy.array.static.ConstStaticArray(T, 2).fromFileBuffer(
+                file_budder,
+                allocator,
+            );
+
+            const dataset_len = try verifyShape(array.shape);
+
+            // Npy file specification already ensures data is aligned to 64 bytes, but we double-check here.
+            if (!std.mem.isAligned(array.data_buffer.ptr, 64)) return error.MisalignedData;
+
+            return Self{
+                .data_buffer = @as([]align(64) const T, @alignCast(array.data_buffer)),
+                .len = dataset_len,
+            };
+        }
+
+        /// Verify that the given shape is compatible with vectors of dimension N.
+        /// Return the number of vectors if valid, otherwise return error.InvalidShape.
+        /// A shape is valid if:
+        /// - The array is 2-dimensional.
+        /// - For C-order arrays, the second dimension is N.
+        /// - For F-order arrays, the first dimension is N.
+        fn verifyShape(shape: znpy.array.static.Shape(2)) error.InvalidShape!usize {
+            switch (shape.order) {
+                .C => {
+                    if (shape.dims[1] != N) {
+                        return error.InvalidShape;
+                    }
+                    return shape.dims[0];
+                },
+                .F => {
+                    if (shape.dims[0] != N) {
+                        return error.InvalidShape;
+                    }
+                    return shape.dims[1];
+                },
+            }
         }
 
         /// Deinitialize the dataset and free its data buffer.
