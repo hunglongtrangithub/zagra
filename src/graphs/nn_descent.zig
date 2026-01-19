@@ -66,9 +66,13 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
         neighbor_candidates_new: CandidateHeapList,
         /// Holds the old neighbor candidates for all nodes.
         neighbor_candidates_old: CandidateHeapList,
-        /// List of graph updates during training.
-        /// Capacity is large enough to hold all possible updates in an iteration.
-        graph_updates_list: std.ArrayList(GraphUpdate),
+        /// Lists of graph updates during training, one per thread.
+        /// Uses the a slice of `graph_updates_buffer` as backing storage.
+        /// Capacity of each list is large enough to hold all possible updates in an iteration.
+        graph_updates_lists: []std.ArrayList(GraphUpdate),
+        /// Buffer to hold graph updates during generation of proposals.
+        /// Used by all arrays in `graph_updates_lists`.
+        graph_updates_buffer: []GraphUpdate,
         /// Thread pool for multi-threaded operations.
         pool: std.Thread.Pool,
         /// Wait group for synchronizing threads.
@@ -106,17 +110,31 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 training_config.max_candidates,
             );
 
+            const graph_updates_lists = try allocator.alloc(
+                std.ArrayList(GraphUpdate),
+                training_config.num_threads,
+            );
+
             // Calculate maximum possible graph updates in an iteration
             // For each node, possible updates are:
             // - New-New neighbor pairs: n_new * (n_new - 1) / 2
             // - New-Old neighbor pairs: n_new * n_old
-            const num_max_graph_upadates = neighbors_list.num_nodes *
-                (neighbor_candidates_new.num_nodes * (neighbor_candidates_new.num_nodes - 1)) / 2 +
+            const capacity_per_thread = (neighbor_candidates_new.num_nodes * (neighbor_candidates_new.num_nodes - 1)) / 2 +
                 (neighbor_candidates_new.num_nodes * neighbor_candidates_old.num_nodes);
-            const graph_updates_list = try std.ArrayList(GraphUpdate).initCapacity(
-                allocator,
-                num_max_graph_upadates,
+            const num_max_graph_updates = capacity_per_thread * training_config.num_threads;
+            const graph_updates_buffer = try allocator.alloc(
+                GraphUpdate,
+                num_max_graph_updates,
             );
+
+            // Initialize each graph updates list using a slice of the buffer
+            for (graph_updates_lists, 0..) |*list, i| {
+                const start = i * capacity_per_thread;
+                const end = start + capacity_per_thread;
+                list.* = std.ArrayList(GraphUpdate).initBuffer(
+                    graph_updates_buffer[start..end],
+                );
+            }
 
             var pool: std.Thread.Pool = undefined;
             try pool.init(.{
@@ -133,7 +151,8 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 .neighbors_list = neighbors_list,
                 .neighbor_candidates_new = neighbor_candidates_new,
                 .neighbor_candidates_old = neighbor_candidates_old,
-                .graph_updates_list = graph_updates_list,
+                .graph_updates_buffer = graph_updates_buffer,
+                .graph_updates_lists = graph_updates_lists,
                 .pool = pool,
                 .wait_group = wait_group,
             };
@@ -144,7 +163,9 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             self.dataset.deinit(allocator);
             self.neighbor_candidates_new.deinit(allocator);
             self.neighbor_candidates_old.deinit(allocator);
-            self.graph_updates_list.deinit(allocator);
+            allocator.free(self.graph_updates_lists);
+            // NOTE: Just need to free the buffer, since all lists use slices of it
+            allocator.free(self.graph_updates_buffer);
             self.pool.deinit();
         }
 
@@ -427,6 +448,12 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             }
         }
 
-        fn generateGraphUpdateProposals(_: *Self) void {}
+        fn generateGraphUpdateProposals(_: *Self) void {
+            // TODO: Go through all nodes:
+            // For each node, check all new-new and new-old candidate pairs (skipping empty slots),
+            // compute distances, and if a closer neighbor is found,
+            // add to the graph_updates_lists.
+            // The number of updates added should never exceed the original capacity of each list.
+        }
     };
 }
