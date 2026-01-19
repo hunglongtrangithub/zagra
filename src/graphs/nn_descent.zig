@@ -62,14 +62,27 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
         training_config: TrainingConfig,
         /// Holds the current neighbor lists for all nodes.
         neighbors_list: NeighborHeapList,
+        /// Holds the new neighbor candidates for all nodes.
         neighbor_candidates_new: CandidateHeapList,
+        /// Holds the old neighbor candidates for all nodes.
         neighbor_candidates_old: CandidateHeapList,
+        /// List of graph updates during training.
+        /// Capacity is large enough to hold all possible updates in an iteration.
+        graph_updates_list: std.ArrayList(GraphUpdate),
+        /// Thread pool for multi-threaded operations.
+        pool: std.Thread.Pool,
+        /// Wait group for synchronizing threads.
+        wait_group: std.Thread.WaitGroup,
 
         /// Holds EntryWithFlag entries.
         const NeighborHeapList = mod_neighbors.NeighborHeapList(T, true);
         /// Holds EntryWithoutFlag entries.
         const CandidateHeapList = mod_neighbors.NeighborHeapList(i32, false);
-
+        const GraphUpdate = struct {
+            node_id: usize,
+            neighbor_id: isize,
+            distance: T,
+        };
         const Self = @This();
 
         /// Initialize NN-Descent with the given dataset and training configuration.
@@ -93,12 +106,36 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 training_config.max_candidates,
             );
 
+            // Calculate maximum possible graph updates in an iteration
+            // For each node, possible updates are:
+            // - New-New neighbor pairs: n_new * (n_new - 1) / 2
+            // - New-Old neighbor pairs: n_new * n_old
+            const num_max_graph_upadates = neighbors_list.num_nodes *
+                (neighbor_candidates_new.num_nodes * (neighbor_candidates_new.num_nodes - 1)) / 2 +
+                (neighbor_candidates_new.num_nodes * neighbor_candidates_old.num_nodes);
+            const graph_updates_list = try std.ArrayList(GraphUpdate).initCapacity(
+                allocator,
+                num_max_graph_upadates,
+            );
+
+            var pool: std.Thread.Pool = undefined;
+            try pool.init(.{
+                .n_jobs = training_config.num_threads,
+                .allocator = allocator,
+            });
+
+            var wait_group: std.Thread.WaitGroup = undefined;
+            wait_group.reset();
+
             return Self{
                 .dataset = dataset,
                 .training_config = training_config,
                 .neighbors_list = neighbors_list,
                 .neighbor_candidates_new = neighbor_candidates_new,
                 .neighbor_candidates_old = neighbor_candidates_old,
+                .graph_updates_list = graph_updates_list,
+                .pool = pool,
+                .wait_group = wait_group,
             };
         }
 
@@ -107,23 +144,32 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             self.dataset.deinit(allocator);
             self.neighbor_candidates_new.deinit(allocator);
             self.neighbor_candidates_old.deinit(allocator);
+            self.graph_updates_list.deinit(allocator);
+            self.pool.deinit();
         }
 
-        pub fn train(self: *Self) (mod_neighbors.InitError || std.mem.Allocator.Error)!void {
+        pub fn train(self: *Self) void {
             // Step 1: Populate initial random neighbors
             self.populateRandomNeighbors();
 
             // Step 2: Iteratively refine the neighbor lists
             for (0..self.training_config.max_iterations) |iteration| {
                 log.info("NN-Descent iteration {d}", .{iteration});
+                defer {
+                    // TODO: Do we need to reset candidate lists, or just overwrite them in the next iteration?
+                    self.neighbor_candidates_new.reset();
+                    self.neighbor_candidates_old.reset();
+                    self.graph_updates_list.clearRetainingCapacity();
+                }
 
                 // Sample neighbor candidates into new and old candidate lists
-                self.sampleNeighborCandidates();
+                try self.sampleNeighborCandidates();
 
                 // TODO: Implement the rest:
                 // - generate new neighbor proposals from candidates
                 // - update neighbor lists and track changes
                 // - check for convergence based on delta
+                self.generateGraphUpdateProposals();
             }
         }
 
@@ -141,9 +187,6 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 );
             } else {
                 const num_threads = self.training_config.num_threads;
-                var pool: std.Thread.Pool = undefined;
-                pool.init(.{ .n_jobs = num_threads });
-                defer pool.deinit();
 
                 const num_nodes = self.neighbors_list.num_nodes;
                 const batch_size = (num_nodes + num_threads - 1) / num_threads;
@@ -154,16 +197,21 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
 
                     // SAFETY: Each thread populate neighbors on non-overlapping range of nodes,
                     // so the neighbor heaps are separate in memory, and thus no data races.
-                    pool.spawn(populateRandomNeighborsThread, .{
-                        .dataset = &self.dataset,
-                        .neighbors_list = &self.neighbors_list,
-                        .num_neighbors = self.training_config.num_neighbors_per_node,
-                        .node_id_start = node_id_start,
-                        .node_id_end = node_id_end,
-                        // Different thread has different seed
-                        .seed = self.training_config.seed + @as(u64, @intCast(node_id_start)),
-                    });
+                    self.pool.spawnWg(
+                        &self.wait_group,
+                        populateRandomNeighborsThread,
+                        .{
+                            .dataset = &self.dataset,
+                            .neighbors_list = &self.neighbors_list,
+                            .num_neighbors = self.training_config.num_neighbors_per_node,
+                            .node_id_start = node_id_start,
+                            .node_id_end = node_id_end,
+                            // Different thread has different seed
+                            .seed = self.training_config.seed + @as(u64, @intCast(node_id_start)),
+                        },
+                    );
                 }
+                self.pool.waitAndWork(&self.wait_group);
             }
         }
 
@@ -227,12 +275,6 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 );
             } else {
                 const num_threads = self.training_config.num_threads;
-                var pool: std.Thread.Pool = undefined;
-                try pool.init(.{ .n_jobs = num_threads });
-                defer pool.deinit();
-
-                var wait_group: std.Thread.WaitGroup = undefined;
-                wait_group.reset();
 
                 const num_nodes = self.dataset.len;
                 const batch_size = (num_nodes + num_threads - 1) / num_threads;
@@ -243,30 +285,39 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
 
                     // SAFETY: Each thread only touches on heaps of nodes whose IDs are
                     // in the range [node_id_start, node_id_end), so no data races.
-                    pool.spawn(sampleNeighborCandidatesThread, .{
-                        .neighbors_list = &self.neighbors_list,
-                        .neighbor_candidates_new = &self.neighbor_candidates_new,
-                        .neighbor_candidates_old = &self.neighbor_candidates_old,
-                        .node_id_start = node_id_start,
-                        .node_id_end = node_id_end,
-                        // Different thread has different seed
-                        .seed = self.training_config.seed + @as(u64, @intCast(node_id_start)),
-                    });
+                    self.pool.spawnWg(
+                        &self.wait_group,
+                        sampleNeighborCandidatesThread,
+                        .{
+                            .neighbors_list = &self.neighbors_list,
+                            .neighbor_candidates_new = &self.neighbor_candidates_new,
+                            .neighbor_candidates_old = &self.neighbor_candidates_old,
+                            .node_id_start = node_id_start,
+                            .node_id_end = node_id_end,
+                            // Different thread has different seed
+                            .seed = self.training_config.seed + @as(u64, @intCast(node_id_start)),
+                        },
+                    );
                 }
-                // Wait for all sampling threads to finish
-                pool.waitAndWork(&wait_group);
+                // Wait for all sampling threads to finish before moving on
+                self.pool.waitAndWork(&self.wait_group);
 
                 // Mark sampled nodes in neighbors_list as not new anymore
                 node_id_start = 0;
                 while (node_id_start < num_nodes) : (node_id_start += batch_size) {
                     const node_id_end = @min(node_id_start + batch_size, num_nodes);
-                    pool.spawn(markSampledOldThread, .{
-                        .neighbors_list = &self.neighbors_list,
-                        .neighbor_candidates_new = &self.neighbor_candidates_new,
-                        .node_id_start = node_id_start,
-                        .node_id_end = node_id_end,
-                    });
+                    self.pool.spawnWg(
+                        &self.wait_group,
+                        markSampledOldThread,
+                        .{
+                            .neighbors_list = &self.neighbors_list,
+                            .neighbor_candidates_new = &self.neighbor_candidates_new,
+                            .node_id_start = node_id_start,
+                            .node_id_end = node_id_end,
+                        },
+                    );
                 }
+                self.pool.waitAndWork(&self.wait_group);
             }
         }
 
@@ -375,5 +426,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 }
             }
         }
+
+        fn generateGraphUpdateProposals(_: *Self) void {}
     };
 }

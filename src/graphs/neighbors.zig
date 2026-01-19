@@ -79,33 +79,35 @@ pub fn NeighborHeapList(comptime T: type, comptime store_flags: bool) type {
             if (overflow != 0) return InitError.NumberOfNeighborsTooLarge;
 
             // Allocate contiguous memory for all entries
-            const bytes = try allocator.alignedAlloc(
-                u8,
-                .of(Entry),
-                std.MultiArrayList(Entry).capacityInBytes(total_size),
-            );
-            var entries = std.MultiArrayList(Entry){
-                .ptr = bytes,
-                .len = total_size,
-                .capacity = total_size,
-            };
+            var entries = std.MultiArrayList(Entry).empty;
+            try entries.setCapacity(allocator, total_size);
 
-            const max_dist = switch (elem_type) {
-                .Int32 => std.math.maxInt(T),
-                .Float, .Half => std.math.floatMax(T),
-            };
-
-            // Initialize fields independently
             const entries_slice = entries.slice();
-            @memset(entries_slice.items(.neighbor_id), EMPTY_ID);
-            @memset(entries_slice.items(.distance), max_dist);
-            if (store_flags) @memset(entries_slice.items(.is_new), true);
+            memsetBuffers(entries_slice);
 
             return Self{
                 .entries = entries_slice,
                 .num_nodes = num_nodes,
                 .num_neighbors_per_node = num_neighbors_per_node,
             };
+        }
+
+        /// Resets all neighbor entries to their initial state:
+        /// neighbor IDs to -1, distances to max value, and is_new flags to true.
+        pub fn reset(self: *Self) void {
+            memsetBuffers(self.entries);
+        }
+
+        fn memsetBuffers(entries: std.MultiArrayList(Entry).Slice) void {
+            const max_dist = switch (elem_type) {
+                .Int32 => std.math.maxInt(T),
+                .Float, .Half => std.math.floatMax(T),
+            };
+
+            // Reset fields independently
+            @memset(entries.items(.neighbor_id), EMPTY_ID);
+            @memset(entries.items(.distance), max_dist);
+            if (store_flags) @memset(entries.items(.is_new), true);
         }
 
         /// Deinitializes the HeapList, freeing its allocated memory.
