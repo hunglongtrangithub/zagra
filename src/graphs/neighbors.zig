@@ -200,6 +200,9 @@ pub fn NeighborHeapList(comptime T: type, comptime store_flags: bool) type {
 
         /// Retrieves a mutable pointer to the specified field of the neighbor entry
         /// for the given node and neighbor index.
+        /// SAFETY:
+        /// - The returned pointer is only valid as long as the underlying data exists
+        /// - Do not store the pointer beyond the data's lifetime
         pub fn getEntryFieldPtr(
             self: *Self,
             node_id: usize,
