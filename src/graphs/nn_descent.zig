@@ -73,6 +73,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
         /// Buffer to hold graph updates during generation of proposals.
         /// Used by all arrays in `graph_updates_lists`.
         graph_updates_buffer: []GraphUpdate,
+        graph_update_counts_buffer: []align(64) usize,
         /// Thread pool for multi-threaded operations.
         pool: std.Thread.Pool,
         /// Wait group for synchronizing threads.
@@ -138,6 +139,12 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 );
             }
 
+            const graph_update_counts_buffer: []align(64) usize = try allocator.alignedAlloc(
+                usize,
+                std.mem.Alignment.@"64",
+                training_config.num_threads,
+            );
+
             var pool: std.Thread.Pool = undefined;
             try pool.init(.{
                 .n_jobs = training_config.num_threads,
@@ -154,6 +161,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 .neighbor_candidates_new = neighbor_candidates_new,
                 .neighbor_candidates_old = neighbor_candidates_old,
                 .graph_updates_buffer = graph_updates_buffer,
+                .graph_update_counts_buffer = graph_update_counts_buffer,
                 .graph_updates_lists = graph_updates_lists,
                 .pool = pool,
                 .wait_group = wait_group,
@@ -168,6 +176,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             allocator.free(self.graph_updates_lists);
             // NOTE: Just need to free the buffer, since all lists use slices of it
             allocator.free(self.graph_updates_buffer);
+            allocator.free(self.graph_update_counts_buffer);
             self.pool.deinit();
         }
 
@@ -195,7 +204,19 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 // - [ ] update neighbor lists and track changes
                 // - [ ] check for convergence based on delta
                 self.generateGraphUpdateProposals();
+                const updates_count = self.applyGraphUpdatesProposals();
+
+                log.info("Applied {d} graph updates", .{updates_count});
+
+                if (updates_count <=
+                    @as(usize, @intFromFloat(self.training_config.delta)) * self.neighbors_list.num_nodes * self.neighbors_list.num_neighbors_per_node)
+                {
+                    log.info("Converged after {d} iterations", .{iteration + 1});
+                    break;
+                }
             }
+
+            log.info("NN-Descent training completed", .{});
         }
 
         /// Populate all nodes with random neighbors.
@@ -565,6 +586,136 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
 
             // Graph update list should not exceed its designated capacity
             std.debug.assert(graph_updates_list.items.len <= graph_updates_list.capacity);
+        }
+
+        /// Apply graph updates from all threads' `graph_updates_lists` to the `neighbors_list`.
+        /// Return the total number of successful updates applied.
+        fn applyGraphUpdatesProposals(self: *Self) usize {
+            const num_threads = self.training_config.num_threads;
+
+            if (num_threads <= 1) {
+                applyGraphUpdatesProposalsThread(
+                    &self.neighbors_list,
+                    &self.graph_updates_lists[0],
+                    &self.graph_update_counts_buffer[0],
+                    0,
+                    self.neighbors_list.num_nodes,
+                );
+                return self.graph_update_counts_buffer[0];
+            }
+
+            const num_nodes = self.neighbors_list.num_nodes;
+            const batch_size = (num_nodes + num_threads - 1) / num_threads;
+
+            for (0..num_threads) |thread_id| {
+                const node_id_start = thread_id * batch_size;
+                const node_id_end = @min(node_id_start + batch_size, num_nodes);
+                // SAFETY: Each thread only touches on heaps of nodes whose IDs are
+                // in the range [node_id_start, node_id_end), so no data races.
+                self.pool.spawnWg(
+                    &self.wait_group,
+                    applyGraphUpdatesProposalsThread,
+                    .{
+                        .neighbors_list = &self.neighbors_list,
+                        .graph_updates_list = &self.graph_updates_lists[thread_id],
+                        .graph_updates_count_ptr = &self.graph_update_counts_buffer[thread_id],
+                        .local_join_id_start = node_id_start,
+                        .local_join_id_end = node_id_end,
+                    },
+                );
+            }
+            self.pool.waitAndWork(&self.wait_group);
+
+            // Reduce the counts from all threads with SIMD
+            return self.sumUpGraphUpdateCountsSIMD();
+        }
+
+        /// Apply graph updates from the given `graph_updates_list` to the `neighbors_list`,
+        /// only for nodes whose IDs are in the range `[node_id_start, node_id_end)`.
+        /// Count the number of successful updates applied and store in `graph_updates_count_ptr`.
+        fn applyGraphUpdatesProposalsThread(
+            neighbors_list: *NeighborHeapList,
+            graph_updates_list: *std.ArrayList(GraphUpdate),
+            graph_updates_count_ptr: *usize,
+            node_id_start: usize,
+            node_id_end: usize,
+        ) void {
+            std.debug.assert(node_id_start < node_id_end and node_id_end <= neighbors_list.num_nodes);
+
+            var updates_count: usize = 0;
+
+            // Go through all graph updates in the list
+            for (graph_updates_list.items) |graph_update| {
+                const node1_id = graph_update.node1_id;
+                const node2_id = graph_update.node2_id;
+                const distance = graph_update.distance;
+
+                var updates_count_local: usize = 0;
+
+                if (node1_id >= node_id_start and node1_id < node_id_end) {
+                    // Try to add neighbor to node1
+                    const update1 = neighbors_list.tryAddNeighbor(node1_id, NeighborHeapList.Entry{
+                        // SAFETY: neighbor_id is in [0, num_nodes), which fits in isize.
+                        .neighbor_id = @intCast(node2_id),
+                        .distance = distance,
+                        .is_new = true,
+                    });
+
+                    updates_count_local += @intFromBool(update1);
+                }
+
+                if (node2_id >= node_id_start and node2_id < node_id_end) {
+                    // Try to add neighbor to node2
+                    const update2 = neighbors_list.tryAddNeighbor(node2_id, NeighborHeapList.Entry{
+                        // SAFETY: neighbor_id is in [0, num_nodes), which fits in isize.
+                        .neighbor_id = @intCast(node1_id),
+                        .distance = distance,
+                        .is_new = true,
+                    });
+
+                    updates_count_local += @intFromBool(update2);
+                }
+
+                // updates_count_local is either 0, 1, or 2. We update the count accordingly.
+                updates_count += updates_count_local;
+            }
+
+            // Store the number of updates applied at the end. One memory access.
+            graph_updates_count_ptr.* = updates_count;
+        }
+
+        /// Sum up the graph update counts from all threads using SIMD.
+        fn sumUpGraphUpdateCountsSIMD(self: *Self) usize {
+            const counts_ptr: [*]align(64) usize = self.graph_update_counts_buffer.ptr;
+            const num_counts = self.graph_update_counts_buffer.len;
+
+            const vector_size = std.simd.suggestVectorLength(usize) orelse
+                @compileError("Cannot determine vector size for type");
+            const Vec = @Vector(vector_size, usize);
+
+            const num_chunks = num_counts / vector_size;
+            const remainder = num_counts % vector_size;
+
+            // One vector accumulator to rule them all
+            var acc: Vec = @splat(0);
+
+            // 1. Accumulate chunks
+            var i: usize = 0;
+            while (i < num_chunks * vector_size) : (i += vector_size) {
+                const chunk: Vec = counts_ptr[i..][0..vector_size].*;
+                acc += chunk;
+            }
+
+            // 2. Handle tail remainder (elements that didn't fit in a full vector)
+            var tail_acc: usize = 0;
+            if (remainder > 0) {
+                while (i < num_counts) : (i += 1) {
+                    tail_acc += counts_ptr[i];
+                }
+            }
+
+            // 3. Final reduction
+            return @reduce(.Add, acc) + tail_acc;
         }
     };
 }
