@@ -100,10 +100,10 @@ fn benchmarkComparison(
 
     // Initialize test vectors
     var prng = std.Random.DefaultPrng.init(42);
-    var rng = prng.random();
+    const rng = prng.random();
 
-    const v1 = VecType.initRandom(&rng);
-    const v2 = VecType.initRandom(&rng);
+    const v1 = VecType.initRandom(rng);
+    const v2 = VecType.initRandom(rng);
 
     try writer.print("\n" ++ "=" ** 80 ++ "\n", .{});
     try writer.print("Benchmarking Vector({}, {d})\n", .{ T, N });
@@ -155,7 +155,7 @@ fn benchmarkComparison(
     const tolerance = switch (@typeInfo(T)) {
         .float => std.math.floatEps(T),
         .int => 0,
-        else => @compileError("Unsupported type"),
+        else => @compileError("Unsupported type: " ++ @typeName(T)),
     };
 
     const diff = if (@typeInfo(T) == .float)
