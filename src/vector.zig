@@ -14,6 +14,7 @@ pub fn Vector(comptime T: type, comptime N: usize) type {
     return struct {
         /// Aligned storage for the vector elements.
         /// 64 bytes alignment for SIMD performance.
+        // Alignment of 64 bytes satisfies all natural alignments of types we support.
         data: [N]T align(64),
 
         const Self = @This();

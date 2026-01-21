@@ -215,7 +215,7 @@ pub fn NeighborHeapList(comptime T: type, comptime store_flags: bool) type {
         }
 
         /// Retrieves a slice of the specified field for all neighbor entries of the given node.
-        pub fn getEntryFieldSlice(
+        pub inline fn getEntryFieldSlice(
             self: *const Self,
             node_id: usize,
             comptime field: std.meta.FieldEnum(Entry),
@@ -223,12 +223,6 @@ pub fn NeighborHeapList(comptime T: type, comptime store_flags: bool) type {
             std.debug.assert(node_id < self.num_nodes);
             const start = node_id * self.num_neighbors_per_node;
             return self.entries.items(field)[start .. start + self.num_neighbors_per_node];
-        }
-
-        /// Retrieves the neighbor entry for the specified node and neighbor index.
-        pub fn getEntry(self: *const Self, node_id: usize, neighbor_idx: usize) Entry {
-            const index = self.getEntryIndex(node_id, neighbor_idx);
-            return self.entries.get(index);
         }
     };
 }

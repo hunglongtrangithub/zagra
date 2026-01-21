@@ -20,6 +20,7 @@ pub fn Dataset(comptime T: type, comptime N: usize) type {
         // The buffer is aligned to 64 bytes for SIMD performance.
         // With the current supported types and dimensions, this makes every
         // vector start at a 64-byte aligned address.
+        // Alignment of 64 bytes satisfies all natural alignments of types we support.
         data_buffer: []align(64) const T,
         /// Number of vectors in the dataset. Should be no more than `std.math.maxInt(isize) / N`.
         len: usize,

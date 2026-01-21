@@ -369,20 +369,24 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             const rng = prng.random();
 
             for (0..neighbors_list.num_nodes) |node_id| {
+                const neighbor_id_slice: []isize = neighbors_list.getEntryFieldSlice(node_id, .neighbor_id);
+                const is_new_slice: []bool = neighbors_list.getEntryFieldSlice(node_id, .is_new);
+
                 for (0..neighbors_list.num_neighbors_per_node) |neighbor_idx| {
-                    const neighbor_entry = neighbors_list.getEntry(node_id, neighbor_idx);
+                    const entry_neighbor_id = neighbor_id_slice[neighbor_idx];
+                    const entry_is_new = is_new_slice[neighbor_idx];
 
                     // Skip this neighbor slot if it's empty
-                    if (neighbor_entry.neighbor_id == CandidateHeapList.EMPTY_ID) continue;
+                    if (entry_neighbor_id == CandidateHeapList.EMPTY_ID) continue;
                     // SAFETY: neighbor_id is not EMPTY_ID, so this cast is safe.
-                    const neighbor_id = @as(usize, neighbor_entry.neighbor_id);
+                    const neighbor_id = @as(usize, entry_neighbor_id);
 
                     // Generate a random priority for this neighbor
                     // TODO: Consider if this sampling strategy is appropriate
                     const priority = rng.int(i32);
 
                     // Assign to neighbor_candidates_new or neighbor_candidates_old based on is_new flag
-                    const target_candidate_list = if (neighbor_entry.is_new)
+                    const target_candidate_list = if (entry_is_new)
                         neighbor_candidates_new
                     else
                         neighbor_candidates_old;
@@ -542,6 +546,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                     for (old_candidate_ids) |cand2_id| {
                         if (cand2_id == CandidateHeapList.EMPTY_ID) continue;
                         const cand2_vector = dataset.getUnchecked(@as(usize, cand2_id));
+                        // Take current max distance in neighbor heap as threshold
                         const cand2_distance_threshold: []T = neighbors_list.getEntryFieldSlice(local_join_id, .distance)[0];
 
                         const distance = cand1_vector.sqdist(cand2_vector);
