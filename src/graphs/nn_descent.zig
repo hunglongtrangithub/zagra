@@ -73,6 +73,9 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
         /// Buffer to hold graph updates during generation of proposals.
         /// Used by all arrays in `graph_updates_lists`.
         graph_updates_buffer: []GraphUpdate,
+        /// Buffer to hold the number of graph updates applied by each thread.
+        /// Used during reduction to get total number of updates applied.
+        /// Aligned for efficient SIMD access.
         graph_update_counts_buffer: []align(64) usize,
         /// Thread pool for multi-threaded operations.
         pool: std.Thread.Pool,
