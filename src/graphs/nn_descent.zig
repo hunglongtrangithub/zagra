@@ -202,10 +202,10 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 // Sample neighbor candidates into new and old candidate lists
                 try self.sampleNeighborCandidates();
 
-                // TODO: Implement the rest:
-                // - [x] generate new neighbor proposals from candidates
-                // - [ ] update neighbor lists and track changes
-                // - [ ] check for convergence based on delta
+                // 1. generate new neighbor proposals from candidates
+                // 2. update neighbor lists and track changes
+                // 3. check for convergence based on delta
+
                 self.generateGraphUpdateProposals();
                 const updates_count = self.applyGraphUpdatesProposals();
 
