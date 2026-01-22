@@ -638,7 +638,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
         /// Count the number of successful updates applied and store in `graph_updates_count_ptr`.
         fn applyGraphUpdatesProposalsThread(
             neighbors_list: *NeighborHeapList,
-            graph_updates_list: *std.ArrayList(GraphUpdate),
+            graph_updates_list: *const std.ArrayList(GraphUpdate),
             graph_updates_count_ptr: *usize,
             node_id_start: usize,
             node_id_end: usize,
