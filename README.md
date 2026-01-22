@@ -23,9 +23,10 @@ To achieve this, I chose Zig to leverages Zig's unique capabilities, such as **c
   1. [x] Random neighbor population for initial graph
   2. [x] Forward and reverse neighbor sampling
   3. [x] Graph update proposal generation
-  4. [ ] Applying graph updates
-  5. [ ] Iterative refinement until convergence
+  4. [x] Applying graph updates
+  5. [x] Iterative refinement until convergence
 - [x] Lock-free, multi-threaded graph operations
+- [ ] Unit tests for correctness verification
 
 ### Phase 3: Graph Optimization (Planned)
 - [ ] Implement graph optimization techniques from CAGRA paper
