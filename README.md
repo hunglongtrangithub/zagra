@@ -11,7 +11,7 @@ To achieve this, I chose Zig to leverages Zig's unique capabilities, such as **c
 
 ### Phase 1: Vectors & Datasets (Finished)
 - [x] Basic vector operations
-  - [x] Support `f32` and `f64` data types (float and half), with dimensionality of 128, 256, and 512
+  - [x] Support `f32` and `f16` data types (float and half), with dimensionality of 128, 256, and 512
   - [x] SIMD-accelerated squared Euclidean distance of vectors
   - [x] `align(64)` memory layout of vector buffers for cache efficiency
 - [x] Vector dataset loading and vector access
