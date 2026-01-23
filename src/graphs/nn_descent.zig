@@ -115,15 +115,18 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 training_config.num_neighbors_per_node,
                 allocator,
             );
+            errdefer neighbors_list.deinit(allocator);
 
             const neighbor_candidates_new = try CandidateHeapList.init(
                 dataset.len,
                 training_config.max_candidates,
             );
+            errdefer neighbor_candidates_new.deinit(allocator);
             const neighbor_candidates_old = try CandidateHeapList.init(
                 dataset.len,
                 training_config.max_candidates,
             );
+            errdefer neighbor_candidates_old.deinit(allocator);
 
             const graph_updates_lists = try allocator.alloc(
                 std.ArrayList(GraphUpdate),
@@ -149,6 +152,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 GraphUpdate,
                 num_max_graph_updates,
             );
+            errdefer allocator.free(graph_updates_buffer);
 
             // Initialize each graph updates list using a slice of the buffer
             const capacity_per_thread = (num_max_graph_updates + training_config.num_threads - 1) / training_config.num_threads;
@@ -165,6 +169,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 std.mem.Alignment.@"64",
                 training_config.num_threads,
             );
+            errdefer allocator.free(graph_update_counts_buffer);
 
             var pool: std.Thread.Pool = undefined;
             try pool.init(.{
