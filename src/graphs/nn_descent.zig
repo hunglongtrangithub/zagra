@@ -125,18 +125,19 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             // For each node, possible updates are:
             // - New-New neighbor pairs: n_new * (n_new - 1) / 2
             // - New-Old neighbor pairs: n_new * n_old
-            const capacity_per_thread = (neighbor_candidates_new.num_nodes * (neighbor_candidates_new.num_nodes - 1)) / 2 +
+            const capacity_per_node = (neighbor_candidates_new.num_nodes * (neighbor_candidates_new.num_nodes - 1)) / 2 +
                 (neighbor_candidates_new.num_nodes * neighbor_candidates_old.num_nodes);
-            const num_max_graph_updates = capacity_per_thread * training_config.num_threads;
+            const num_max_graph_updates = capacity_per_node * neighbors_list.num_nodes;
             const graph_updates_buffer = try allocator.alloc(
                 GraphUpdate,
                 num_max_graph_updates,
             );
 
             // Initialize each graph updates list using a slice of the buffer
+            const capacity_per_thread = (num_max_graph_updates + training_config.num_threads - 1) / training_config.num_threads;
             for (graph_updates_lists, 0..) |*list, i| {
                 const start = i * capacity_per_thread;
-                const end = start + capacity_per_thread;
+                const end = @min(start + capacity_per_thread, graph_updates_buffer.len);
                 list.* = std.ArrayList(GraphUpdate).initBuffer(
                     graph_updates_buffer[start..end],
                 );
