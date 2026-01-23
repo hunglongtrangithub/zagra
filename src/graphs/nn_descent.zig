@@ -48,6 +48,11 @@ pub const TrainingConfig = struct {
     }
 };
 
+pub const InitError = error{
+    /// The specified maximum number of candidates is too large. Should be no more than i32 max.
+    MaxCandidatesTooLarge,
+};
+
 /// NN-Descent struct to construct the k-NN graph from a dataset.
 /// Generics:
 /// - T: Element type of the vectors, supported in `types.ElemType`.
@@ -100,7 +105,11 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             dataset: Dataset,
             training_config: TrainingConfig,
             allocator: std.mem.Allocator,
-        ) (mod_neighbors.InitError || std.mem.Allocator.Error)!Self {
+        ) (InitError || mod_neighbors.InitError || std.mem.Allocator.Error)!Self {
+            if (training_config.max_candidates > std.math.maxInt(i32)) {
+                return InitError.MaxCandidatesTooLarge;
+            }
+
             const neighbors_list = try NeighborHeapList.init(
                 dataset.len,
                 training_config.num_neighbors_per_node,
@@ -125,9 +134,17 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             // For each node, possible updates are:
             // - New-New neighbor pairs: n_new * (n_new - 1) / 2
             // - New-Old neighbor pairs: n_new * n_old
-            const capacity_per_node = (neighbor_candidates_new.num_nodes * (neighbor_candidates_new.num_nodes - 1)) / 2 +
-                (neighbor_candidates_new.num_nodes * neighbor_candidates_old.num_nodes);
-            const num_max_graph_updates = capacity_per_node * neighbors_list.num_nodes;
+            // NOTE: Since training_config.max_candidates (aka n_new and n_old)
+            // is no more than i32 max, the cast is safe, and the calculations here won't overflow u64.
+            const n_new = @as(u64, neighbor_candidates_new.num_neighbors_per_node);
+            const n_old = @as(u64, neighbor_candidates_old.num_neighbors_per_node);
+            const capacity_per_node: u64 = (n_new * (n_new - 1)) / 2 + (n_new * n_old);
+            const capacity_per_node_usize = std.math.cast(usize, capacity_per_node) orelse
+                return InitError.MaxCandidatesTooLarge;
+
+            const num_max_graph_updates: usize, const overflow = @mulWithOverflow(capacity_per_node_usize, neighbors_list.num_nodes);
+            if (overflow) return mod_neighbors.InitError.NumberOfNodesTooLarge;
+
             const graph_updates_buffer = try allocator.alloc(
                 GraphUpdate,
                 num_max_graph_updates,
