@@ -8,6 +8,8 @@ const mod_vector = @import("vector.zig");
 const Vector = mod_vector.Vector;
 
 /// A dataset of fixed-size vectors loaded from a .npy file.
+/// The dataset contains vectors of type `Vector(T, N)`, where `T` is the element type
+/// and `N` is the dimension of each vector.
 pub fn Dataset(comptime T: type, comptime N: usize) type {
     const Vec = Vector(T, N);
 
@@ -22,7 +24,7 @@ pub fn Dataset(comptime T: type, comptime N: usize) type {
         // vector start at a 64-byte aligned address.
         // Alignment of 64 bytes satisfies all natural alignments of types we support.
         data_buffer: []align(64) const T,
-        /// Number of vectors in the dataset. Should be no more than `std.math.maxInt(isize) / N`.
+        /// Number of vectors in the dataset.
         len: usize,
 
         const Self = @This();

@@ -215,6 +215,7 @@ pub fn NeighborHeapList(comptime T: type, comptime store_flags: bool) type {
         }
 
         /// Retrieves a slice of the specified field for all neighbor entries of the given node.
+        // TODO: Should this be inlined?
         pub inline fn getEntryFieldSlice(
             self: *const Self,
             node_id: usize,
