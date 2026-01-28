@@ -29,21 +29,27 @@ pub const TrainingConfig = struct {
     delta: f32 = 0.001,
 
     /// The number of parallel threads to use. Default is the number or cores.
-    num_threads: usize = std.Thread.getCpuCount() catch 1,
+    num_threads: usize = 1,
 
     /// Random seed for any randomized components of the algorithm.
-    seed: u64 = std.crypto.random.int(u64),
+    seed: u64,
 
     const Self = @This();
 
     /// Initializes a training config with default values based on the dataset size.
-    pub fn init(num_neighbors_per_node: usize, num_vectors: usize, seed: ?u64) Self {
+    pub fn init(
+        num_neighbors_per_node: usize,
+        num_vectors: usize,
+        num_threads: ?usize,
+        seed: ?u64,
+    ) Self {
         const config = Self{
             .num_neighbors_per_node = num_neighbors_per_node,
-            .max_iterations = @max(5, @log2(num_vectors)),
+            .max_iterations = @max(5, @as(usize, @intFromFloat(@log2(@as(f64, @floatFromInt(num_vectors)))))),
             .max_candidates = @min(60, num_neighbors_per_node),
+            .num_threads = if (num_threads) |n| n else std.Thread.getCpuCount() catch 1,
+            .seed = if (seed) |s| s else std.crypto.random.int(u64),
         };
-        if (seed) |s| config.seed = s;
         return config;
     }
 };
@@ -110,28 +116,34 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 return InitError.MaxCandidatesTooLarge;
             }
 
-            const neighbors_list = try NeighborHeapList.init(
+            var neighbors_list = try NeighborHeapList.init(
                 dataset.len,
                 training_config.num_neighbors_per_node,
                 allocator,
             );
+            log.debug("neighbors_list", .{});
             errdefer neighbors_list.deinit(allocator);
 
-            const neighbor_candidates_new = try CandidateHeapList.init(
+            var neighbor_candidates_new = try CandidateHeapList.init(
                 dataset.len,
                 training_config.max_candidates,
+                allocator,
             );
+            log.debug("neighbor_candidates_new", .{});
             errdefer neighbor_candidates_new.deinit(allocator);
-            const neighbor_candidates_old = try CandidateHeapList.init(
+            var neighbor_candidates_old = try CandidateHeapList.init(
                 dataset.len,
                 training_config.max_candidates,
+                allocator,
             );
+            log.debug("neighbor_candidates_old", .{});
             errdefer neighbor_candidates_old.deinit(allocator);
 
             const graph_updates_lists = try allocator.alloc(
                 std.ArrayList(GraphUpdate),
                 training_config.num_threads,
             );
+            log.debug("graph_updates_lists", .{});
 
             // Calculate maximum possible graph updates in an iteration
             // For each node, possible updates are:
@@ -146,12 +158,13 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 return InitError.MaxCandidatesTooLarge;
 
             const num_max_graph_updates: usize, const overflow = @mulWithOverflow(capacity_per_node_usize, neighbors_list.num_nodes);
-            if (overflow) return mod_neighbors.InitError.NumberOfNodesTooLarge;
+            if (overflow != 0) return mod_neighbors.InitError.NumberOfNodesTooLarge;
 
             const graph_updates_buffer = try allocator.alloc(
                 GraphUpdate,
                 num_max_graph_updates,
             );
+            log.debug("graph_updates_buffer", .{});
             errdefer allocator.free(graph_updates_buffer);
 
             // Initialize each graph updates list using a slice of the buffer
@@ -169,13 +182,15 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 std.mem.Alignment.@"64",
                 training_config.num_threads,
             );
+            log.debug("graph_update_counts_buffer", .{});
             errdefer allocator.free(graph_update_counts_buffer);
 
             var pool: std.Thread.Pool = undefined;
-            try pool.init(.{
+            pool.init(.{
                 .n_jobs = training_config.num_threads,
                 .allocator = allocator,
-            });
+            }) catch return std.mem.Allocator.Error.OutOfMemory;
+            log.debug("pool", .{});
 
             var wait_group: std.Thread.WaitGroup = undefined;
             wait_group.reset();
@@ -207,6 +222,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
         }
 
         pub fn train(self: *Self) void {
+            log.info("Populating random neighbors", .{});
             // Step 1: Populate initial random neighbors
             self.populateRandomNeighbors();
 
@@ -223,7 +239,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 }
 
                 // Sample neighbor candidates into new and old candidate lists
-                try self.sampleNeighborCandidates();
+                self.sampleNeighborCandidates();
 
                 // 1. generate new neighbor proposals from candidates
                 // 2. update neighbor lists and track changes
@@ -274,12 +290,12 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                     &self.wait_group,
                     populateRandomNeighborsThread,
                     .{
-                        .dataset = &self.dataset,
-                        .neighbors_list = &self.neighbors_list,
-                        .node_id_start = node_id_start,
-                        .node_id_end = node_id_end,
+                        &self.dataset,
+                        &self.neighbors_list,
+                        node_id_start,
+                        node_id_end,
                         // Different thread has different seed
-                        .seed = self.training_config.seed + @as(u64, @intCast(thread_id)),
+                        self.training_config.seed + @as(u64, @intCast(thread_id)),
                     },
                 );
             }
@@ -299,6 +315,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             std.debug.assert(dataset.len == num_nodes);
             std.debug.assert(node_id_start < node_id_end and node_id_end <= num_nodes);
 
+            log.debug("node_id_start: {}, node_id_end: {}", .{ node_id_start, node_id_end });
             var prng = std.Random.DefaultPrng.init(seed);
             const rng = prng.random();
 
@@ -308,6 +325,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                     // We accept the possibility of a node pointing to itself here.
                     // TODO: Consider avoiding self-loops?
                     const neighbor_id = rng.intRangeAtMost(usize, 0, num_nodes - 1);
+                    log.debug("Randomized neighbor id for node id {}: {}", .{ node_id, neighbor_id });
 
                     const neighbor = dataset.getUnchecked(neighbor_id);
                     const distance = node.sqdist(neighbor);
@@ -363,13 +381,13 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                     &self.wait_group,
                     sampleNeighborCandidatesThread,
                     .{
-                        .neighbors_list = &self.neighbors_list,
-                        .neighbor_candidates_new = &self.neighbor_candidates_new,
-                        .neighbor_candidates_old = &self.neighbor_candidates_old,
-                        .node_id_start = node_id_start,
-                        .node_id_end = node_id_end,
+                        &self.neighbors_list,
+                        &self.neighbor_candidates_new,
+                        &self.neighbor_candidates_old,
+                        node_id_start,
+                        node_id_end,
                         // Different thread has different seed
-                        .seed = self.training_config.seed + @as(u64, @intCast(thread_id)),
+                        self.training_config.seed + @as(u64, @intCast(thread_id)),
                     },
                 );
             }
@@ -387,10 +405,10 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                     &self.wait_group,
                     markSampledToOldThread,
                     .{
-                        .neighbors_list = &self.neighbors_list,
-                        .neighbor_candidates_new = &self.neighbor_candidates_new,
-                        .node_id_start = node_id_start,
-                        .node_id_end = node_id_end,
+                        &self.neighbors_list,
+                        &self.neighbor_candidates_new,
+                        node_id_start,
+                        node_id_end,
                     },
                 );
             }
@@ -427,7 +445,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                     // Skip this neighbor slot if it's empty
                     if (entry_neighbor_id == CandidateHeapList.EMPTY_ID) continue;
                     // SAFETY: neighbor_id is not EMPTY_ID, so this cast is safe.
-                    const neighbor_id = @as(usize, entry_neighbor_id);
+                    const neighbor_id: usize = @intCast(entry_neighbor_id);
 
                     // Generate a random priority for this neighbor
                     // TODO: Consider if this sampling strategy is appropriate
@@ -444,8 +462,10 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                         _ = target_candidate_list.tryAddNeighbor(
                             node_id,
                             CandidateHeapList.Entry{
-                                .neighbor_id = neighbor_id,
+                                // SAFETY: node_id is in [0, num_nodes), which fits in isize.
+                                .neighbor_id = @intCast(node_id),
                                 .distance = priority,
+                                .is_new = {},
                             },
                         );
                     }
@@ -457,6 +477,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                                 // SAFETY: node_id is in [0, num_nodes), which fits in isize.
                                 .neighbor_id = @intCast(node_id),
                                 .distance = priority,
+                                .is_new = {},
                             },
                         );
                     }
@@ -532,13 +553,13 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                     &self.wait_group,
                     generateGraphUpdateProposalsThread,
                     .{
-                        .dataset = &self.dataset,
-                        .neighbors_list = &self.neighbors_list,
-                        .graph_updates_list = &self.graph_updates_lists[thread_id],
-                        .neighbor_candidates_new = &self.neighbor_candidates_new,
-                        .neighbor_candidates_old = &self.neighbor_candidates_old,
-                        .local_join_id_start = node_id_start,
-                        .local_join_id_end = node_id_end,
+                        &self.dataset,
+                        &self.neighbors_list,
+                        &self.graph_updates_lists[thread_id],
+                        &self.neighbor_candidates_new,
+                        &self.neighbor_candidates_old,
+                        node_id_start,
+                        node_id_end,
                     },
                 );
             }
@@ -568,15 +589,19 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
 
                 for (new_candidate_ids, 0..) |cand1_id, i| {
                     if (cand1_id == CandidateHeapList.EMPTY_ID) continue;
-                    const cand1_vector = dataset.getUnchecked(@as(usize, cand1_id));
+                    // SAFETY: cand1_id is not EMPTY_ID, so this cast is safe.
+                    const cand1_id_usize: usize = @intCast(cand1_id);
+                    const cand1_vector = dataset.getUnchecked(cand1_id_usize);
                     // Take current max distance in neighbor heap as threshold
-                    const cand1_distance_threshold: T = neighbors_list.getEntryFieldSlice(cand1_id, .distance)[0];
+                    const cand1_distance_threshold: T = neighbors_list.getEntryFieldSlice(cand1_id_usize, .distance)[0];
 
                     // New-New candidate pairs
                     for (new_candidate_ids[i + 1 ..]) |cand2_id| {
                         if (cand2_id == CandidateHeapList.EMPTY_ID) continue;
-                        const cand2_vector = dataset.getUnchecked(@as(usize, cand2_id));
-                        const cand2_distance_threshold: T = neighbors_list.getEntryFieldSlice(cand2_id, .distance)[0];
+                        // SAFETY: cand2_id is not EMPTY_ID, so this cast is safe.
+                        const cand2_id_usize: usize = @intCast(cand2_id);
+                        const cand2_vector = dataset.getUnchecked(cand2_id_usize);
+                        const cand2_distance_threshold: T = neighbors_list.getEntryFieldSlice(cand2_id_usize, .distance)[0];
 
                         const distance = cand1_vector.sqdist(cand2_vector);
 
@@ -584,8 +609,8 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                             // Found a closer neighbor (either to cand1 or cand2), add to graph updates
                             graph_updates_list.appendAssumeCapacity(.{
                                 .distance = distance,
-                                .node1_id = cand1_id,
-                                .node2_id = cand2_id,
+                                .node1_id = cand1_id_usize,
+                                .node2_id = cand2_id_usize,
                             });
                         }
                     }
@@ -593,9 +618,11 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                     // New-Old candidate pairs
                     for (old_candidate_ids) |cand2_id| {
                         if (cand2_id == CandidateHeapList.EMPTY_ID) continue;
-                        const cand2_vector = dataset.getUnchecked(@as(usize, cand2_id));
+                        // SAFETY: cand2_id is not EMPTY_ID, so this cast is safe.
+                        const cand2_id_usize: usize = @intCast(cand2_id);
+                        const cand2_vector = dataset.getUnchecked(cand2_id_usize);
                         // Take current max distance in neighbor heap as threshold
-                        const cand2_distance_threshold: []T = neighbors_list.getEntryFieldSlice(local_join_id, .distance)[0];
+                        const cand2_distance_threshold: T = neighbors_list.getEntryFieldSlice(local_join_id, .distance)[0];
 
                         const distance = cand1_vector.sqdist(cand2_vector);
 
@@ -603,8 +630,8 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                             // Found a closer neighbor (either to cand1 or cand2), add to graph updates
                             graph_updates_list.appendAssumeCapacity(.{
                                 .distance = distance,
-                                .node1_id = cand1_id,
-                                .node2_id = cand2_id,
+                                .node1_id = cand1_id_usize,
+                                .node2_id = cand2_id_usize,
                             });
                         }
                     }
@@ -643,11 +670,11 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                     &self.wait_group,
                     applyGraphUpdatesProposalsThread,
                     .{
-                        .neighbors_list = &self.neighbors_list,
-                        .graph_updates_list = &self.graph_updates_lists[thread_id],
-                        .graph_updates_count_ptr = &self.graph_update_counts_buffer[thread_id],
-                        .local_join_id_start = node_id_start,
-                        .local_join_id_end = node_id_end,
+                        &self.neighbors_list,
+                        &self.graph_updates_lists[thread_id],
+                        &self.graph_update_counts_buffer[thread_id],
+                        node_id_start,
+                        node_id_end,
                     },
                 );
             }

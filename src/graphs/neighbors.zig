@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = std.log.scoped(.neighbors);
 
 const types = @import("../types.zig");
 
@@ -54,7 +55,7 @@ pub fn NeighborHeapList(comptime T: type, comptime store_flags: bool) type {
         };
 
         /// Row-major storage of all heap entries.
-        /// Indexing: i * num_neighbors + j
+        /// Indexing: i * num_neighbors_per_node + j
         entries: std.MultiArrayList(Entry).Slice,
 
         /// Total number of points (number of heaps).
@@ -78,12 +79,13 @@ pub fn NeighborHeapList(comptime T: type, comptime store_flags: bool) type {
             // Should we also limit num_neighbors_per_node to be u32? Then total_size fits in u64, which is usize in 64-bit systems.
             // u32 limits us to ~ 4 billion nodes, which is probably fine for our needs.
             if (num_nodes > std.math.maxInt(isize)) return InitError.NumberOfNodesTooLarge;
-            const total_size, const overflow = @mulWithOverflow(num_nodes, num_neighbors_per_node);
+            const total_size: usize, const overflow: u1 = @mulWithOverflow(num_nodes, num_neighbors_per_node);
             if (overflow != 0) return InitError.NumberOfNeighborsTooLarge;
 
             // Allocate contiguous memory for all entries
             var entries = std.MultiArrayList(Entry).empty;
             try entries.setCapacity(allocator, total_size);
+            entries.len = total_size;
 
             const entries_slice = entries.slice();
             memsetBuffers(entries_slice);
@@ -162,33 +164,36 @@ pub fn NeighborHeapList(comptime T: type, comptime store_flags: bool) type {
             var entry_idx: usize = 0;
             while (true) {
                 const left_child_idx = 2 * entry_idx + 1;
-                const right_child_idx = 2 * entry_idx + 2;
+                const right_child_idx = left_child_idx + 1;
 
                 // Find the largest among entry and its children
-                var largest_idx = entry_idx;
+                const largest_child_idx = blk: {
+                    if (left_child_idx >= distance_heap.len) {
+                        // Left child out of bounds => entry does not have any children => stop
+                        break;
+                    }
 
-                if (left_child_idx < self.num_neighbors_per_node and
-                    distance_heap[left_child_idx] > distance_heap[largest_idx])
-                {
-                    largest_idx = left_child_idx;
-                }
+                    // Determine which child to compare against (the larger one)
+                    var larger_child_idx = left_child_idx;
+                    if (right_child_idx < distance_heap.len and
+                        distance_heap[right_child_idx] > distance_heap[left_child_idx])
+                    {
+                        // Only use the right child when it is in bounds and larger than left child
+                        larger_child_idx = right_child_idx;
+                    }
 
-                if (right_child_idx < self.num_neighbors_per_node and
-                    distance_heap[right_child_idx] > distance_heap[largest_idx])
-                {
-                    largest_idx = right_child_idx;
-                }
+                    // Now compare the larger child with new entry
+                    if (distance_heap[larger_child_idx] > new_entry.distance) {
+                        break :blk larger_child_idx;
+                    } else {
+                        break; // New entry is in correct position => stop
+                    }
+                };
 
-                // If entry is largest, heap property is satisfied
-                if (largest_idx == entry_idx) break;
-
-                // Set entry to largest child
-                self.entries.set(
-                    heap_start + entry_idx,
-                    self.entries.get(heap_start + largest_idx),
-                );
-
-                entry_idx = largest_idx;
+                // Bring largest child value to current entry index
+                self.entries.set(heap_start + entry_idx, self.entries.get(heap_start + largest_child_idx));
+                // Entry is now at largest child index
+                entry_idx = largest_child_idx;
             }
 
             // Place the new entry at the final position
@@ -229,4 +234,107 @@ pub fn NeighborHeapList(comptime T: type, comptime store_flags: bool) type {
             return self.entries.items(field)[start .. start + self.num_neighbors_per_node];
         }
     };
+}
+
+test "NeighborHeapList.init - init default entry values" {
+    const HeapList = NeighborHeapList(i32, true);
+    var buffer: [1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buffer);
+    const allocator = fba.allocator();
+    var heap_list = try HeapList.init(
+        8,
+        4,
+        allocator,
+    );
+    defer heap_list.deinit(allocator);
+
+    for (0..heap_list.num_nodes) |node_id| {
+        for (0..heap_list.num_neighbors_per_node) |neighbor_idx| {
+            const entry = heap_list.entries.get(node_id * heap_list.num_neighbors_per_node + neighbor_idx);
+            try std.testing.expectEqual(entry.is_new, true);
+            try std.testing.expectEqual(entry.neighbor_id, -1);
+            try std.testing.expectEqual(entry.distance, std.math.maxInt(i32));
+        }
+    }
+}
+
+test "NeighborHeapList.tryAddNeighbor - heap invariant maintained with added neighbors" {
+    const HeapList = NeighborHeapList(i32, false);
+    var buffer: [1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buffer);
+    const allocator = fba.allocator();
+    var heap_list = try HeapList.init(
+        8,
+        4,
+        allocator,
+    );
+    defer heap_list.deinit(allocator);
+
+    const i32_max = std.math.maxInt(i32);
+
+    const added1 = heap_list.tryAddNeighbor(1, .{ .neighbor_id = 0, .distance = 4, .is_new = {} });
+    try std.testing.expect(added1);
+    try std.testing.expectEqualSlices(
+        i32,
+        &[_]i32{ i32_max, i32_max, i32_max, 4 },
+        heap_list.getEntryFieldSlice(1, .distance),
+    );
+
+    const added2 = heap_list.tryAddNeighbor(1, .{ .neighbor_id = 1, .distance = 3, .is_new = {} });
+    try std.testing.expect(added2);
+    try std.testing.expectEqualSlices(
+        i32,
+        &[_]i32{ i32_max, 4, i32_max, 3 },
+        heap_list.getEntryFieldSlice(1, .distance),
+    );
+
+    const added3 = heap_list.tryAddNeighbor(1, .{ .neighbor_id = 2, .distance = 2, .is_new = {} });
+    try std.testing.expect(added3);
+    try std.testing.expectEqualSlices(
+        i32,
+        &[_]i32{ i32_max, 4, 2, 3 },
+        heap_list.getEntryFieldSlice(1, .distance),
+    );
+
+    const added4 = heap_list.tryAddNeighbor(1, .{ .neighbor_id = 3, .distance = 1, .is_new = {} });
+    try std.testing.expect(added4);
+    try std.testing.expectEqualSlices(
+        i32,
+        &[_]i32{ 4, 3, 2, 1 },
+        heap_list.getEntryFieldSlice(1, .distance),
+    );
+}
+
+test "NeighborHeapList.tryAddNeighbor - reject bad candidate neighbors" {
+    const HeapList = NeighborHeapList(i32, false);
+    var buffer: [1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buffer);
+    const allocator = fba.allocator();
+    var heap_list = try HeapList.init(
+        8,
+        4,
+        allocator,
+    );
+    defer heap_list.deinit(allocator);
+
+    // Fill valid neighbors first
+    _ = heap_list.tryAddNeighbor(1, .{ .neighbor_id = 0, .distance = 4, .is_new = {} });
+    _ = heap_list.tryAddNeighbor(1, .{ .neighbor_id = 1, .distance = 3, .is_new = {} });
+    _ = heap_list.tryAddNeighbor(1, .{ .neighbor_id = 2, .distance = 2, .is_new = {} });
+    _ = heap_list.tryAddNeighbor(1, .{ .neighbor_id = 3, .distance = 1, .is_new = {} });
+    try std.testing.expectEqualSlices(
+        i32,
+        &[_]i32{ 4, 3, 2, 1 },
+        heap_list.getEntryFieldSlice(1, .distance),
+    );
+
+    // Should reject bad neighbors
+
+    // 1. Duplicate neighbor
+    const added1 = heap_list.tryAddNeighbor(1, .{ .neighbor_id = 1, .distance = 3, .is_new = {} });
+    try std.testing.expect(!added1);
+
+    // 2. Neighbor whose distance is larger than node's max neighbor distance
+    const added2 = heap_list.tryAddNeighbor(1, .{ .neighbor_id = 4, .distance = 5, .is_new = {} });
+    try std.testing.expect(!added2);
 }
