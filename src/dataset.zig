@@ -31,7 +31,7 @@ pub fn Dataset(comptime T: type, comptime N: usize) type {
 
         /// Load a dataset of fixed-size vectors from a .npy file reader.
         /// The .npy file must contain a 2D array where one dimension is of size N.
-        pub fn fromNpyFileReader(reader: *std.io.Reader, allocator: std.mem.Allocator) (FromFileReaderError || error.InvalidShape)!Self {
+        pub fn fromNpyFileReader(reader: *std.io.Reader, allocator: std.mem.Allocator) (FromFileReaderError || error{InvalidShape})!Self {
             const array = try znpy.array.static.StaticArray(T, 2).fromFileAllocAligned(
                 reader,
                 std.mem.Alignment.@"64",
@@ -71,7 +71,7 @@ pub fn Dataset(comptime T: type, comptime N: usize) type {
         /// - The array is 2-dimensional.
         /// - For C-order arrays, the second dimension is N.
         /// - For F-order arrays, the first dimension is N.
-        fn verifyShape(shape: znpy.array.static.Shape(2)) error.InvalidShape!usize {
+        fn verifyShape(shape: znpy.shape.StaticShape(2)) error{InvalidShape}!usize {
             switch (shape.order) {
                 .C => {
                     if (shape.dims[1] != N) {
@@ -89,7 +89,7 @@ pub fn Dataset(comptime T: type, comptime N: usize) type {
         }
 
         /// Deinitialize the dataset and free its data buffer.
-        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        pub fn deinit(self: Self, allocator: std.mem.Allocator) void {
             allocator.free(self.data_buffer);
         }
 
@@ -111,7 +111,16 @@ pub fn Dataset(comptime T: type, comptime N: usize) type {
             std.debug.assert(index < self.len);
             // We return the address of the data already living in the data buffer.
             // No new struct is created; no data is moved.
-            return @ptrCast(&self.data_buffer[index * N]);
+            // NOTE: This cast works because:
+            // 1. for @alignCast: The base buffer is 64-byte aligned and each vector has a stride
+            // of either 128, 256, or 512 (a multiple of 64). Thus the address at self.data_buffer[index * N]
+            // has alignment of 64.
+            // 2. for @ptrCast: Zig guarantees that the address of a struct is the same as the address of its
+            // first field. Since 'Vec' is a single-field struct containing '[N]T', its
+            // in-memory representation is identical to the raw array. Therefore, casting the
+            // address of the first element of an N-sized block to a '*Vec' is a valid,
+            // zero-cost reinterpretation of the same memory.
+            return @ptrCast(@alignCast(&self.data_buffer[index * N]));
         }
     };
 }

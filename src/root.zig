@@ -1,9 +1,9 @@
 //! root source file of the zagra module
 const std = @import("std");
 
-const vector = @import("vector.zig");
-const dataset = @import("dataset.zig");
-const types = @import("types.zig");
+pub const vector = @import("vector.zig");
+pub const dataset = @import("dataset.zig");
+pub const types = @import("types.zig");
 
 pub const Vector = vector.Vector;
 

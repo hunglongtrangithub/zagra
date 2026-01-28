@@ -29,6 +29,8 @@ pub const ElemType = enum {
     }
 };
 
+/// A enum of supported vector lengths (number of elements in a vector).
+/// Should be divisible by 64 for efficient SIMD vector distance calculation.
 pub const DimType = enum {
     D128,
     D256,

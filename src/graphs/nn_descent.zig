@@ -296,6 +296,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             seed: u64,
         ) void {
             const num_nodes = neighbors_list.num_nodes;
+            std.debug.assert(dataset.len == num_nodes);
             std.debug.assert(node_id_start < node_id_end and node_id_end <= num_nodes);
 
             var prng = std.Random.DefaultPrng.init(seed);

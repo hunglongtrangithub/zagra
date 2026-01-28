@@ -74,6 +74,9 @@ pub fn NeighborHeapList(comptime T: type, comptime store_flags: bool) type {
             num_neighbors_per_node: usize,
             allocator: std.mem.Allocator,
         ) (InitError || std.mem.Allocator.Error)!Self {
+            // TODO: Should we make num_nodes u32, and limit num_nodes to be less than maxInt(i32)? Then node IDs can be 32 bits, with -1 as empty.
+            // Should we also limit num_neighbors_per_node to be u32? Then total_size fits in u64, which is usize in 64-bit systems.
+            // u32 limits us to ~ 4 billion nodes, which is probably fine for our needs.
             if (num_nodes > std.math.maxInt(isize)) return InitError.NumberOfNodesTooLarge;
             const total_size, const overflow = @mulWithOverflow(num_nodes, num_neighbors_per_node);
             if (overflow != 0) return InitError.NumberOfNeighborsTooLarge;
