@@ -27,7 +27,7 @@ pub fn build(b: *std.Build) void {
         const bench_exe = b.addExecutable(.{
             .name = bench_name,
             .root_module = b.createModule(.{
-                .root_source_file = b.path("bench/" ++ bench_name ++ ".zig"),
+                .root_source_file = b.path("benches/" ++ bench_name ++ ".zig"),
                 .target = target,
                 // Always compile to ReleaseFast
                 .optimize = std.builtin.OptimizeMode.ReleaseFast,
