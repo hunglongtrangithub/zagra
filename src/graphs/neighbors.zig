@@ -206,22 +206,6 @@ pub fn NeighborHeapList(comptime T: type, comptime store_flags: bool) type {
             return node_id * self.num_neighbors_per_node + neighbor_idx;
         }
 
-        /// Retrieves a mutable pointer to the specified field of the neighbor entry
-        /// for the given node and neighbor index.
-        /// SAFETY:
-        /// - The returned pointer is only valid as long as the underlying data exists
-        /// - Do not store the pointer beyond the data's lifetime
-        pub fn getEntryFieldPtr(
-            self: *Self,
-            node_id: usize,
-            neighbor_idx: usize,
-            comptime field: std.meta.FieldEnum(Entry),
-        ) *std.meta.fieldInfo(Entry, field).type {
-            const index = self.getEntryIndex(node_id, neighbor_idx);
-            // items(field) returns the specific array buffer for that field
-            return &self.entries.items(field)[index];
-        }
-
         /// Retrieves a slice of the specified field for all neighbor entries of the given node.
         // TODO: Should this be inlined?
         pub inline fn getEntryFieldSlice(

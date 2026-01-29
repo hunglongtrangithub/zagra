@@ -424,7 +424,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
         /// Goes through all edges in `neighbors_list`, and only tries to add neighbors to a node whose node ID
         /// is in the range `[node_id_start, node_id_end)` to the candidate lists.
         fn sampleNeighborCandidatesThread(
-            neighbors_list: *NeighborHeapList,
+            neighbors_list: *const NeighborHeapList,
             neighbor_candidates_new: *CandidateHeapList,
             neighbor_candidates_old: *CandidateHeapList,
             node_id_start: usize,
@@ -493,7 +493,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
         /// Only processes nodes whose IDs are in the range `[node_id_start, node_id_end)`.
         fn markSampledToOldThread(
             neighbors_list: *NeighborHeapList,
-            neighbor_candidates_new: *CandidateHeapList,
+            neighbor_candidates_new: *const CandidateHeapList,
             node_id_start: usize,
             node_id_end: usize,
         ) void {
@@ -501,41 +501,32 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             std.debug.assert(node_id_start <= node_id_end and node_id_end <= neighbors_list.num_nodes);
 
             for (node_id_start..node_id_end) |node_id| {
-                // Get the slice of neighbor IDs in the new candidate list for this node
-                const neighbor_candidate_ids: []isize = neighbor_candidates_new.getEntryFieldSlice(
-                    node_id,
-                    .neighbor_id,
-                );
+                const neighbor_id_slice: []isize = neighbors_list.getEntryFieldSlice(node_id, .neighbor_id);
+                const is_new_slice: []bool = neighbors_list.getEntryFieldSlice(node_id, .is_new);
+                const neighbor_candidate_id_slice: []isize = neighbor_candidates_new.getEntryFieldSlice(node_id, .neighbor_id);
+
                 for (0..neighbors_list.num_neighbors_per_node) |neighbor_idx| {
-                    const neighbor_id: isize = neighbors_list.getEntryFieldPtr(
-                        node_id,
-                        neighbor_idx,
-                        .neighbor_id,
-                    ).*;
+                    const neighbor_id = neighbor_id_slice[neighbor_idx];
 
                     // Check if the neighbor ID is valid
                     if (neighbor_id == NeighborHeapList.EMPTY_ID) continue;
 
                     if (std.mem.indexOfScalar(
                         isize,
-                        neighbor_candidate_ids,
+                        neighbor_candidate_id_slice,
                         neighbor_id,
                     ) != null) {
                         // Mark as not new anymore
-                        neighbors_list.getEntryFieldPtr(
-                            node_id,
-                            neighbor_idx,
-                            .is_new,
-                        ).* = false;
+                        is_new_slice[neighbor_idx] = false;
                     }
                 }
             }
         }
 
         fn generateGraphUpdateProposals(self: *Self) void {
-            if (self.thread_pool) |pool| {
-                std.debug.assert(self.graph_updates_lists.len == self.training_config.num_threads);
+            std.debug.assert(self.graph_updates_lists.len == self.training_config.num_threads);
 
+            if (self.thread_pool) |pool| {
                 self.wait_group.reset();
                 for (0..self.training_config.num_threads) |thread_id| {
                     const node_id_start = thread_id * self.num_nodes_per_thread;
