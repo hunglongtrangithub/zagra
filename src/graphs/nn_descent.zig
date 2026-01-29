@@ -29,6 +29,7 @@ pub const TrainingConfig = struct {
     delta: f32 = 0.001,
 
     /// The number of parallel threads to use. Default is the number or cores.
+    /// > 1 means multi-threading, otherwise single-threading.
     num_threads: usize = 1,
 
     /// Random seed for any randomized components of the algorithm.
@@ -45,7 +46,7 @@ pub const TrainingConfig = struct {
     ) Self {
         const config = Self{
             .num_neighbors_per_node = num_neighbors_per_node,
-            .max_iterations = @max(5, @as(usize, @intFromFloat(@log2(@as(f64, @floatFromInt(num_vectors)))))),
+            .max_iterations = if (num_vectors > 0) @max(5, @as(usize, @intFromFloat(@log2(@as(f64, @floatFromInt(num_vectors)))))) else 0,
             .max_candidates = @min(60, num_neighbors_per_node),
             .num_threads = if (num_threads) |n| n else std.Thread.getCpuCount() catch 1,
             .seed = if (seed) |s| s else std.crypto.random.int(u64),
@@ -93,6 +94,10 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
         thread_pool: ?*std.Thread.Pool,
         /// Wait group for synchronizing threads.
         wait_group: std.Thread.WaitGroup,
+        /// Number of nodes each thread is responsible for during parallel computations.
+        /// Last batch of nodes is less than or equal to this value.
+        /// Is 0 when either number of dataset is empty or number of threads is 0.
+        num_nodes_per_thread: usize,
 
         /// Holds EntryWithFlag entries.
         const NeighborHeapList = mod_neighbors.NeighborHeapList(T, true);
@@ -151,7 +156,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             // is no more than i32 max, the cast is safe, and the calculations here won't overflow u64.
             const n_new = @as(u64, neighbor_candidates_new.num_neighbors_per_node);
             const n_old = @as(u64, neighbor_candidates_old.num_neighbors_per_node);
-            const capacity_per_node_u64: u64 = (n_new * (n_new - 1)) / 2 + (n_new * n_old);
+            const capacity_per_node_u64: u64 = (n_new * n_new - n_new) / 2 + (n_new * n_old);
             const capacity_per_node = std.math.cast(usize, capacity_per_node_u64) orelse
                 return InitError.MaxCandidatesTooLarge;
 
@@ -164,8 +169,13 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             );
             errdefer allocator.free(graph_updates_buffer);
 
+            const num_nodes_per_thread = std.math.divCeil(
+                usize,
+                neighbors_list.num_nodes,
+                training_config.num_threads,
+            ) catch 0;
+
             // Each thread takes an exclusive batch of nodes which corresponds to an exclusive slice in graph_updates_buffer
-            const num_nodes_per_thread = (neighbors_list.num_nodes + training_config.num_threads - 1) / training_config.num_threads;
             for (graph_updates_lists, 0..) |*list, i| {
                 const node_id_start = i * num_nodes_per_thread;
                 const node_is_end = @min(node_id_start + num_nodes_per_thread, graph_updates_buffer.len);
@@ -204,6 +214,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 .graph_updates_lists = graph_updates_lists,
                 .thread_pool = thread_pool,
                 .wait_group = wait_group,
+                .num_nodes_per_thread = num_nodes_per_thread,
             };
         }
 
@@ -266,14 +277,10 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
         /// Use multi-threading if configured.
         fn populateRandomNeighbors(self: *Self) void {
             if (self.thread_pool) |pool| {
-                const num_threads = self.training_config.num_threads;
-
-                const num_nodes = self.neighbors_list.num_nodes;
-                const batch_size = (num_nodes + num_threads - 1) / num_threads;
-
-                for (0..num_threads) |thread_id| {
-                    const node_id_start = thread_id * batch_size;
-                    const node_id_end = @min(node_id_start + batch_size, num_nodes);
+                self.wait_group.reset();
+                for (0..self.training_config.num_threads) |thread_id| {
+                    const node_id_start = thread_id * self.num_nodes_per_thread;
+                    const node_id_end = @min(node_id_start + self.num_nodes_per_thread, self.neighbors_list.num_nodes);
 
                     // SAFETY: Each thread populate neighbors on non-overlapping range of nodes,
                     // so the neighbor heaps are separate in memory, and thus no data races.
@@ -313,7 +320,8 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
         ) void {
             const num_nodes = neighbors_list.num_nodes;
             std.debug.assert(dataset.len == num_nodes);
-            std.debug.assert(node_id_start < node_id_end and node_id_end <= num_nodes);
+            // NOTE: When node_id_start == node_id_end, the loop beblow never executes
+            std.debug.assert(node_id_start <= node_id_end and node_id_end <= num_nodes);
 
             log.debug("node_id_start: {}, node_id_end: {}", .{ node_id_start, node_id_end });
             var prng = std.Random.DefaultPrng.init(seed);
@@ -348,15 +356,10 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             std.debug.assert(self.neighbor_candidates_new.num_nodes == self.neighbors_list.num_nodes);
 
             if (self.thread_pool) |pool| {
-                const num_threads = self.training_config.num_threads;
-
-                const num_nodes = self.neighbors_list.num_nodes;
-                const batch_size = (num_nodes + num_threads - 1) / num_threads;
-
                 self.wait_group.reset();
-                for (0..num_threads) |thread_id| {
-                    const node_id_start = thread_id * batch_size;
-                    const node_id_end = @min(node_id_start + batch_size, num_nodes);
+                for (0..self.training_config.num_threads) |thread_id| {
+                    const node_id_start = thread_id * self.num_nodes_per_thread;
+                    const node_id_end = @min(node_id_start + self.num_nodes_per_thread, self.neighbors_list.num_nodes);
 
                     // SAFETY: Each thread only touches on heaps of nodes whose IDs are
                     // in the range [node_id_start, node_id_end), so no data races.
@@ -379,9 +382,9 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
 
                 self.wait_group.reset();
                 // Mark sampled nodes in neighbors_list as not new anymore
-                for (0..num_threads) |thread_id| {
-                    const node_id_start = thread_id * batch_size;
-                    const node_id_end = @min(node_id_start + batch_size, num_nodes);
+                for (0..self.training_config.num_threads) |thread_id| {
+                    const node_id_start = thread_id * self.num_nodes_per_thread;
+                    const node_id_end = @min(node_id_start + self.num_nodes_per_thread, self.neighbors_list.num_nodes);
 
                     // SAFETY: Each thread only touches on heaps of nodes whose IDs are
                     // in the range [node_id_start, node_id_end), so no data races.
@@ -428,7 +431,8 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             node_id_end: usize,
             seed: u64,
         ) void {
-            std.debug.assert(node_id_start < node_id_end and node_id_end <= neighbors_list.num_nodes);
+            // NOTE: When node_id_start == node_id_end, nothing gets added to the candidate lists
+            std.debug.assert(node_id_start <= node_id_end and node_id_end <= neighbors_list.num_nodes);
 
             // Initialize PRNG with thread-specific seed
             var prng = std.Random.DefaultPrng.init(seed);
@@ -494,7 +498,8 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             node_id_start: usize,
             node_id_end: usize,
         ) void {
-            std.debug.assert(node_id_start < node_id_end and node_id_end <= neighbors_list.num_nodes);
+            // NOTE: When node_id_start == node_id_end, the loop below never executes
+            std.debug.assert(node_id_start <= node_id_end and node_id_end <= neighbors_list.num_nodes);
 
             for (node_id_start..node_id_end) |node_id| {
                 // Get the slice of neighbor IDs in the new candidate list for this node
@@ -530,15 +535,12 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
 
         fn generateGraphUpdateProposals(self: *Self) void {
             if (self.thread_pool) |pool| {
-                const num_threads = self.training_config.num_threads;
-
-                const num_nodes = self.neighbors_list.num_nodes;
-                const batch_size = (num_nodes + num_threads - 1) / num_threads;
+                std.debug.assert(self.graph_updates_lists.len == self.training_config.num_threads);
 
                 self.wait_group.reset();
-                for (0..num_threads) |thread_id| {
-                    const node_id_start = thread_id * batch_size;
-                    const node_id_end = @min(node_id_start + batch_size, num_nodes);
+                for (0..self.training_config.num_threads) |thread_id| {
+                    const node_id_start = thread_id * self.num_nodes_per_thread;
+                    const node_id_end = @min(node_id_start + self.num_nodes_per_thread, self.neighbors_list.num_nodes);
                     pool.spawnWg(
                         &self.wait_group,
                         generateGraphUpdateProposalsThread,
@@ -580,7 +582,8 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             local_join_id_start: usize,
             local_join_id_end: usize,
         ) void {
-            std.debug.assert(local_join_id_start < local_join_id_end and local_join_id_end <= neighbors_list.num_nodes);
+            // NOTE: When local_join_id_start == local_join_id_end, the loop below never executes
+            std.debug.assert(local_join_id_start <= local_join_id_end and local_join_id_end <= neighbors_list.num_nodes);
             std.debug.assert(neighbors_list.num_nodes == dataset.len);
 
             // Go through all local joins in the given range
@@ -647,14 +650,13 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
         /// Return the total number of successful updates applied.
         fn applyGraphUpdatesProposals(self: *Self) usize {
             if (self.thread_pool) |pool| {
-                const num_threads = self.training_config.num_threads;
-                const num_nodes = self.neighbors_list.num_nodes;
-                const batch_size = (num_nodes + num_threads - 1) / num_threads;
+                std.debug.assert(self.graph_update_counts_buffer.len == self.training_config.num_threads);
+                std.debug.assert(self.graph_updates_lists.len == self.training_config.num_threads);
 
                 self.wait_group.reset();
-                for (0..num_threads) |thread_id| {
-                    const node_id_start = thread_id * batch_size;
-                    const node_id_end = @min(node_id_start + batch_size, num_nodes);
+                for (0..self.training_config.num_threads) |thread_id| {
+                    const node_id_start = thread_id * self.num_nodes_per_thread;
+                    const node_id_end = @min(node_id_start + self.num_nodes_per_thread, self.neighbors_list.num_nodes);
                     // SAFETY: Each thread only touches on heaps of nodes whose IDs are
                     // in the range [node_id_start, node_id_end), so no data races.
                     pool.spawnWg(
@@ -695,7 +697,8 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             node_id_start: usize,
             node_id_end: usize,
         ) void {
-            std.debug.assert(node_id_start < node_id_end and node_id_end <= neighbors_list.num_nodes);
+            // NOTE: When node_id_start == node_id_end, nothing gets added to the candidate lists
+            std.debug.assert(node_id_start <= node_id_end and node_id_end <= neighbors_list.num_nodes);
 
             var updates_count: usize = 0;
 
@@ -773,4 +776,35 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             return @reduce(.Add, acc) + tail_acc;
         }
     };
+}
+
+test "NNDescent - empty dataset and zero threads" {
+    // Create an empty dataset
+    const Dataset = mod_dataset.Dataset(f32, 128);
+    const dummy_buffer: [0]f32 align(64) = undefined;
+    const dataset = Dataset{
+        .data_buffer = dummy_buffer[0..0],
+        .len = 0,
+    };
+
+    // Create training config with zero threads
+    const config = TrainingConfig.init(
+        5,
+        dataset.len,
+        0,
+        42,
+    );
+
+    // Initialize NNDescent - should not panic
+    var nn_descent = try NNDescent(f32, 128).init(
+        dataset,
+        config,
+        std.testing.allocator,
+    );
+
+    // Train - should not panic on empty dataset
+    nn_descent.train();
+
+    // Deinitialize - should not panic
+    nn_descent.deinit(std.testing.allocator);
 }

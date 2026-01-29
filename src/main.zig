@@ -43,7 +43,7 @@ pub fn main() !void {
 
     // Dataset configuration constants
     const vector_length: usize = 128;
-    const vector_count: usize = 1000000;
+    const vector_count: usize = 1_000_000;
     const npy_file_name = "dataset.npy";
     const element_type = f32;
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
