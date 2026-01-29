@@ -43,12 +43,14 @@ pub fn main() !void {
 
     // Dataset configuration constants
     const vector_length: usize = 128;
-    const vector_count: usize = 1_000_000;
+    const vector_count: usize = 10_000_000;
     const npy_file_name = "dataset.npy";
     const element_type = f32;
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
     const allocator = gpa.allocator();
 
+    try stdout.print("Saving dataset with {} {}-D vectors to {s}\n", .{ vector_count, vector_length, npy_file_name });
+    try stdout.flush();
     try saveDataset(
         element_type,
         vector_length,
@@ -99,7 +101,16 @@ pub fn main() !void {
     };
     defer nn_descent.deinit(allocator);
 
+    try stdout.print("Start timing NN-Descent training...\n", .{});
+    try stdout.flush();
+
+    var timer = try std.time.Timer.start();
     nn_descent.train();
+    const elapsed_time_ns = timer.read();
+    const elapsed_time_s: f64 = @as(f64, @floatFromInt(elapsed_time_ns)) / @as(f64, @floatFromInt(1_000_000_000));
+
+    try stdout.print("Training for {} vectors took: {}s\n", .{ dataset.len, elapsed_time_s });
+    try stdout.flush();
 
     // const neighbors_list = nn_descent.neighbors_list;
     //
@@ -109,5 +120,4 @@ pub fn main() !void {
     // for (0..neighbors_list.entries.len) |i| {
     //     try stdout.print("neighbors_list entry at index {}: {any}\n", .{ i, neighbors_list.entries.get(i) });
     // }
-    // try stdout.flush();
 }
