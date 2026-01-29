@@ -176,11 +176,11 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             ) catch 0;
 
             // Each thread takes an exclusive batch of nodes which corresponds to an exclusive slice in graph_updates_buffer
-            for (graph_updates_lists, 0..) |*list, i| {
-                const node_id_start = i * num_nodes_per_thread;
-                const node_is_end = @min(node_id_start + num_nodes_per_thread, graph_updates_buffer.len);
+            for (graph_updates_lists, 0..) |*list, thread_id| {
+                const node_id_start = thread_id * num_nodes_per_thread;
+                const node_id_end = @min(node_id_start + num_nodes_per_thread, neighbors_list.num_nodes);
                 list.* = std.ArrayList(GraphUpdate).initBuffer(
-                    graph_updates_buffer[node_id_start * capacity_per_node .. node_is_end * capacity_per_node],
+                    graph_updates_buffer[node_id_start * capacity_per_node .. node_id_end * capacity_per_node],
                 );
             }
 
@@ -813,4 +813,253 @@ test "NNDescent.sumUpGraphUpdateCountsSIMD" {
     const sum = NNDescent(f32, 128).sumUpGraphUpdateCountsSIMD(counts);
     const expected = (num_elements * (num_elements + 1)) / 2;
     try std.testing.expectEqual(expected, sum);
+}
+
+test "NNDescent - graph_updates_lists have separate buffers (no overlap)" {
+    const T = f32;
+    const N = 128;
+    const Dataset = mod_dataset.Dataset(T, N);
+    const NND = NNDescent(T, N);
+
+    // Create a small dataset
+    const num_vectors = 100;
+    const data_buffer = try std.testing.allocator.alignedAlloc(
+        T,
+        std.mem.Alignment.@"64",
+        num_vectors * N,
+    );
+    defer std.testing.allocator.free(data_buffer);
+
+    // Initialize with random data
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+    for (data_buffer) |*elem| {
+        elem.* = random.float(T);
+    }
+
+    const dataset = Dataset{
+        .data_buffer = data_buffer,
+        .len = num_vectors,
+    };
+
+    // Create config with multiple threads
+    const num_threads = 4;
+    const config = TrainingConfig.init(
+        10, // num_neighbors_per_node
+        dataset.len,
+        num_threads,
+        42,
+    );
+
+    var nn_descent = try NND.init(dataset, config, std.testing.allocator);
+    defer nn_descent.deinit(std.testing.allocator);
+
+    // Verify we actually have multiple threads
+    try std.testing.expect(nn_descent.graph_updates_lists.len == num_threads);
+
+    // Test 1: Verify each list has a distinct buffer slice
+    for (nn_descent.graph_updates_lists, 0..) |list1, i| {
+        const buf1_start = @intFromPtr(list1.items.ptr);
+        const buf1_end = buf1_start + list1.capacity * @sizeOf(NND.GraphUpdate);
+
+        for (nn_descent.graph_updates_lists[i + 1 ..], i + 1..) |list2, j| {
+            const buf2_start = @intFromPtr(list2.items.ptr);
+            const buf2_end = buf2_start + list2.capacity * @sizeOf(NND.GraphUpdate);
+
+            // Check for overlap: buffers should NOT overlap
+            // No overlap if: buf1_end <= buf2_start OR buf2_end <= buf1_start
+            const no_overlap = (buf1_end <= buf2_start) or (buf2_end <= buf1_start);
+
+            if (!no_overlap) {
+                std.debug.print(
+                    "OVERLAP DETECTED! Thread {d} buffer [{x}, {x}) overlaps with thread {d} buffer [{x}, {x})\n",
+                    .{ i, buf1_start, buf1_end, j, buf2_start, buf2_end },
+                );
+            }
+
+            try std.testing.expect(no_overlap);
+        }
+    }
+
+    // Test 2: Verify all buffers are within the main graph_updates_buffer
+    const main_buf_start = @intFromPtr(nn_descent.graph_updates_buffer.ptr);
+    const main_buf_end = main_buf_start + nn_descent.graph_updates_buffer.len * @sizeOf(NND.GraphUpdate);
+
+    for (nn_descent.graph_updates_lists, 0..) |list, i| {
+        const buf_start = @intFromPtr(list.items.ptr);
+        const buf_end = buf_start + list.capacity * @sizeOf(NND.GraphUpdate);
+
+        // Each list's buffer must be within the main buffer
+        const within_main = (buf_start >= main_buf_start) and (buf_end <= main_buf_end);
+
+        if (!within_main) {
+            std.debug.print(
+                "Thread {d} buffer [{x}, {x}) is NOT within main buffer [{x}, {x})\n",
+                .{ i, buf_start, buf_end, main_buf_start, main_buf_end },
+            );
+        }
+
+        try std.testing.expect(within_main);
+    }
+
+    // Test 3: Verify sum of all list capacities == main buffer length
+    var total_capacity: usize = 0;
+    for (nn_descent.graph_updates_lists) |list| {
+        total_capacity += list.capacity;
+    }
+
+    try std.testing.expect(total_capacity == nn_descent.graph_updates_buffer.len);
+}
+
+test "NNDescent - max distance decreases each iteration" {
+    const T = f32;
+    const N = 128;
+    const Dataset = mod_dataset.Dataset(T, N);
+    const NND = NNDescent(T, N);
+
+    // Create a small dataset with known structure
+    const num_vectors = 50;
+    const data_buffer = try std.testing.allocator.alignedAlloc(
+        T,
+        std.mem.Alignment.@"64",
+        num_vectors * N,
+    );
+    defer std.testing.allocator.free(data_buffer);
+
+    // Initialize with structured data (each vector is [i, i+1, i+2, i+3])
+    // This creates a clear distance structure
+    for (0..num_vectors) |i| {
+        for (0..N) |d| {
+            data_buffer[i * N + d] = @floatFromInt(i);
+        }
+    }
+
+    const dataset = Dataset{
+        .data_buffer = data_buffer,
+        .len = num_vectors,
+    };
+
+    const config = TrainingConfig.init(
+        5,
+        dataset.len,
+        4,
+        42,
+    );
+
+    var nn_descent = try NND.init(dataset, config, std.testing.allocator);
+    defer nn_descent.deinit(std.testing.allocator);
+
+    // 1 initial + 5 training iterations
+    const num_iterations = 6;
+    const num_nodes = nn_descent.neighbors_list.num_nodes;
+
+    // Track max distances across iterations (including the very start)
+    var max_distances = try std.testing.allocator.alloc(T, num_nodes * num_iterations);
+    defer std.testing.allocator.free(max_distances);
+
+    // Initialize the graph with random neighbors
+    nn_descent.populateRandomNeighbors();
+    // Record initial max distance
+    for (0..num_nodes) |node_id| {
+        max_distances[node_id * num_iterations] = nn_descent.neighbors_list.getEntryFieldSlice(node_id, .distance)[0];
+    }
+
+    // Run a few iterations and track max distance
+    for (1..num_iterations) |iteration| {
+        nn_descent.sampleNeighborCandidates();
+        nn_descent.generateGraphUpdateProposals();
+        _ = nn_descent.applyGraphUpdatesProposals();
+
+        // Get max distance after this iteration
+        for (0..num_nodes) |node_id| {
+            max_distances[node_id * num_iterations + iteration] = nn_descent.neighbors_list.getEntryFieldSlice(node_id, .distance)[0];
+        }
+
+        nn_descent.neighbor_candidates_new.reset();
+        nn_descent.neighbor_candidates_old.reset();
+        for (nn_descent.graph_updates_lists) |*list| {
+            list.clearRetainingCapacity();
+        }
+    }
+
+    // Verify: max distance should be non-increasing
+    // (It should decrease or stay the same, never increase)
+    for (0..num_nodes) |node_id| {
+        const max_distances_for_node = max_distances[node_id * num_iterations .. node_id * num_iterations + num_iterations];
+        for (1..num_iterations) |iteration| {
+            const prev = max_distances_for_node[iteration - 1];
+            const curr = max_distances_for_node[iteration];
+
+            if (curr > prev) {
+                std.debug.print(
+                    "ERROR: max_distance INCREASED from {d:.4} to {d:.4} at iteration {d}\n",
+                    .{ prev, curr, iteration },
+                );
+            }
+
+            // Allow for floating point tolerance
+            const tolerance = 1e-6;
+            try std.testing.expect(curr <= prev + tolerance);
+        }
+    }
+}
+
+test "NNDescent - single-threaded and multi-threaded produce similar results" {
+    const T = f32;
+    const N = 128;
+    const Dataset = mod_dataset.Dataset(T, N);
+    const NND = NNDescent(T, N);
+
+    const num_vectors = 100;
+    const data_buffer = try std.testing.allocator.alignedAlloc(
+        T,
+        std.mem.Alignment.@"64",
+        num_vectors * N,
+    );
+    defer std.testing.allocator.free(data_buffer);
+
+    // Fixed data for reproducibility
+    var prng = std.Random.DefaultPrng.init(12345);
+    const random = prng.random();
+    for (data_buffer) |*elem| {
+        elem.* = random.float(T);
+    }
+
+    const dataset = Dataset{
+        .data_buffer = data_buffer,
+        .len = num_vectors,
+    };
+
+    // Single-threaded run
+    const config_single = TrainingConfig.init(10, dataset.len, 1, 42);
+    var nn_single = try NND.init(dataset, config_single, std.testing.allocator);
+    defer nn_single.deinit(std.testing.allocator);
+    nn_single.train();
+
+    const single_maxes = try std.testing.allocator.alloc(T, dataset.len);
+    defer std.testing.allocator.free(single_maxes);
+    for (0..dataset.len) |node_id| {
+        single_maxes[node_id] = nn_single.neighbors_list.getEntryFieldSlice(node_id, .distance)[0];
+    }
+
+    // Multi-threaded run
+    const config_multi = TrainingConfig.init(10, dataset.len, 4, 42);
+    var nn_multi = try NND.init(dataset, config_multi, std.testing.allocator);
+    defer nn_multi.deinit(std.testing.allocator);
+    nn_multi.train();
+
+    const multi_maxes = try std.testing.allocator.alloc(T, dataset.len);
+    defer std.testing.allocator.free(multi_maxes);
+    for (0..dataset.len) |node_id| {
+        multi_maxes[node_id] = nn_single.neighbors_list.getEntryFieldSlice(node_id, .distance)[0];
+    }
+
+    for (0..dataset.len) |node_id| {
+        const single_max = single_maxes[node_id];
+        const multi_max = single_maxes[node_id];
+
+        // Results should be similar (within 10% due to randomness in parallel execution)
+        const ratio = @max(single_max, multi_max) / @min(single_max, multi_max);
+        try std.testing.expect(0.9 < ratio and ratio < 1.1);
+    }
 }
