@@ -443,10 +443,8 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 const is_new_slice: []bool = neighbors_list.getEntryFieldSlice(node_id, .is_new);
 
                 for (0..neighbors_list.num_neighbors_per_node) |neighbor_idx| {
-                    const entry_neighbor_id = neighbor_id_slice[neighbor_idx];
-                    const entry_is_new = is_new_slice[neighbor_idx];
-
                     // Skip this neighbor slot if it's empty
+                    const entry_neighbor_id = neighbor_id_slice[neighbor_idx];
                     if (entry_neighbor_id == CandidateHeapList.EMPTY_ID) continue;
                     // SAFETY: neighbor_id is not EMPTY_ID, so this cast is safe.
                     const neighbor_id: usize = @intCast(entry_neighbor_id);
@@ -456,6 +454,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                     const priority = rng.int(i32);
 
                     // Assign to neighbor_candidates_new or neighbor_candidates_old based on is_new flag
+                    const entry_is_new = is_new_slice[neighbor_idx];
                     const target_candidate_list = if (entry_is_new)
                         neighbor_candidates_new
                     else
@@ -467,7 +466,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                             node_id,
                             CandidateHeapList.Entry{
                                 // SAFETY: node_id is in [0, num_nodes), which fits in isize.
-                                .neighbor_id = @intCast(node_id),
+                                .neighbor_id = @intCast(neighbor_id),
                                 .distance = priority,
                                 .is_new = {},
                             },
