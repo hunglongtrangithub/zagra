@@ -17,7 +17,7 @@ To achieve this, I chose Zig to leverages Zig's unique capabilities, such as **c
 - [x] Vector dataset loading and vector access
   - [x] Support for `.npy` file loading via **buffered I/O** (`std.io.Reader`) or via **memory-mapping** `std.posix.mmap` for large datasets
 
-### Phase 2: NN-Descent (Ongoing)
+### Phase 2: NN-Descent (Finished)
 - [x] Struct-of-Arrays (SoA) data layout for heaps in graph
 - [x] NN-Descent algorithm implementation:
   1. [x] Random neighbor population for initial graph
@@ -26,7 +26,7 @@ To achieve this, I chose Zig to leverages Zig's unique capabilities, such as **c
   4. [x] Applying graph updates
   5. [x] Iterative refinement until convergence
 - [x] Lock-free, multi-threaded graph operations
-- [ ] Unit tests for correctness verification
+- [x] Unit tests for correctness verification
 
 ### Phase 3: Graph Optimization (Planned)
 - [ ] Implement graph optimization techniques from CAGRA paper
@@ -44,5 +44,6 @@ To achieve this, I chose Zig to leverages Zig's unique capabilities, such as **c
 ## Acknowledgements
 - [CAGRA paper](https://arxiv.org/pdf/2308.15136)
 - [PyNNDescent](https://github.com/lmcinnes/pynndescent)
+- [cuVS](https://github.com/rapidsai/cuvs)
 - [Znpy: Npy file reading and writing library in Zig](https://github.com/hunglongtrangithub/znpy)
 - [Zig](https://ziglang.org/)
