@@ -222,6 +222,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
         }
 
         pub fn train(self: *Self) void {
+            log.debug("Using {} threads", .{self.training_config.num_threads});
             log.info("Populating random neighbors", .{});
             // Step 1: Populate initial random neighbors
             self.populateRandomNeighbors();
@@ -324,7 +325,6 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                     // We accept the possibility of a node pointing to itself here.
                     // TODO: Consider avoiding self-loops?
                     const neighbor_id = rng.intRangeAtMost(usize, 0, num_nodes - 1);
-                    log.debug("Randomized neighbor id for node id {}: {}", .{ node_id, neighbor_id });
 
                     const neighbor = dataset.getUnchecked(neighbor_id);
                     const distance = node.sqdist(neighbor);
@@ -353,6 +353,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 const num_nodes = self.neighbors_list.num_nodes;
                 const batch_size = (num_nodes + num_threads - 1) / num_threads;
 
+                self.wait_group.reset();
                 for (0..num_threads) |thread_id| {
                     const node_id_start = thread_id * batch_size;
                     const node_id_end = @min(node_id_start + batch_size, num_nodes);
@@ -376,6 +377,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 // Wait for all sampling threads to finish before moving on
                 pool.waitAndWork(&self.wait_group);
 
+                self.wait_group.reset();
                 // Mark sampled nodes in neighbors_list as not new anymore
                 for (0..num_threads) |thread_id| {
                     const node_id_start = thread_id * batch_size;
@@ -533,6 +535,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 const num_nodes = self.neighbors_list.num_nodes;
                 const batch_size = (num_nodes + num_threads - 1) / num_threads;
 
+                self.wait_group.reset();
                 for (0..num_threads) |thread_id| {
                     const node_id_start = thread_id * batch_size;
                     const node_id_end = @min(node_id_start + batch_size, num_nodes);
@@ -648,6 +651,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 const num_nodes = self.neighbors_list.num_nodes;
                 const batch_size = (num_nodes + num_threads - 1) / num_threads;
 
+                self.wait_group.reset();
                 for (0..num_threads) |thread_id| {
                     const node_id_start = thread_id * batch_size;
                     const node_id_end = @min(node_id_start + batch_size, num_nodes);

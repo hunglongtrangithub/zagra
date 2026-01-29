@@ -86,7 +86,7 @@ pub fn main() !void {
     const training_config = zagra.graphs.nn_descent.TrainingConfig.init(
         4,
         vector_count,
-        1,
+        null,
         42,
     );
     var nn_descent = NNDescent.init(
