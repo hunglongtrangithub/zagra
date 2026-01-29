@@ -67,7 +67,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
     const Dataset = mod_dataset.Dataset(T, N);
 
     return struct {
-        /// The dataset of vectors to build the k-NN graph for.
+        /// The dataset of vectors to build the k-NN graph for. Owned by caller.
         dataset: Dataset,
         /// Configuration parameters for training.
         training_config: TrainingConfig,
@@ -89,7 +89,8 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
         /// Aligned for efficient SIMD access.
         graph_update_counts_buffer: []align(64) usize,
         /// Thread pool for multi-threaded operations.
-        pool: std.Thread.Pool,
+        /// `null` when requested number of threads is <= 1.
+        thread_pool: ?*std.Thread.Pool,
         /// Wait group for synchronizing threads.
         wait_group: std.Thread.WaitGroup,
 
@@ -121,7 +122,6 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 training_config.num_neighbors_per_node,
                 allocator,
             );
-            log.debug("neighbors_list", .{});
             errdefer neighbors_list.deinit(allocator);
 
             var neighbor_candidates_new = try CandidateHeapList.init(
@@ -129,21 +129,19 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 training_config.max_candidates,
                 allocator,
             );
-            log.debug("neighbor_candidates_new", .{});
             errdefer neighbor_candidates_new.deinit(allocator);
             var neighbor_candidates_old = try CandidateHeapList.init(
                 dataset.len,
                 training_config.max_candidates,
                 allocator,
             );
-            log.debug("neighbor_candidates_old", .{});
             errdefer neighbor_candidates_old.deinit(allocator);
 
             const graph_updates_lists = try allocator.alloc(
                 std.ArrayList(GraphUpdate),
                 training_config.num_threads,
             );
-            log.debug("graph_updates_lists", .{});
+            errdefer allocator.free(graph_updates_lists);
 
             // Calculate maximum possible graph updates in an iteration
             // For each node, possible updates are:
@@ -153,27 +151,26 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             // is no more than i32 max, the cast is safe, and the calculations here won't overflow u64.
             const n_new = @as(u64, neighbor_candidates_new.num_neighbors_per_node);
             const n_old = @as(u64, neighbor_candidates_old.num_neighbors_per_node);
-            const capacity_per_node: u64 = (n_new * (n_new - 1)) / 2 + (n_new * n_old);
-            const capacity_per_node_usize = std.math.cast(usize, capacity_per_node) orelse
+            const capacity_per_node_u64: u64 = (n_new * (n_new - 1)) / 2 + (n_new * n_old);
+            const capacity_per_node = std.math.cast(usize, capacity_per_node_u64) orelse
                 return InitError.MaxCandidatesTooLarge;
 
-            const num_max_graph_updates: usize, const overflow = @mulWithOverflow(capacity_per_node_usize, neighbors_list.num_nodes);
+            const num_max_graph_updates: usize, const overflow = @mulWithOverflow(capacity_per_node, neighbors_list.num_nodes);
             if (overflow != 0) return mod_neighbors.InitError.NumberOfNodesTooLarge;
 
             const graph_updates_buffer = try allocator.alloc(
                 GraphUpdate,
                 num_max_graph_updates,
             );
-            log.debug("graph_updates_buffer", .{});
             errdefer allocator.free(graph_updates_buffer);
 
-            // Initialize each graph updates list using a slice of the buffer
-            const capacity_per_thread = (num_max_graph_updates + training_config.num_threads - 1) / training_config.num_threads;
+            // Each thread takes an exclusive batch of nodes which corresponds to an exclusive slice in graph_updates_buffer
+            const num_nodes_per_thread = (neighbors_list.num_nodes + training_config.num_threads - 1) / training_config.num_threads;
             for (graph_updates_lists, 0..) |*list, i| {
-                const start = i * capacity_per_thread;
-                const end = @min(start + capacity_per_thread, graph_updates_buffer.len);
+                const node_id_start = i * num_nodes_per_thread;
+                const node_is_end = @min(node_id_start + num_nodes_per_thread, graph_updates_buffer.len);
                 list.* = std.ArrayList(GraphUpdate).initBuffer(
-                    graph_updates_buffer[start..end],
+                    graph_updates_buffer[node_id_start * capacity_per_node .. node_is_end * capacity_per_node],
                 );
             }
 
@@ -182,15 +179,16 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 std.mem.Alignment.@"64",
                 training_config.num_threads,
             );
-            log.debug("graph_update_counts_buffer", .{});
             errdefer allocator.free(graph_update_counts_buffer);
 
-            var pool: std.Thread.Pool = undefined;
-            pool.init(.{
-                .n_jobs = training_config.num_threads,
-                .allocator = allocator,
-            }) catch return std.mem.Allocator.Error.OutOfMemory;
-            log.debug("pool", .{});
+            const thread_pool = if (training_config.num_threads > 1) blk: {
+                const pool = try allocator.create(std.Thread.Pool);
+                pool.init(.{
+                    .n_jobs = training_config.num_threads,
+                    .allocator = allocator,
+                }) catch return std.mem.Allocator.Error.OutOfMemory;
+                break :blk pool;
+            } else null;
 
             var wait_group: std.Thread.WaitGroup = undefined;
             wait_group.reset();
@@ -204,21 +202,23 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 .graph_updates_buffer = graph_updates_buffer,
                 .graph_update_counts_buffer = graph_update_counts_buffer,
                 .graph_updates_lists = graph_updates_lists,
-                .pool = pool,
+                .thread_pool = thread_pool,
                 .wait_group = wait_group,
             };
         }
 
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             self.neighbors_list.deinit(allocator);
-            self.dataset.deinit(allocator);
             self.neighbor_candidates_new.deinit(allocator);
             self.neighbor_candidates_old.deinit(allocator);
             allocator.free(self.graph_updates_lists);
             // NOTE: Just need to free the buffer, since all lists use slices of it
             allocator.free(self.graph_updates_buffer);
             allocator.free(self.graph_update_counts_buffer);
-            self.pool.deinit();
+            if (self.thread_pool) |pool| {
+                pool.deinit();
+                allocator.destroy(pool);
+            }
         }
 
         pub fn train(self: *Self) void {
@@ -264,7 +264,33 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
         /// Populate all nodes with random neighbors.
         /// Use multi-threading if configured.
         fn populateRandomNeighbors(self: *Self) void {
-            if (self.training_config.num_threads <= 1) {
+            if (self.thread_pool) |pool| {
+                const num_threads = self.training_config.num_threads;
+
+                const num_nodes = self.neighbors_list.num_nodes;
+                const batch_size = (num_nodes + num_threads - 1) / num_threads;
+
+                for (0..num_threads) |thread_id| {
+                    const node_id_start = thread_id * batch_size;
+                    const node_id_end = @min(node_id_start + batch_size, num_nodes);
+
+                    // SAFETY: Each thread populate neighbors on non-overlapping range of nodes,
+                    // so the neighbor heaps are separate in memory, and thus no data races.
+                    pool.spawnWg(
+                        &self.wait_group,
+                        populateRandomNeighborsThread,
+                        .{
+                            &self.dataset,
+                            &self.neighbors_list,
+                            node_id_start,
+                            node_id_end,
+                            // Different thread has different seed
+                            self.training_config.seed + @as(u64, @intCast(thread_id)),
+                        },
+                    );
+                }
+                pool.waitAndWork(&self.wait_group);
+            } else {
                 populateRandomNeighborsThread(
                     &self.dataset,
                     &self.neighbors_list,
@@ -272,34 +298,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                     self.dataset.len,
                     self.training_config.seed,
                 );
-                return;
             }
-
-            const num_threads = self.training_config.num_threads;
-
-            const num_nodes = self.neighbors_list.num_nodes;
-            const batch_size = (num_nodes + num_threads - 1) / num_threads;
-
-            for (0..num_threads) |thread_id| {
-                const node_id_start = thread_id * batch_size;
-                const node_id_end = @min(node_id_start + batch_size, num_nodes);
-
-                // SAFETY: Each thread populate neighbors on non-overlapping range of nodes,
-                // so the neighbor heaps are separate in memory, and thus no data races.
-                self.pool.spawnWg(
-                    &self.wait_group,
-                    populateRandomNeighborsThread,
-                    .{
-                        &self.dataset,
-                        &self.neighbors_list,
-                        node_id_start,
-                        node_id_end,
-                        // Different thread has different seed
-                        self.training_config.seed + @as(u64, @intCast(thread_id)),
-                    },
-                );
-            }
-            self.pool.waitAndWork(&self.wait_group);
         }
 
         /// Populate a batch of nodes, starting from `node_id_start` (inclusive) to `node_id_end` (exclusive),
@@ -348,7 +347,55 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             std.debug.assert(self.neighbor_candidates_new.num_nodes == self.neighbor_candidates_old.num_nodes);
             std.debug.assert(self.neighbor_candidates_new.num_nodes == self.neighbors_list.num_nodes);
 
-            if (self.training_config.num_threads <= 1) {
+            if (self.thread_pool) |pool| {
+                const num_threads = self.training_config.num_threads;
+
+                const num_nodes = self.neighbors_list.num_nodes;
+                const batch_size = (num_nodes + num_threads - 1) / num_threads;
+
+                for (0..num_threads) |thread_id| {
+                    const node_id_start = thread_id * batch_size;
+                    const node_id_end = @min(node_id_start + batch_size, num_nodes);
+
+                    // SAFETY: Each thread only touches on heaps of nodes whose IDs are
+                    // in the range [node_id_start, node_id_end), so no data races.
+                    pool.spawnWg(
+                        &self.wait_group,
+                        sampleNeighborCandidatesThread,
+                        .{
+                            &self.neighbors_list,
+                            &self.neighbor_candidates_new,
+                            &self.neighbor_candidates_old,
+                            node_id_start,
+                            node_id_end,
+                            // Different thread has different seed
+                            self.training_config.seed + @as(u64, @intCast(thread_id)),
+                        },
+                    );
+                }
+                // Wait for all sampling threads to finish before moving on
+                pool.waitAndWork(&self.wait_group);
+
+                // Mark sampled nodes in neighbors_list as not new anymore
+                for (0..num_threads) |thread_id| {
+                    const node_id_start = thread_id * batch_size;
+                    const node_id_end = @min(node_id_start + batch_size, num_nodes);
+
+                    // SAFETY: Each thread only touches on heaps of nodes whose IDs are
+                    // in the range [node_id_start, node_id_end), so no data races.
+                    pool.spawnWg(
+                        &self.wait_group,
+                        markSampledToOldThread,
+                        .{
+                            &self.neighbors_list,
+                            &self.neighbor_candidates_new,
+                            node_id_start,
+                            node_id_end,
+                        },
+                    );
+                }
+                pool.waitAndWork(&self.wait_group);
+            } else {
                 sampleNeighborCandidatesThread(
                     &self.neighbors_list,
                     &self.neighbor_candidates_new,
@@ -363,56 +410,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                     0,
                     self.neighbors_list.num_nodes,
                 );
-                return;
             }
-
-            const num_threads = self.training_config.num_threads;
-
-            const num_nodes = self.neighbors_list.num_nodes;
-            const batch_size = (num_nodes + num_threads - 1) / num_threads;
-
-            for (0..num_threads) |thread_id| {
-                const node_id_start = thread_id * batch_size;
-                const node_id_end = @min(node_id_start + batch_size, num_nodes);
-
-                // SAFETY: Each thread only touches on heaps of nodes whose IDs are
-                // in the range [node_id_start, node_id_end), so no data races.
-                self.pool.spawnWg(
-                    &self.wait_group,
-                    sampleNeighborCandidatesThread,
-                    .{
-                        &self.neighbors_list,
-                        &self.neighbor_candidates_new,
-                        &self.neighbor_candidates_old,
-                        node_id_start,
-                        node_id_end,
-                        // Different thread has different seed
-                        self.training_config.seed + @as(u64, @intCast(thread_id)),
-                    },
-                );
-            }
-            // Wait for all sampling threads to finish before moving on
-            self.pool.waitAndWork(&self.wait_group);
-
-            // Mark sampled nodes in neighbors_list as not new anymore
-            for (0..num_threads) |thread_id| {
-                const node_id_start = thread_id * batch_size;
-                const node_id_end = @min(node_id_start + batch_size, num_nodes);
-
-                // SAFETY: Each thread only touches on heaps of nodes whose IDs are
-                // in the range [node_id_start, node_id_end), so no data races.
-                self.pool.spawnWg(
-                    &self.wait_group,
-                    markSampledToOldThread,
-                    .{
-                        &self.neighbors_list,
-                        &self.neighbor_candidates_new,
-                        node_id_start,
-                        node_id_end,
-                    },
-                );
-            }
-            self.pool.waitAndWork(&self.wait_group);
         }
 
         /// Sample neighbor candidates from the `neighbors_list` into `neighbor_candidates_new` and `neighbor_candidates_old`.
@@ -529,7 +527,31 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
         }
 
         fn generateGraphUpdateProposals(self: *Self) void {
-            if (self.training_config.num_threads <= 1) {
+            if (self.thread_pool) |pool| {
+                const num_threads = self.training_config.num_threads;
+
+                const num_nodes = self.neighbors_list.num_nodes;
+                const batch_size = (num_nodes + num_threads - 1) / num_threads;
+
+                for (0..num_threads) |thread_id| {
+                    const node_id_start = thread_id * batch_size;
+                    const node_id_end = @min(node_id_start + batch_size, num_nodes);
+                    pool.spawnWg(
+                        &self.wait_group,
+                        generateGraphUpdateProposalsThread,
+                        .{
+                            &self.dataset,
+                            &self.neighbors_list,
+                            &self.graph_updates_lists[thread_id],
+                            &self.neighbor_candidates_new,
+                            &self.neighbor_candidates_old,
+                            node_id_start,
+                            node_id_end,
+                        },
+                    );
+                }
+                pool.waitAndWork(&self.wait_group);
+            } else {
                 generateGraphUpdateProposalsThread(
                     &self.dataset,
                     &self.neighbors_list,
@@ -539,31 +561,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                     0,
                     self.neighbors_list.num_nodes,
                 );
-                return;
             }
-            const num_threads = self.training_config.num_threads;
-
-            const num_nodes = self.neighbors_list.num_nodes;
-            const batch_size = (num_nodes + num_threads - 1) / num_threads;
-
-            for (0..num_threads) |thread_id| {
-                const node_id_start = thread_id * batch_size;
-                const node_id_end = @min(node_id_start + batch_size, num_nodes);
-                self.pool.spawnWg(
-                    &self.wait_group,
-                    generateGraphUpdateProposalsThread,
-                    .{
-                        &self.dataset,
-                        &self.neighbors_list,
-                        &self.graph_updates_lists[thread_id],
-                        &self.neighbor_candidates_new,
-                        &self.neighbor_candidates_old,
-                        node_id_start,
-                        node_id_end,
-                    },
-                );
-            }
-            self.pool.waitAndWork(&self.wait_group);
         }
 
         /// Go through all nodes as local joins in the given range `[local_join_id_start, local_join_id_end)`:
@@ -645,9 +643,33 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
         /// Apply graph updates from all threads' `graph_updates_lists` to the `neighbors_list`.
         /// Return the total number of successful updates applied.
         fn applyGraphUpdatesProposals(self: *Self) usize {
-            const num_threads = self.training_config.num_threads;
+            if (self.thread_pool) |pool| {
+                const num_threads = self.training_config.num_threads;
+                const num_nodes = self.neighbors_list.num_nodes;
+                const batch_size = (num_nodes + num_threads - 1) / num_threads;
 
-            if (num_threads <= 1) {
+                for (0..num_threads) |thread_id| {
+                    const node_id_start = thread_id * batch_size;
+                    const node_id_end = @min(node_id_start + batch_size, num_nodes);
+                    // SAFETY: Each thread only touches on heaps of nodes whose IDs are
+                    // in the range [node_id_start, node_id_end), so no data races.
+                    pool.spawnWg(
+                        &self.wait_group,
+                        applyGraphUpdatesProposalsThread,
+                        .{
+                            &self.neighbors_list,
+                            &self.graph_updates_lists[thread_id],
+                            &self.graph_update_counts_buffer[thread_id],
+                            node_id_start,
+                            node_id_end,
+                        },
+                    );
+                }
+                pool.waitAndWork(&self.wait_group);
+
+                // Reduce the counts from all threads with SIMD
+                return self.sumUpGraphUpdateCountsSIMD();
+            } else {
                 applyGraphUpdatesProposalsThread(
                     &self.neighbors_list,
                     &self.graph_updates_lists[0],
@@ -657,31 +679,6 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 );
                 return self.graph_update_counts_buffer[0];
             }
-
-            const num_nodes = self.neighbors_list.num_nodes;
-            const batch_size = (num_nodes + num_threads - 1) / num_threads;
-
-            for (0..num_threads) |thread_id| {
-                const node_id_start = thread_id * batch_size;
-                const node_id_end = @min(node_id_start + batch_size, num_nodes);
-                // SAFETY: Each thread only touches on heaps of nodes whose IDs are
-                // in the range [node_id_start, node_id_end), so no data races.
-                self.pool.spawnWg(
-                    &self.wait_group,
-                    applyGraphUpdatesProposalsThread,
-                    .{
-                        &self.neighbors_list,
-                        &self.graph_updates_lists[thread_id],
-                        &self.graph_update_counts_buffer[thread_id],
-                        node_id_start,
-                        node_id_end,
-                    },
-                );
-            }
-            self.pool.waitAndWork(&self.wait_group);
-
-            // Reduce the counts from all threads with SIMD
-            return self.sumUpGraphUpdateCountsSIMD();
         }
 
         /// Apply graph updates from the given `graph_updates_list` to the `neighbors_list`,

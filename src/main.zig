@@ -43,7 +43,7 @@ pub fn main() !void {
 
     // Dataset configuration constants
     const vector_length: usize = 128;
-    const vector_count: usize = 500;
+    const vector_count: usize = 1000000;
     const npy_file_name = "dataset.npy";
     const element_type = f32;
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
@@ -75,11 +75,11 @@ pub fn main() !void {
 
     npy_file_to_read.close();
 
-    for (0..dataset.len) |i| {
-        const vector = dataset.getUnchecked(i);
-        try stdout.print("vector {}: {any}\n", .{ i, vector.data });
-    }
-    try stdout.flush();
+    // for (0..dataset.len) |i| {
+    //     const vector = dataset.getUnchecked(i);
+    //     try stdout.print("vector {}: {any}\n", .{ i, vector.data });
+    // }
+    // try stdout.flush();
 
     // Do NN-Descent
     const NNDescent = zagra.graphs.nn_descent.NNDescent(element_type, vector_length);
@@ -99,7 +99,8 @@ pub fn main() !void {
     };
     defer nn_descent.deinit(allocator);
 
-    //
+    nn_descent.train();
+
     // const neighbors_list = nn_descent.neighbors_list;
     //
     // try stdout.print("neighbors_list: {} nodes x {} neighbors per node\n", .{ neighbors_list.num_nodes, neighbors_list.num_neighbors_per_node });
