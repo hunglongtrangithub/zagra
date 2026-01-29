@@ -673,7 +673,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 pool.waitAndWork(&self.wait_group);
 
                 // Reduce the counts from all threads with SIMD
-                return self.sumUpGraphUpdateCountsSIMD();
+                return sumUpGraphUpdateCountsSIMD(self.graph_update_counts_buffer);
             } else {
                 applyGraphUpdatesProposalsThread(
                     &self.neighbors_list,
@@ -696,7 +696,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             node_id_start: usize,
             node_id_end: usize,
         ) void {
-            // NOTE: When node_id_start == node_id_end, nothing gets added to the candidate lists
+            // NOTE: When node_id_start == node_id_end, updates_count remains 0 after the loop
             std.debug.assert(node_id_start <= node_id_end and node_id_end <= neighbors_list.num_nodes);
 
             var updates_count: usize = 0;
@@ -742,9 +742,9 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
         }
 
         /// Sum up the graph update counts from all threads using SIMD.
-        fn sumUpGraphUpdateCountsSIMD(self: *Self) usize {
-            const counts_ptr: [*]align(64) usize = self.graph_update_counts_buffer.ptr;
-            const num_counts = self.graph_update_counts_buffer.len;
+        fn sumUpGraphUpdateCountsSIMD(graph_update_counts_buffer: []align(64) usize) usize {
+            const counts_ptr: [*]align(64) usize = graph_update_counts_buffer.ptr;
+            const num_counts = graph_update_counts_buffer.len;
 
             const vector_size = std.simd.suggestVectorLength(usize) orelse
                 @compileError("Cannot determine vector size for type");
@@ -806,4 +806,20 @@ test "NNDescent - empty dataset and zero threads" {
 
     // Deinitialize - should not panic
     nn_descent.deinit(std.testing.allocator);
+}
+
+test "NNDescent.sumUpGraphUpdateCountsSIMD" {
+    const allocator = std.testing.allocator;
+    const vector_size = std.simd.suggestVectorLength(usize) orelse 4;
+    const num_elements = vector_size * 3; // 3 full vectors
+    const counts: []align(64) usize = try allocator.alignedAlloc(usize, std.mem.Alignment.@"64", num_elements);
+    defer allocator.free(counts);
+
+    for (counts, 0..) |*c, i| {
+        c.* = i + 1;
+    }
+
+    const sum = NNDescent(f32, 128).sumUpGraphUpdateCountsSIMD(counts);
+    const expected = (num_elements * (num_elements + 1)) / 2;
+    try std.testing.expectEqual(expected, sum);
 }
