@@ -2,7 +2,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const znpy = @import("znpy");
-const FromFileReaderError = znpy.array.static.FromFileReaderError;
 
 const mod_vector = @import("vector.zig");
 const Vector = mod_vector.Vector;
@@ -31,7 +30,10 @@ pub fn Dataset(comptime T: type, comptime N: usize) type {
 
         /// Load a dataset of fixed-size vectors from a .npy file reader.
         /// The .npy file must contain a 2D array where one dimension is of size N.
-        pub fn fromNpyFileReader(reader: *std.io.Reader, allocator: std.mem.Allocator) (FromFileReaderError || error{InvalidShape})!Self {
+        pub fn fromNpyFileReader(
+            reader: *std.io.Reader,
+            allocator: std.mem.Allocator,
+        ) (znpy.array.static.FromFileReaderError || error{InvalidShape})!Self {
             const array = try znpy.array.static.StaticArray(T, 2).fromFileAllocAligned(
                 reader,
                 std.mem.Alignment.@"64",
@@ -48,16 +50,20 @@ pub fn Dataset(comptime T: type, comptime N: usize) type {
 
         /// Load a dataset of fixed-size vectors from a .npy file buffer in memory (using mmap or similar).
         /// The .npy file must contain a 2D array where one dimension is of size N.
-        pub fn fromNpyFileBuffer(file_budder: []const u8, allocator: std.mem.Allocator) (FromFileReaderError || error{ InvalidShape, MisalignedData })!Self {
+        /// The dataset does not have to be deinitialized since the file buffer is managed by caller.
+        pub fn fromNpyFileBuffer(
+            file_buffer: []const u8,
+            allocator: std.mem.Allocator,
+        ) (znpy.array.static.FromFileBufferError || error{ InvalidShape, MisalignedData })!Self {
             const array = try znpy.array.static.ConstStaticArray(T, 2).fromFileBuffer(
-                file_budder,
+                file_buffer,
                 allocator,
             );
 
             const dataset_len = try verifyShape(array.shape);
 
             // Npy file specification already ensures data is aligned to 64 bytes, but we double-check here.
-            if (!std.mem.isAligned(array.data_buffer.ptr, 64)) return error.MisalignedData;
+            if (!std.mem.isAligned(@intFromPtr(array.data_buffer.ptr), 64)) return error.MisalignedData;
 
             return Self{
                 .data_buffer = @as([]align(64) const T, @alignCast(array.data_buffer)),

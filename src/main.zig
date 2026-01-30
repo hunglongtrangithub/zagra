@@ -63,15 +63,47 @@ pub fn main() !void {
 
     try stdout.print("Reading the Npy file to dataset\n", .{});
 
-    // Read the file
     const npy_file_to_read = try std.fs.cwd().openFile(npy_file_name, .{});
-    var file_buffer: [8192]u8 = undefined;
-    var file_reader = std.fs.File.Reader.init(npy_file_to_read, &file_buffer);
-
-    // Read the Npy file content into the dataset
     const Dataset = zagra.dataset.Dataset(element_type, vector_length);
-    const dataset = try Dataset.fromNpyFileReader(&file_reader.interface, allocator);
-    defer dataset.deinit(allocator);
+
+    // // Read the file
+    // var file_buffer: [8192]u8 = undefined;
+    // var file_reader = std.fs.File.Reader.init(npy_file_to_read, &file_buffer);
+    //
+    // // Read the Npy file content into the dataset
+    // const dataset = try Dataset.fromNpyFileReader(&file_reader.interface, allocator);
+    // defer dataset.deinit(allocator);
+
+    // Get the file buffer using mmap
+
+    // Get file size
+    const file_stat = try npy_file_to_read.stat();
+    const read_size = std.math.cast(usize, file_stat.size) orelse {
+        std.debug.print("File size is too large to map\n", .{});
+        return;
+    };
+    if (read_size == 0) {
+        std.debug.print("File is empty, nothing to read\n", .{});
+        return;
+    }
+
+    // Read all file contents into memory using mmap
+    const file_buffer = try std.posix.mmap(
+        null,
+        read_size,
+        std.posix.PROT.READ,
+        std.posix.system.MAP{ .TYPE = .PRIVATE },
+        npy_file_to_read.handle,
+        0,
+    );
+    defer std.posix.munmap(file_buffer);
+    if (file_buffer.len != read_size) {
+        std.debug.print("Mapped size does not match file size.\n", .{});
+        return;
+    }
+
+    // Form the dataset using the file buffer
+    const dataset = try Dataset.fromNpyFileBuffer(file_buffer, allocator);
 
     std.debug.assert(dataset.len == vector_count);
 

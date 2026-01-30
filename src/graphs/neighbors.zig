@@ -200,12 +200,6 @@ pub fn NeighborHeapList(comptime T: type, comptime store_flags: bool) type {
             self.entries.set(heap_start + entry_idx, new_entry);
         }
 
-        inline fn getEntryIndex(self: *const Self, node_id: usize, neighbor_idx: usize) usize {
-            std.debug.assert(node_id < self.num_nodes);
-            std.debug.assert(neighbor_idx < self.num_neighbors_per_node);
-            return node_id * self.num_neighbors_per_node + neighbor_idx;
-        }
-
         /// Retrieves a slice of the specified field for all neighbor entries of the given node.
         // TODO: Should this be inlined?
         pub inline fn getEntryFieldSlice(
