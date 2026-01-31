@@ -3,29 +3,59 @@ const std = @import("std");
 const znpy = @import("znpy");
 const zagra = @import("zagra");
 
+pub const std_options: std.Options = .{
+    .log_level = .err,
+};
+
 var stdout_buffer: [1024]u8 = undefined;
 var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
 const stdout = &stdout_writer.interface;
 
-fn saveDataset(
-    comptime element_type: type,
-    vector_length: usize,
-    vector_count: usize,
-    npy_sub_path: []const u8,
-    allocator: std.mem.Allocator,
-) !void {
+pub fn main() !void {
+    std.debug.print("This is Zagra!\n", .{});
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
+    const allocator = gpa.allocator();
+
+    var args = try std.process.argsWithAllocator(allocator);
+
+    _ = args.skip();
+
+    const vector_count_str = args.next() orelse {
+        std.debug.print("vector count needed: zagra <vector count>\n", .{});
+        return;
+    };
+    const vector_count = std.fmt.parseInt(usize, vector_count_str, 10) catch |e| {
+        switch (e) {
+            error.Overflow => std.debug.print("Entered input is too large for usize\n", .{}),
+            error.InvalidCharacter => std.debug.print("Entered input is not a valid number\n", .{}),
+        }
+        return;
+    };
+
+    // Dataset configuration constants
+    const vector_length: usize = 128;
+    const npy_file_name = "dataset.npy";
+    const element_type = f32;
+
+    try stdout.print("Saving dataset with {} {}-D vectors to {s}\n", .{ vector_count, vector_length, npy_file_name });
+    try stdout.flush();
+
     // Open file to write Npy array to
-    const npy_file_to_write = try std.fs.cwd().createFile(npy_sub_path, .{});
+    const npy_file_to_write = try std.fs.cwd().createFile(npy_file_name, .{});
     var file_buffer: [8192]u8 = undefined;
     var file_writer = std.fs.File.Writer.init(npy_file_to_write, &file_buffer);
 
     // Initialize the Npy array
     const Array = znpy.array.StaticArray(element_type, 2);
-    const array = try Array.init(
+    const array = Array.init(
         [2]usize{ vector_count, vector_length },
         znpy.shape.Order.C,
         allocator,
-    );
+    ) catch |e| {
+        std.debug.print("Error initializing array: {}", .{e});
+        return;
+    };
     defer array.deinit(allocator);
     // Fill array with increasing numbers
     for (0..vector_count) |i| {
@@ -34,30 +64,11 @@ fn saveDataset(
         }
     }
     // Write file to disk
-    try array.writeAll(&file_writer.interface, allocator);
+    array.writeAll(&file_writer.interface, allocator) catch |e| {
+        std.debug.print("Error writing array to disk: {}", .{e});
+        return;
+    };
     npy_file_to_write.close();
-}
-
-pub fn main() !void {
-    std.debug.print("This is Zagra!\n", .{});
-
-    // Dataset configuration constants
-    const vector_length: usize = 128;
-    const vector_count: usize = 5_000_000;
-    const npy_file_name = "dataset.npy";
-    const element_type = f32;
-    var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
-    const allocator = gpa.allocator();
-
-    try stdout.print("Saving dataset with {} {}-D vectors to {s}\n", .{ vector_count, vector_length, npy_file_name });
-    try stdout.flush();
-    try saveDataset(
-        element_type,
-        vector_length,
-        vector_count,
-        npy_file_name,
-        allocator,
-    );
     try stdout.print("Wrote Npy array to {s}\n", .{npy_file_name});
     try stdout.flush();
 
@@ -66,44 +77,47 @@ pub fn main() !void {
     const npy_file_to_read = try std.fs.cwd().openFile(npy_file_name, .{});
     const Dataset = zagra.dataset.Dataset(element_type, vector_length);
 
-    // // Read the file
+    // Read the file
     // var file_buffer: [8192]u8 = undefined;
-    // var file_reader = std.fs.File.Reader.init(npy_file_to_read, &file_buffer);
-    //
-    // // Read the Npy file content into the dataset
-    // const dataset = try Dataset.fromNpyFileReader(&file_reader.interface, allocator);
-    // defer dataset.deinit(allocator);
+    var file_reader = std.fs.File.Reader.init(npy_file_to_read, &file_buffer);
 
-    // Get the file buffer using mmap
-
-    // Get file size
-    const file_stat = try npy_file_to_read.stat();
-    const read_size = std.math.cast(usize, file_stat.size) orelse {
-        std.debug.print("File size is too large to map\n", .{});
+    // Read the Npy file content into the dataset
+    const dataset = Dataset.fromNpyFileReader(&file_reader.interface, allocator) catch |e| {
+        std.debug.print("Error creating the dataset from the array file: {}", .{e});
         return;
     };
-    if (read_size == 0) {
-        std.debug.print("File is empty, nothing to read\n", .{});
-        return;
-    }
+    defer dataset.deinit(allocator);
 
-    // Read all file contents into memory using mmap
-    const file_buffer = try std.posix.mmap(
-        null,
-        read_size,
-        std.posix.PROT.READ,
-        std.posix.system.MAP{ .TYPE = .PRIVATE },
-        npy_file_to_read.handle,
-        0,
-    );
-    defer std.posix.munmap(file_buffer);
-    if (file_buffer.len != read_size) {
-        std.debug.print("Mapped size does not match file size.\n", .{});
-        return;
-    }
-
-    // Form the dataset using the file buffer
-    const dataset = try Dataset.fromNpyFileBuffer(file_buffer, allocator);
+    // // Get the file buffer using mmap
+    //
+    // // Get file size
+    // const file_stat = try npy_file_to_read.stat();
+    // const read_size = std.math.cast(usize, file_stat.size) orelse {
+    //     std.debug.print("File size is too large to map\n", .{});
+    //     return;
+    // };
+    // if (read_size == 0) {
+    //     std.debug.print("File is empty, nothing to read\n", .{});
+    //     return;
+    // }
+    //
+    // // Read all file contents into memory using mmap
+    // const file_buffer = try std.posix.mmap(
+    //     null,
+    //     read_size,
+    //     std.posix.PROT.READ,
+    //     std.posix.system.MAP{ .TYPE = .PRIVATE },
+    //     npy_file_to_read.handle,
+    //     0,
+    // );
+    // defer std.posix.munmap(file_buffer);
+    // if (file_buffer.len != read_size) {
+    //     std.debug.print("Mapped size does not match file size.\n", .{});
+    //     return;
+    // }
+    //
+    // // Form the dataset using the file buffer
+    // const dataset = try Dataset.fromNpyFileBuffer(file_buffer, allocator);
 
     std.debug.assert(dataset.len == vector_count);
 
