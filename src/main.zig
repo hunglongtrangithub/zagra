@@ -11,6 +11,12 @@ var stdout_buffer: [1024]u8 = undefined;
 var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
 const stdout = &stdout_writer.interface;
 
+const HELP =
+    \\zagra <vector_count> <block_processing>
+    \\- vector_count (required): Number of vectors in the dataset
+    \\- block_processing (optional - default to true): Whether to use block processing mode during training
+;
+
 pub fn main() !void {
     std.debug.print("This is Zagra!\n", .{});
 
@@ -22,7 +28,7 @@ pub fn main() !void {
     _ = args.skip();
 
     const vector_count_str = args.next() orelse {
-        std.debug.print("vector count needed: zagra <vector count>\n", .{});
+        std.debug.print("vector count needed.{s}\n", .{HELP});
         return;
     };
     const vector_count = std.fmt.parseInt(usize, vector_count_str, 10) catch |e| {
@@ -32,6 +38,20 @@ pub fn main() !void {
         }
         return;
     };
+
+    const block_processing = blk: {
+        if (args.next()) |str| {
+            if (std.mem.eql(u8, str, "true"))
+                break :blk true
+            else if (std.mem.eql(u8, str, "false"))
+                break :blk false
+            else {
+                std.debug.print("Expected 'true' or 'false' for block_processing", .{});
+                return;
+            }
+        } else break :blk true;
+    };
+    try stdout.print("Using block processing for training? {any}\n", .{block_processing});
 
     // Dataset configuration constants
     const vector_length: usize = 128;
@@ -136,6 +156,7 @@ pub fn main() !void {
         vector_count,
         null,
         42,
+        block_processing,
     );
     var nn_descent = NNDescent.init(
         dataset,

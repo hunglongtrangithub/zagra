@@ -35,6 +35,10 @@ pub const TrainingConfig = struct {
     /// Random seed for any randomized components of the algorithm.
     seed: u64,
 
+    /// Whether to generate & apply graph updates in a block of vectors at a time.
+    /// Block processing is faster and saves memory usage when number of vectors gets large. Default to true.
+    block_processing: bool = true,
+
     const Self = @This();
 
     /// Initializes a training config with default values based on the dataset size.
@@ -43,6 +47,7 @@ pub const TrainingConfig = struct {
         num_vectors: usize,
         num_threads: ?usize,
         seed: ?u64,
+        block_processing: ?bool,
     ) Self {
         const config = Self{
             .num_neighbors_per_node = num_neighbors_per_node,
@@ -50,6 +55,7 @@ pub const TrainingConfig = struct {
             .max_candidates = @min(60, num_neighbors_per_node),
             .num_threads = if (num_threads) |n| n else std.Thread.getCpuCount() catch 1,
             .seed = if (seed) |s| s else std.crypto.random.int(u64),
+            .block_processing = block_processing orelse true,
         };
         return config;
     }
@@ -98,7 +104,8 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
         /// Last batch of nodes is less than or equal to this value.
         /// Is 0 when either number of dataset is empty or number of threads is 0.
         num_nodes_per_thread: usize,
-        /// Either equal to `DEFAULT_BLOCK_SIZE` or number of nodes in the graph if the latter is smaller
+        /// Number of nodes in one block. Equal to the total number of nodes when
+        /// total number of nodes <= `DEFAULT_BLOCK_SIZE` or when `training_config.block_processing == false`.
         num_nodes_per_block: usize,
         /// Number of nodes within one block each thread is responsible for.
         num_block_nodes_per_thread: usize,
@@ -115,6 +122,10 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             distance: T,
         };
         const DEFAULT_BLOCK_SIZE = 16384;
+        comptime {
+            if (DEFAULT_BLOCK_SIZE == 0) @compileError("DEFAULT_BLOCK_SIZE must be larger than 0.");
+        }
+
         const Self = @This();
 
         /// Initialize NN-Descent with the given dataset and training configuration.
@@ -165,7 +176,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             const capacity_per_node = std.math.cast(usize, capacity_per_node_u64) orelse
                 return InitError.MaxCandidatesTooLarge;
 
-            const num_nodes_per_block = @min(DEFAULT_BLOCK_SIZE, neighbors_list.num_nodes);
+            const num_nodes_per_block = if (training_config.block_processing) @min(DEFAULT_BLOCK_SIZE, neighbors_list.num_nodes) else neighbors_list.num_nodes;
 
             const num_max_graph_updates: usize, const overflow = @mulWithOverflow(capacity_per_node, num_nodes_per_block);
             if (overflow != 0) return mod_neighbors.InitError.NumberOfNodesTooLarge;
@@ -247,12 +258,14 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             }
         }
 
+        /// Number of blocks for training.
+        /// Equal to 0 when the dataset is empty.
         pub fn numBlocks(self: *const Self) usize {
             return std.math.divCeil(
                 usize,
                 self.neighbors_list.num_nodes,
                 self.num_nodes_per_block,
-            ) catch unreachable; // SAFETY: BLOCK_SIZE is not zero
+            ) catch 0;
         }
 
         pub fn train(self: *Self) void {
@@ -278,7 +291,8 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 // 3. check for convergence based on delta
 
                 var updates_count: usize = 0;
-                for (0..self.numBlocks()) |block_id| {
+                const num_blocks = self.numBlocks();
+                for (0..num_blocks) |block_id| {
                     defer {
                         for (self.block_graph_updates_lists) |*list| {
                             list.clearRetainingCapacity();
