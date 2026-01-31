@@ -80,11 +80,11 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
         neighbor_candidates_old: CandidateHeapList,
         /// Lists of graph updates during training, one per thread.
         /// Uses the a slice of `graph_updates_buffer` as backing storage.
-        /// Capacity of each list is large enough to hold all possible updates in an iteration.
-        graph_updates_lists: []std.ArrayList(GraphUpdate),
-        /// Buffer to hold graph updates during generation of proposals.
-        /// Used by all arrays in `graph_updates_lists`.
-        graph_updates_buffer: []GraphUpdate,
+        /// Capacity of each list is large enough to hold all possible updates in a block.
+        block_graph_updates_lists: []std.ArrayList(GraphUpdate),
+        /// Buffer to hold graph updates during generation of proposals in one block.
+        /// Used by all array lists in `graph_updates_lists`.
+        block_graph_updates_buffer: []GraphUpdate,
         /// Buffer to hold the number of graph updates applied by each thread.
         /// Used during reduction to get total number of updates applied.
         /// Aligned for efficient SIMD access.
@@ -98,10 +98,14 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
         /// Last batch of nodes is less than or equal to this value.
         /// Is 0 when either number of dataset is empty or number of threads is 0.
         num_nodes_per_thread: usize,
+        /// Either equal to `DEFAULT_BLOCK_SIZE` or number of nodes in the graph if the latter is smaller
+        num_nodes_per_block: usize,
+        /// Number of nodes within one block each thread is responsible for.
+        num_block_nodes_per_thread: usize,
 
-        /// Holds EntryWithFlag entries.
+        /// Holds entries with flags
         const NeighborHeapList = mod_neighbors.NeighborHeapList(T, true);
-        /// Holds EntryWithoutFlag entries.
+        /// Holds entries without flags
         const CandidateHeapList = mod_neighbors.NeighborHeapList(i32, false);
         /// Represents a proposed update to the k-NN graph.
         /// Holds the IDs of the two nodes involved and their distance.
@@ -110,6 +114,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             node2_id: usize,
             distance: T,
         };
+        const DEFAULT_BLOCK_SIZE = 16384;
         const Self = @This();
 
         /// Initialize NN-Descent with the given dataset and training configuration.
@@ -142,11 +147,11 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             );
             errdefer neighbor_candidates_old.deinit(allocator);
 
-            const graph_updates_lists = try allocator.alloc(
+            const block_graph_updates_lists = try allocator.alloc(
                 std.ArrayList(GraphUpdate),
                 training_config.num_threads,
             );
-            errdefer allocator.free(graph_updates_lists);
+            errdefer allocator.free(block_graph_updates_lists);
 
             // Calculate maximum possible graph updates in an iteration
             // For each node, possible updates are:
@@ -160,27 +165,29 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             const capacity_per_node = std.math.cast(usize, capacity_per_node_u64) orelse
                 return InitError.MaxCandidatesTooLarge;
 
-            const num_max_graph_updates: usize, const overflow = @mulWithOverflow(capacity_per_node, neighbors_list.num_nodes);
+            const num_nodes_per_block = @min(DEFAULT_BLOCK_SIZE, neighbors_list.num_nodes);
+
+            const num_max_graph_updates: usize, const overflow = @mulWithOverflow(capacity_per_node, num_nodes_per_block);
             if (overflow != 0) return mod_neighbors.InitError.NumberOfNodesTooLarge;
 
-            const graph_updates_buffer = try allocator.alloc(
+            const block_graph_updates_buffer = try allocator.alloc(
                 GraphUpdate,
                 num_max_graph_updates,
             );
-            errdefer allocator.free(graph_updates_buffer);
+            errdefer allocator.free(block_graph_updates_buffer);
 
-            const num_nodes_per_thread = std.math.divCeil(
+            const num_block_nodes_per_thread = std.math.divCeil(
                 usize,
-                neighbors_list.num_nodes,
+                num_nodes_per_block,
                 training_config.num_threads,
             ) catch 0;
 
             // Each thread takes an exclusive batch of nodes which corresponds to an exclusive slice in graph_updates_buffer
-            for (graph_updates_lists, 0..) |*list, thread_id| {
-                const node_id_start = thread_id * num_nodes_per_thread;
-                const node_id_end = @min(node_id_start + num_nodes_per_thread, neighbors_list.num_nodes);
+            for (block_graph_updates_lists, 0..) |*list, thread_id| {
+                const node_id_start = thread_id * num_block_nodes_per_thread;
+                const node_id_end = @min(node_id_start + num_block_nodes_per_thread, num_nodes_per_block);
                 list.* = std.ArrayList(GraphUpdate).initBuffer(
-                    graph_updates_buffer[node_id_start * capacity_per_node .. node_id_end * capacity_per_node],
+                    block_graph_updates_buffer[node_id_start * capacity_per_node .. node_id_end * capacity_per_node],
                 );
             }
 
@@ -203,18 +210,26 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             var wait_group: std.Thread.WaitGroup = undefined;
             wait_group.reset();
 
+            const num_nodes_per_thread = std.math.divCeil(
+                usize,
+                neighbors_list.num_nodes,
+                training_config.num_threads,
+            ) catch 0;
+
             return Self{
                 .dataset = dataset,
                 .training_config = training_config,
                 .neighbors_list = neighbors_list,
                 .neighbor_candidates_new = neighbor_candidates_new,
                 .neighbor_candidates_old = neighbor_candidates_old,
-                .graph_updates_buffer = graph_updates_buffer,
+                .block_graph_updates_buffer = block_graph_updates_buffer,
                 .graph_update_counts_buffer = graph_update_counts_buffer,
-                .graph_updates_lists = graph_updates_lists,
+                .block_graph_updates_lists = block_graph_updates_lists,
                 .thread_pool = thread_pool,
                 .wait_group = wait_group,
                 .num_nodes_per_thread = num_nodes_per_thread,
+                .num_block_nodes_per_thread = num_block_nodes_per_thread,
+                .num_nodes_per_block = num_nodes_per_block,
             };
         }
 
@@ -222,14 +237,22 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             self.neighbors_list.deinit(allocator);
             self.neighbor_candidates_new.deinit(allocator);
             self.neighbor_candidates_old.deinit(allocator);
-            allocator.free(self.graph_updates_lists);
+            allocator.free(self.block_graph_updates_lists);
             // NOTE: Just need to free the buffer, since all lists use slices of it
-            allocator.free(self.graph_updates_buffer);
+            allocator.free(self.block_graph_updates_buffer);
             allocator.free(self.graph_update_counts_buffer);
             if (self.thread_pool) |pool| {
                 pool.deinit();
                 allocator.destroy(pool);
             }
+        }
+
+        pub fn numBlocks(self: *const Self) usize {
+            return std.math.divCeil(
+                usize,
+                self.neighbors_list.num_nodes,
+                self.num_nodes_per_block,
+            ) catch unreachable; // SAFETY: BLOCK_SIZE is not zero
         }
 
         pub fn train(self: *Self) void {
@@ -245,9 +268,6 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                     // TODO: Do we need to reset candidate lists, or just overwrite them in the next iteration?
                     self.neighbor_candidates_new.reset();
                     self.neighbor_candidates_old.reset();
-                    for (self.graph_updates_lists) |*list| {
-                        list.clearRetainingCapacity();
-                    }
                 }
 
                 // Sample neighbor candidates into new and old candidate lists
@@ -257,8 +277,20 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 // 2. update neighbor lists and track changes
                 // 3. check for convergence based on delta
 
-                self.generateGraphUpdateProposals();
-                const updates_count = self.applyGraphUpdatesProposals();
+                var updates_count: usize = 0;
+                for (0..self.numBlocks()) |block_id| {
+                    defer {
+                        for (self.block_graph_updates_lists) |*list| {
+                            list.clearRetainingCapacity();
+                        }
+                    }
+                    log.info("NN-Descent iteration {d} - block {d}", .{ iteration, block_id });
+                    log.info("generating graph update proposals...", .{});
+                    self.generateBlockGraphUpdateProposals(block_id);
+                    log.info("applying graph update proposals...", .{});
+                    const count = self.applyBlockGraphUpdatesProposals(block_id);
+                    updates_count += count;
+                }
 
                 log.info("Applied {d} graph updates", .{updates_count});
 
@@ -523,21 +555,29 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             }
         }
 
-        fn generateGraphUpdateProposals(self: *Self) void {
-            std.debug.assert(self.graph_updates_lists.len == self.training_config.num_threads);
+        /// Generate graph updates for all graph update lists for a block of nodes at a block ID.
+        fn generateBlockGraphUpdateProposals(self: *Self, block_id: usize) void {
+            std.debug.assert(self.block_graph_updates_lists.len == self.training_config.num_threads);
+
+            const block_start = block_id * self.num_nodes_per_block;
+            const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
+            log.debug("block_id: {} - block_start: {} - block_end: {}", .{ block_id, block_start, block_end });
 
             if (self.thread_pool) |pool| {
                 self.wait_group.reset();
                 for (0..self.training_config.num_threads) |thread_id| {
-                    const node_id_start = thread_id * self.num_nodes_per_thread;
-                    const node_id_end = @min(node_id_start + self.num_nodes_per_thread, self.neighbors_list.num_nodes);
+                    const node_id_start = @min(block_start + thread_id * self.num_block_nodes_per_thread, block_end);
+                    const node_id_end = @min(node_id_start + self.num_block_nodes_per_thread, block_end);
+                    log.debug("thread_id: {} - node_id_start: {} - node_id_end: {}", .{ thread_id, node_id_start, node_id_end });
+                    // SAFETY: Each thread only touches on heaps of nodes whose IDs are
+                    // in the range [node_id_start, node_id_end), so no data races.
                     pool.spawnWg(
                         &self.wait_group,
                         generateGraphUpdateProposalsThread,
                         .{
                             &self.dataset,
                             &self.neighbors_list,
-                            &self.graph_updates_lists[thread_id],
+                            &self.block_graph_updates_lists[thread_id],
                             &self.neighbor_candidates_new,
                             &self.neighbor_candidates_old,
                             node_id_start,
@@ -550,11 +590,11 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                 generateGraphUpdateProposalsThread(
                     &self.dataset,
                     &self.neighbors_list,
-                    &self.graph_updates_lists[0],
+                    &self.block_graph_updates_lists[0],
                     &self.neighbor_candidates_new,
                     &self.neighbor_candidates_old,
-                    0,
-                    self.neighbors_list.num_nodes,
+                    block_start,
+                    block_end,
                 );
             }
         }
@@ -636,17 +676,22 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             std.debug.assert(graph_updates_list.items.len <= graph_updates_list.capacity);
         }
 
-        /// Apply graph updates from all threads' `graph_updates_lists` to the `neighbors_list`.
+        /// Apply graph updates from all threads' graph updates lists for a block of nodes at block ID to the `neighbors_list`.
         /// Return the total number of successful updates applied.
-        fn applyGraphUpdatesProposals(self: *Self) usize {
-            if (self.thread_pool) |pool| {
-                std.debug.assert(self.graph_update_counts_buffer.len == self.training_config.num_threads);
-                std.debug.assert(self.graph_updates_lists.len == self.training_config.num_threads);
+        fn applyBlockGraphUpdatesProposals(self: *Self, block_id: usize) usize {
+            std.debug.assert(self.graph_update_counts_buffer.len == self.training_config.num_threads);
+            std.debug.assert(self.block_graph_updates_lists.len == self.training_config.num_threads);
 
+            const block_start = block_id * self.num_nodes_per_block;
+            const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
+            log.debug("block_id: {} - block_start: {} - block_end: {}", .{ block_id, block_start, block_end });
+
+            if (self.thread_pool) |pool| {
                 self.wait_group.reset();
                 for (0..self.training_config.num_threads) |thread_id| {
-                    const node_id_start = thread_id * self.num_nodes_per_thread;
-                    const node_id_end = @min(node_id_start + self.num_nodes_per_thread, self.neighbors_list.num_nodes);
+                    const node_id_start = @min(block_start + thread_id * self.num_block_nodes_per_thread, block_end);
+                    const node_id_end = @min(node_id_start + self.num_block_nodes_per_thread, block_end);
+                    log.debug("thread_id: {} - node_id_start: {} - node_id_end: {}", .{ thread_id, node_id_start, node_id_end });
                     // SAFETY: Each thread only touches on heaps of nodes whose IDs are
                     // in the range [node_id_start, node_id_end), so no data races.
                     pool.spawnWg(
@@ -654,7 +699,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                         applyGraphUpdatesProposalsThread,
                         .{
                             &self.neighbors_list,
-                            &self.graph_updates_lists[thread_id],
+                            &self.block_graph_updates_lists[thread_id],
                             &self.graph_update_counts_buffer[thread_id],
                             node_id_start,
                             node_id_end,
@@ -668,10 +713,10 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
             } else {
                 applyGraphUpdatesProposalsThread(
                     &self.neighbors_list,
-                    &self.graph_updates_lists[0],
+                    &self.block_graph_updates_lists[0],
                     &self.graph_update_counts_buffer[0],
-                    0,
-                    self.neighbors_list.num_nodes,
+                    block_start,
+                    block_end,
                 );
                 return self.graph_update_counts_buffer[0];
             }
@@ -855,14 +900,14 @@ test "NNDescent - graph_updates_lists have separate buffers (no overlap)" {
     defer nn_descent.deinit(std.testing.allocator);
 
     // Verify we actually have multiple threads
-    try std.testing.expect(nn_descent.graph_updates_lists.len == num_threads);
+    try std.testing.expect(nn_descent.block_graph_updates_lists.len == num_threads);
 
     // Test 1: Verify each list has a distinct buffer slice
-    for (nn_descent.graph_updates_lists, 0..) |list1, i| {
+    for (nn_descent.block_graph_updates_lists, 0..) |list1, i| {
         const buf1_start = @intFromPtr(list1.items.ptr);
         const buf1_end = buf1_start + list1.capacity * @sizeOf(NND.GraphUpdate);
 
-        for (nn_descent.graph_updates_lists[i + 1 ..], i + 1..) |list2, j| {
+        for (nn_descent.block_graph_updates_lists[i + 1 ..], i + 1..) |list2, j| {
             const buf2_start = @intFromPtr(list2.items.ptr);
             const buf2_end = buf2_start + list2.capacity * @sizeOf(NND.GraphUpdate);
 
@@ -882,10 +927,10 @@ test "NNDescent - graph_updates_lists have separate buffers (no overlap)" {
     }
 
     // Test 2: Verify all buffers are within the main graph_updates_buffer
-    const main_buf_start = @intFromPtr(nn_descent.graph_updates_buffer.ptr);
-    const main_buf_end = main_buf_start + nn_descent.graph_updates_buffer.len * @sizeOf(NND.GraphUpdate);
+    const main_buf_start = @intFromPtr(nn_descent.block_graph_updates_buffer.ptr);
+    const main_buf_end = main_buf_start + nn_descent.block_graph_updates_buffer.len * @sizeOf(NND.GraphUpdate);
 
-    for (nn_descent.graph_updates_lists, 0..) |list, i| {
+    for (nn_descent.block_graph_updates_lists, 0..) |list, i| {
         const buf_start = @intFromPtr(list.items.ptr);
         const buf_end = buf_start + list.capacity * @sizeOf(NND.GraphUpdate);
 
@@ -904,11 +949,11 @@ test "NNDescent - graph_updates_lists have separate buffers (no overlap)" {
 
     // Test 3: Verify sum of all list capacities == main buffer length
     var total_capacity: usize = 0;
-    for (nn_descent.graph_updates_lists) |list| {
+    for (nn_descent.block_graph_updates_lists) |list| {
         total_capacity += list.capacity;
     }
 
-    try std.testing.expect(total_capacity == nn_descent.graph_updates_buffer.len);
+    try std.testing.expect(total_capacity == nn_descent.block_graph_updates_buffer.len);
 }
 
 test "NNDescent - max distance decreases each iteration" {
@@ -964,21 +1009,30 @@ test "NNDescent - max distance decreases each iteration" {
         max_distances[node_id * num_iterations] = nn_descent.neighbors_list.getEntryFieldSlice(node_id, .distance)[0];
     }
 
+    var updates_count: usize = 0;
+
     // Run a few iterations and track max distance
     for (1..num_iterations) |iteration| {
+        defer {
+            nn_descent.neighbor_candidates_new.reset();
+            nn_descent.neighbor_candidates_old.reset();
+        }
+
         nn_descent.sampleNeighborCandidates();
-        nn_descent.generateGraphUpdateProposals();
-        _ = nn_descent.applyGraphUpdatesProposals();
+        for (0..nn_descent.numBlocks()) |block_id| {
+            defer {
+                for (nn_descent.block_graph_updates_lists) |*list| {
+                    list.clearRetainingCapacity();
+                }
+            }
+            nn_descent.generateBlockGraphUpdateProposals(block_id);
+            const count = nn_descent.applyBlockGraphUpdatesProposals(block_id);
+            updates_count += count;
+        }
 
         // Get max distance after this iteration
         for (0..num_nodes) |node_id| {
             max_distances[node_id * num_iterations + iteration] = nn_descent.neighbors_list.getEntryFieldSlice(node_id, .distance)[0];
-        }
-
-        nn_descent.neighbor_candidates_new.reset();
-        nn_descent.neighbor_candidates_old.reset();
-        for (nn_descent.graph_updates_lists) |*list| {
-            list.clearRetainingCapacity();
         }
     }
 
