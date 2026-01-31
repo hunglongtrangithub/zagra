@@ -616,7 +616,7 @@ pub fn NNDescent(comptime T: type, comptime N: usize) type {
                         const cand2_id_usize: usize = @intCast(cand2_id);
                         const cand2_vector = dataset.getUnchecked(cand2_id_usize);
                         // Take current max distance in neighbor heap as threshold
-                        const cand2_distance_threshold: T = neighbors_list.getEntryFieldSlice(local_join_id, .distance)[0];
+                        const cand2_distance_threshold: T = neighbors_list.getEntryFieldSlice(cand2_id_usize, .distance)[0];
 
                         const distance = cand1_vector.sqdist(cand2_vector);
 
