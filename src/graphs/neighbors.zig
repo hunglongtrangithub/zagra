@@ -157,7 +157,7 @@ pub fn NeighborHeapList(comptime T: type, comptime store_flags: bool) type {
 
             // Get the start index for the heap of the specified node
             const heap_start = node_id * self.num_neighbors_per_node;
-            const distance_heap: []T = self.entries.items(.distance)[heap_start .. heap_start + self.num_neighbors_per_node];
+            const distance_heap: []const T = self.entries.items(.distance)[heap_start .. heap_start + self.num_neighbors_per_node];
 
             // Heapify down from the root to restore max-heap property
             // Set the new entry's initial index to 0 (root)

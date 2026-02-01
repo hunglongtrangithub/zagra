@@ -486,8 +486,8 @@ pub fn NNDescent(
             const rng = prng.random();
 
             for (0..neighbors_list.num_nodes) |node_id| {
-                const neighbor_id_slice: []isize = neighbors_list.getEntryFieldSlice(node_id, .neighbor_id);
-                const is_new_slice: []bool = neighbors_list.getEntryFieldSlice(node_id, .is_new);
+                const neighbor_id_slice: []const isize = neighbors_list.getEntryFieldSlice(node_id, .neighbor_id);
+                const is_new_slice: []const bool = neighbors_list.getEntryFieldSlice(node_id, .is_new);
 
                 for (0..neighbors_list.num_neighbors_per_node) |neighbor_idx| {
                     // Skip this neighbor slot if it's empty
@@ -548,9 +548,9 @@ pub fn NNDescent(
             std.debug.assert(node_id_start <= node_id_end and node_id_end <= neighbors_list.num_nodes);
 
             for (node_id_start..node_id_end) |node_id| {
-                const neighbor_id_slice: []isize = neighbors_list.getEntryFieldSlice(node_id, .neighbor_id);
+                const neighbor_id_slice: []const isize = neighbors_list.getEntryFieldSlice(node_id, .neighbor_id);
                 const is_new_slice: []bool = neighbors_list.getEntryFieldSlice(node_id, .is_new);
-                const neighbor_candidate_id_slice: []isize = neighbor_candidates_new.getEntryFieldSlice(node_id, .neighbor_id);
+                const neighbor_candidate_id_slice: []const isize = neighbor_candidates_new.getEntryFieldSlice(node_id, .neighbor_id);
 
                 for (0..neighbors_list.num_neighbors_per_node) |neighbor_idx| {
                     const neighbor_id = neighbor_id_slice[neighbor_idx];
@@ -633,8 +633,8 @@ pub fn NNDescent(
 
             // Go through all local joins in the given range
             for (local_join_id_start..local_join_id_end) |local_join_id| {
-                const new_candidate_ids: []isize = neighbor_candidates_new.getEntryFieldSlice(local_join_id, .neighbor_id);
-                const old_candidate_ids: []isize = neighbor_candidates_old.getEntryFieldSlice(local_join_id, .neighbor_id);
+                const new_candidate_ids: []const isize = neighbor_candidates_new.getEntryFieldSlice(local_join_id, .neighbor_id);
+                const old_candidate_ids: []const isize = neighbor_candidates_old.getEntryFieldSlice(local_join_id, .neighbor_id);
 
                 for (new_candidate_ids, 0..) |cand1_id, i| {
                     if (cand1_id == CandidateHeapList.EMPTY_ID) continue;
@@ -793,8 +793,8 @@ pub fn NNDescent(
         }
 
         /// Sum up the graph update counts from all threads using SIMD.
-        fn sumUpGraphUpdateCountsSIMD(graph_update_counts_buffer: []align(64) usize) usize {
-            const counts_ptr: [*]align(64) usize = graph_update_counts_buffer.ptr;
+        fn sumUpGraphUpdateCountsSIMD(graph_update_counts_buffer: []align(64) const usize) usize {
+            const counts_ptr: [*]align(64) const usize = graph_update_counts_buffer.ptr;
             const num_counts = graph_update_counts_buffer.len;
 
             const vector_size = std.simd.suggestVectorLength(usize) orelse
