@@ -196,12 +196,13 @@ pub fn main() !void {
     try stdout.print("Training for {} vectors took: {}s\n", .{ dataset.len, elapsed_time_s });
     try stdout.flush();
 
-    // const neighbors_list = nn_descent.neighbors_list;
-    //
-    // try stdout.print("neighbors_list: {} nodes x {} neighbors per node\n", .{ neighbors_list.num_nodes, neighbors_list.num_neighbors_per_node });
-    // std.debug.assert(neighbors_list.num_nodes * neighbors_list.num_neighbors_per_node == neighbors_list.entries.len);
-    //
-    // for (0..neighbors_list.entries.len) |i| {
-    //     try stdout.print("neighbors_list entry at index {}: {any}\n", .{ i, neighbors_list.entries.get(i) });
-    // }
+    try stdout.print("Graph after training:\n", .{});
+    for (0..nn_descent.neighbors_list.num_nodes) |node_id| {
+        try stdout.print("Node {}:\n", .{node_id});
+        for (0..nn_descent.neighbors_list.num_neighbors_per_node) |neighbor_id| {
+            const neighbor_distance = nn_descent.neighbors_list.getEntryFieldSlice(node_id, .distance)[neighbor_id];
+            try stdout.print(" " ** 4 ++ "Neighbor {}: distance {}\n", .{ neighbor_id, neighbor_distance });
+        }
+    }
+    try stdout.flush();
 }

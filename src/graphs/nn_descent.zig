@@ -275,6 +275,9 @@ pub fn NNDescent(
             // Step 1: Populate initial random neighbors
             self.populateRandomNeighbors();
 
+            const convergence_threshold = @as(usize, @intFromFloat(self.training_config.delta * @as(f32, @floatFromInt(self.neighbors_list.entries.len))));
+            log.info("Convergence threshold: {}", .{convergence_threshold});
+
             // Step 2: Iteratively refine the neighbor lists
             for (0..self.training_config.max_iterations) |iteration| {
                 log.info("NN-Descent iteration {d}", .{iteration});
@@ -309,9 +312,7 @@ pub fn NNDescent(
 
                 log.info("Applied {d} graph updates", .{updates_count});
 
-                if (updates_count <=
-                    @as(usize, @intFromFloat(self.training_config.delta)) * self.neighbors_list.num_nodes * self.neighbors_list.num_neighbors_per_node)
-                {
+                if (updates_count <= convergence_threshold) {
                     log.info("Converged after {d} iterations", .{iteration + 1});
                     break;
                 }
@@ -354,6 +355,9 @@ pub fn NNDescent(
                     self.training_config.seed,
                 );
             }
+
+            // There should be no empty neighbor IDs left for all node IDs
+            std.debug.assert(std.mem.indexOfScalar(isize, self.neighbors_list.entries.items(.neighbor_id), NeighborHeapList.EMPTY_ID) == null);
         }
 
         /// Populate a batch of nodes, starting from `node_id_start` (inclusive) to `node_id_end` (exclusive),
@@ -376,10 +380,13 @@ pub fn NNDescent(
 
             for (node_id_start..node_id_end) |node_id| {
                 const node = dataset.getUnchecked(node_id);
-                for (0..neighbors_list.num_neighbors_per_node) |_| {
+
+                // Try to fill all neighbor entries of the node's neighbor list
+                var num_trials = neighbors_list.num_neighbors_per_node;
+                while (num_trials > 0) : (num_trials -= 1) {
                     // We accept the possibility of a node pointing to itself here.
                     // TODO: Consider avoiding self-loops?
-                    const neighbor_id = rng.intRangeAtMost(usize, 0, num_nodes - 1);
+                    const neighbor_id = rng.int(usize) % neighbors_list.num_nodes;
 
                     const neighbor = dataset.getUnchecked(neighbor_id);
                     const distance = node.sqdist(neighbor);
@@ -391,7 +398,8 @@ pub fn NNDescent(
                         .is_new = true,
                     };
 
-                    _ = neighbors_list.tryAddNeighbor(node_id, neighbor_entry);
+                    const added = neighbors_list.tryAddNeighbor(node_id, neighbor_entry);
+                    if (!added) num_trials += 1; // Not added => try one more time
                 }
             }
         }
