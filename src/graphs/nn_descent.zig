@@ -62,6 +62,8 @@ pub const TrainingConfig = struct {
 pub const InitError = error{
     /// The specified maximum number of candidates is too large. Should be no more than i32 max.
     MaxCandidatesTooLarge,
+    /// Invalid number of threads specified in the training config. Should be larger than zero.
+    InvalidNumThreads,
 };
 
 /// NN-Descent struct to construct the k-NN graph from a dataset.
@@ -135,6 +137,7 @@ pub fn NNDescent(
             allocator: std.mem.Allocator,
         ) (InitError || mod_neighbors.InitError || std.mem.Allocator.Error)!Self {
             if (training_config.max_candidates > std.math.maxInt(i32)) return InitError.MaxCandidatesTooLarge;
+            if (training_config.num_threads == 0) return InitError.InvalidNumThreads;
 
             var neighbors_list = try NeighborHeapList.init(
                 dataset.len,
@@ -825,7 +828,7 @@ pub fn NNDescent(
     };
 }
 
-test "NNDescent - empty dataset and zero threads" {
+test "NNDescent - no panic on empty dataset" {
     // Create an empty dataset
     const Dataset = mod_dataset.Dataset(f32, 128);
     const dummy_buffer: [0]f32 align(64) = undefined;
@@ -838,7 +841,7 @@ test "NNDescent - empty dataset and zero threads" {
     const config = TrainingConfig.init(
         5,
         dataset.len,
-        0,
+        null,
         42,
     );
 
