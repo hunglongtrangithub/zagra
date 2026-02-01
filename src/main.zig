@@ -12,8 +12,9 @@ var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
 const stdout = &stdout_writer.interface;
 
 const HELP =
-    \\zagra <vector_count> <block_processing>
+    \\zagra <vector_count> <graph_degree> [block_processing]
     \\- vector_count (required): Number of vectors in the dataset
+    \\- graph_degree (required): Graph degree of vectors in the KNN graph
     \\- block_processing (optional - default to true): Whether to use block processing mode during training
 ;
 
@@ -24,20 +25,34 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     var args = try std.process.argsWithAllocator(allocator);
+    defer args.deinit();
 
     _ = args.skip();
 
     const vector_count_str = args.next() orelse {
-        std.debug.print("vector count needed.{s}\n", .{HELP});
+        std.debug.print("vector count needed.\n{s}", .{HELP});
         return;
     };
     const vector_count = std.fmt.parseInt(usize, vector_count_str, 10) catch |e| {
         switch (e) {
-            error.Overflow => std.debug.print("Entered input is too large for usize\n", .{}),
-            error.InvalidCharacter => std.debug.print("Entered input is not a valid number\n", .{}),
+            error.Overflow => std.debug.print("Entered vector count is too large for usize\n", .{}),
+            error.InvalidCharacter => std.debug.print("Entered vector count is not a valid number\n", .{}),
         }
         return;
     };
+
+    const graph_degree_str = args.next() orelse {
+        std.debug.print("graph degree needed.\n{s}", .{HELP});
+        return;
+    };
+    const graph_degree = std.fmt.parseInt(usize, graph_degree_str, 10) catch |e| {
+        switch (e) {
+            error.Overflow => std.debug.print("Entered graph degree is too large for usize\n", .{}),
+            error.InvalidCharacter => std.debug.print("Entered graph degree is not a valid number\n", .{}),
+        }
+        return;
+    };
+    try stdout.print("Number of neighbors per vector: {any}\n", .{graph_degree});
 
     const block_processing = blk: {
         if (args.next()) |str| {
@@ -158,6 +173,8 @@ pub fn main() !void {
         42,
     );
     training_config.block_processing = block_processing;
+    training_config.num_neighbors_per_node = graph_degree;
+
     var nn_descent = NNDescent.init(
         dataset,
         training_config,
