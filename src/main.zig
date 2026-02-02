@@ -103,6 +103,8 @@ pub fn main() !void {
         std.debug.print("Error writing array to disk: {}", .{e});
         return;
     };
+    try file_writer.interface.flush();
+
     npy_file_to_write.close();
     try stdout.print("Wrote Npy array to {s}\n", .{npy_file_name});
     try stdout.flush();
@@ -196,13 +198,14 @@ pub fn main() !void {
     try stdout.print("Training for {} vectors took: {}s\n", .{ dataset.len, elapsed_time_s });
     try stdout.flush();
 
-    try stdout.print("Graph after training:\n", .{});
-    for (0..nn_descent.neighbors_list.num_nodes) |node_id| {
-        try stdout.print("Node {}:\n", .{node_id});
-        for (0..nn_descent.neighbors_list.num_neighbors_per_node) |neighbor_id| {
-            const neighbor_distance = nn_descent.neighbors_list.getEntryFieldSlice(node_id, .distance)[neighbor_id];
-            try stdout.print(" " ** 4 ++ "Neighbor {}: distance {}\n", .{ neighbor_id, neighbor_distance });
-        }
-    }
-    try stdout.flush();
+    // try stdout.print("Graph after training:\n", .{});
+    // for (0..nn_descent.neighbors_list.num_nodes) |node_id| {
+    //     try stdout.print("Node {}:\n", .{node_id});
+    //     for (0..nn_descent.neighbors_list.num_neighbors_per_node) |neighbor_idx| {
+    //         const neighbor_id: isize = nn_descent.neighbors_list.getEntryFieldSlice(node_id, .neighbor_id)[neighbor_idx];
+    //         const neighbor_distance: element_type = nn_descent.neighbors_list.getEntryFieldSlice(node_id, .distance)[neighbor_idx];
+    //         try stdout.print(" " ** 4 ++ "Neighbor {}: distance {}\n", .{ neighbor_id, neighbor_distance });
+    //     }
+    // }
+    // try stdout.flush();
 }

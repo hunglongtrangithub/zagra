@@ -8,6 +8,7 @@ const mod_dataset = @import("../dataset.zig");
 /// Referenced from https://github.com/brj0/nndescent/blob/main/src/nnd.h
 pub const TrainingConfig = struct {
     /// The number of neighbors (k) each point should have in the k-NN graph.
+    /// Should be no more than the number of vectors in the dataset.
     num_neighbors_per_node: usize,
 
     /// The maximum number of NN-descent iterations to perform. The NN-descent
@@ -64,6 +65,8 @@ pub const InitError = error{
     MaxCandidatesTooLarge,
     /// Invalid number of threads specified in the training config. Should be larger than zero.
     InvalidNumThreads,
+    /// Invalid number of neighbors per node. Should be less than the number of vectors in the dataset.
+    InvalidNumNeighborsPerNode,
 };
 
 /// NN-Descent struct to construct the k-NN graph from a dataset.
@@ -138,6 +141,7 @@ pub fn NNDescent(
         ) (InitError || mod_neighbors.InitError || std.mem.Allocator.Error)!Self {
             if (training_config.max_candidates > std.math.maxInt(i32)) return InitError.MaxCandidatesTooLarge;
             if (training_config.num_threads == 0) return InitError.InvalidNumThreads;
+            if (training_config.num_neighbors_per_node > dataset.len) return InitError.InvalidNumNeighborsPerNode;
 
             var neighbors_list = try NeighborHeapList.init(
                 dataset.len,
@@ -196,7 +200,7 @@ pub fn NNDescent(
 
             // Each thread takes an exclusive batch of nodes which corresponds to an exclusive slice in graph_updates_buffer
             for (block_graph_updates_lists, 0..) |*list, thread_id| {
-                const node_id_start = thread_id * num_block_nodes_per_thread;
+                const node_id_start = @min(thread_id * num_block_nodes_per_thread, num_nodes_per_block);
                 const node_id_end = @min(node_id_start + num_block_nodes_per_thread, num_nodes_per_block);
                 list.* = std.ArrayList(GraphUpdate).initBuffer(
                     block_graph_updates_buffer[node_id_start * capacity_per_node .. node_id_end * capacity_per_node],
@@ -327,7 +331,7 @@ pub fn NNDescent(
             if (self.thread_pool) |pool| {
                 self.wait_group.reset();
                 for (0..self.training_config.num_threads) |thread_id| {
-                    const node_id_start = thread_id * self.num_nodes_per_thread;
+                    const node_id_start = @min(thread_id * self.num_nodes_per_thread, self.neighbors_list.num_nodes);
                     const node_id_end = @min(node_id_start + self.num_nodes_per_thread, self.neighbors_list.num_nodes);
 
                     // SAFETY: Each thread populate neighbors on non-overlapping range of nodes,
@@ -385,7 +389,6 @@ pub fn NNDescent(
                 var num_trials = neighbors_list.num_neighbors_per_node;
                 while (num_trials > 0) : (num_trials -= 1) {
                     // We accept the possibility of a node pointing to itself here.
-                    // TODO: Consider avoiding self-loops?
                     const neighbor_id = rng.int(usize) % neighbors_list.num_nodes;
 
                     const neighbor = dataset.getUnchecked(neighbor_id);
@@ -413,7 +416,7 @@ pub fn NNDescent(
             if (self.thread_pool) |pool| {
                 self.wait_group.reset();
                 for (0..self.training_config.num_threads) |thread_id| {
-                    const node_id_start = thread_id * self.num_nodes_per_thread;
+                    const node_id_start = @min(thread_id * self.num_nodes_per_thread, self.neighbors_list.num_nodes);
                     const node_id_end = @min(node_id_start + self.num_nodes_per_thread, self.neighbors_list.num_nodes);
 
                     // SAFETY: Each thread only touches on heaps of nodes whose IDs are
@@ -438,7 +441,7 @@ pub fn NNDescent(
                 self.wait_group.reset();
                 // Mark sampled nodes in neighbors_list as not new anymore
                 for (0..self.training_config.num_threads) |thread_id| {
-                    const node_id_start = thread_id * self.num_nodes_per_thread;
+                    const node_id_start = @min(thread_id * self.num_nodes_per_thread, self.neighbors_list.num_nodes);
                     const node_id_end = @min(node_id_start + self.num_nodes_per_thread, self.neighbors_list.num_nodes);
 
                     // SAFETY: Each thread only touches on heaps of nodes whose IDs are
@@ -836,34 +839,41 @@ pub fn NNDescent(
     };
 }
 
-test "NNDescent - no panic on empty dataset" {
-    // Create an empty dataset
-    const Dataset = mod_dataset.Dataset(f32, 128);
-    const dummy_buffer: [0]f32 align(64) = undefined;
-    const dataset = Dataset{
+test "NNDescent - no panic on empty dataset & zero graph degree" {
+    const T = f32;
+    const N = 128;
+    const dummy_buffer: [N]f32 align(64) = undefined;
+
+    // Dataset with 0 vectors + graph degree of 0
+    const Dataset = mod_dataset.Dataset(T, N);
+    var dataset = Dataset{
         .data_buffer = dummy_buffer[0..0],
         .len = 0,
     };
-
-    // Create training config with zero threads
-    const config = TrainingConfig.init(
-        5,
+    var config = TrainingConfig.init(
+        0,
         dataset.len,
         null,
         42,
     );
-
-    // Initialize NNDescent - should not panic
-    var nn_descent = try NNDescent(f32, 128).init(
+    var nn_descent = try NNDescent(T, N).init(
         dataset,
         config,
         std.testing.allocator,
     );
-
-    // Train - should not panic on empty dataset
     nn_descent.train();
+    nn_descent.deinit(std.testing.allocator);
 
-    // Deinitialize - should not panic
+    // Dataset with 1 vector + graph degree of 0
+    dataset.data_buffer = dummy_buffer[0..N];
+    dataset.len = 1;
+    config.num_neighbors_per_node = 0;
+    nn_descent = try NNDescent(T, N).init(
+        dataset,
+        config,
+        std.testing.allocator,
+    );
+    nn_descent.train();
     nn_descent.deinit(std.testing.allocator);
 }
 
