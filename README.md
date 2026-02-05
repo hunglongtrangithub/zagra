@@ -13,7 +13,7 @@ To achieve this, I chose Zig to leverages Zig's unique capabilities, such as **c
 - [x] Basic vector operations
   - [x] Support `f32` and `f16` data types (float and half), with dimensionality of 128, 256, and 512
   - [x] SIMD-accelerated squared Euclidean distance of vectors
-  - [x] `align(64)` memory layout of vector buffers for cache efficiency
+  - [x] `align(64)` memory layout of vector buffers for SIMD efficiency
 - [x] Vector dataset loading and vector access
   - [x] Support for `.npy` file loading via **buffered I/O** (`std.io.Reader`) or via **memory-mapping** `std.posix.mmap` for large datasets
 
