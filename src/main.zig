@@ -22,6 +22,7 @@ pub fn main() !void {
     std.debug.print("This is Zagra!\n", .{});
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
+    defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     var args = try std.process.argsWithAllocator(allocator);

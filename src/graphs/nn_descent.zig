@@ -181,7 +181,10 @@ pub fn NNDescent(
             const capacity_per_node = std.math.cast(usize, capacity_per_node_u64) orelse
                 return InitError.MaxCandidatesTooLarge;
 
-            const num_nodes_per_block = if (training_config.block_processing) @min(DEFAULT_BLOCK_SIZE, neighbors_list.num_nodes) else neighbors_list.num_nodes;
+            const num_nodes_per_block = if (training_config.block_processing)
+                @min(DEFAULT_BLOCK_SIZE, neighbors_list.num_nodes)
+            else
+                neighbors_list.num_nodes;
 
             const num_max_graph_updates: usize, const overflow = @mulWithOverflow(capacity_per_node, num_nodes_per_block);
             if (overflow != 0) return InitError.MaxCandidatesTooLarge;
@@ -361,7 +364,11 @@ pub fn NNDescent(
             }
 
             // There should be no empty neighbor IDs left for all node IDs
-            std.debug.assert(std.mem.indexOfScalar(isize, self.neighbors_list.entries.items(.neighbor_id), NeighborHeapList.EMPTY_ID) == null);
+            std.debug.assert(std.mem.indexOfScalar(
+                isize,
+                self.neighbors_list.entries.items(.neighbor_id),
+                NeighborHeapList.EMPTY_ID,
+            ) == null);
         }
 
         /// Populate a batch of nodes, starting from `node_id_start` (inclusive) to `node_id_end` (exclusive),

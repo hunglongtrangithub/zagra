@@ -139,7 +139,7 @@ pub fn NeighborHeapList(comptime T: type, comptime store_flags: bool) type {
             if (neighbor_entry.distance >= max_distance) return false;
 
             // Check for duplicate neighbor IDs
-            const neighbor_ids: []isize = self.entries.items(.neighbor_id)[heap_start .. heap_start + self.num_neighbors_per_node];
+            const neighbor_ids: []const isize = self.entries.items(.neighbor_id)[heap_start .. heap_start + self.num_neighbors_per_node];
             if (std.mem.indexOfScalar(isize, neighbor_ids, neighbor_entry.neighbor_id) != null) {
                 return false;
             }
