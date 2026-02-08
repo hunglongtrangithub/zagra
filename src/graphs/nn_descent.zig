@@ -4,6 +4,27 @@ const log = std.log.scoped(.nn_descent);
 const mod_neighbors = @import("neighbors.zig");
 const mod_dataset = @import("../dataset.zig");
 
+pub const IterationTiming = struct {
+    iteration: usize,
+    sample_candidates_ns: u64,
+    generate_proposals_ns: u64,
+    apply_updates_ns: u64,
+    total_iteration_ns: u64,
+    updates_count: usize,
+};
+
+pub const TrainingTiming = struct {
+    init_random_ns: u64,
+    iterations: std.ArrayList(IterationTiming),
+    total_training_ns: u64,
+    num_iterations_completed: usize,
+    converged: bool,
+
+    pub fn deinit(self: *TrainingTiming, allocator: std.mem.Allocator) void {
+        self.iterations.deinit(allocator);
+    }
+};
+
 /// Configuration parameters for training the k-NN graph using NN-descent.
 /// Referenced from https://github.com/brj0/nndescent/blob/main/src/nnd.h
 pub const TrainingConfig = struct {
@@ -274,6 +295,105 @@ pub fn NNDescent(
                 self.neighbors_list.num_nodes,
                 self.num_nodes_per_block,
             ) catch 0;
+        }
+
+        pub fn trainWithTiming(self: *Self, allocator: std.mem.Allocator) !TrainingTiming {
+            var timing = TrainingTiming{
+                .init_random_ns = 0,
+                .iterations = std.ArrayList(IterationTiming).empty,
+                .total_training_ns = 0,
+                .num_iterations_completed = 0,
+                .converged = false,
+            };
+            errdefer timing.deinit(allocator);
+
+            var total_timer = try std.time.Timer.start();
+            var timer = try std.time.Timer.start();
+
+            log.debug("Using {} threads", .{self.training_config.num_threads});
+            log.info("Populating random neighbors", .{});
+
+            // Step 1: Populate initial random neighbors
+            timer.reset();
+            self.populateRandomNeighbors();
+            timing.init_random_ns = timer.read();
+
+            const convergence_threshold = @as(usize, @intFromFloat(self.training_config.delta * @as(f32, @floatFromInt(self.neighbors_list.entries.len))));
+            log.info("Convergence threshold: {}", .{convergence_threshold});
+
+            // Step 2: Iteratively refine the neighbor lists
+            for (0..self.training_config.max_iterations) |iteration| {
+                log.info("NN-Descent iteration {d}", .{iteration});
+                defer {
+                    self.neighbor_candidates_new.reset();
+                    self.neighbor_candidates_old.reset();
+                }
+
+                var iter_timing = IterationTiming{
+                    .iteration = iteration,
+                    .sample_candidates_ns = 0,
+                    .generate_proposals_ns = 0,
+                    .apply_updates_ns = 0,
+                    .total_iteration_ns = 0,
+                    .updates_count = 0,
+                };
+
+                var iter_timer = try std.time.Timer.start();
+
+                // Sample neighbor candidates into new and old candidate lists
+                timer.reset();
+                self.sampleNeighborCandidates();
+                iter_timing.sample_candidates_ns = timer.read();
+
+                var updates_count: usize = 0;
+                const num_blocks = self.numBlocks();
+
+                var gen_total_ns: u64 = 0;
+                var apply_total_ns: u64 = 0;
+
+                for (0..num_blocks) |block_id| {
+                    defer {
+                        for (self.block_graph_updates_lists) |*list| {
+                            list.clearRetainingCapacity();
+                        }
+                    }
+
+                    log.info("NN-Descent iteration {d} - block {d}", .{ iteration, block_id });
+
+                    log.info("generating graph update proposals...", .{});
+                    timer.reset();
+                    self.generateBlockGraphUpdateProposals(block_id);
+                    gen_total_ns += timer.read();
+
+                    log.info("applying graph update proposals...", .{});
+                    timer.reset();
+                    const count = self.applyBlockGraphUpdatesProposals(block_id);
+                    apply_total_ns += timer.read();
+
+                    updates_count += count;
+                }
+
+                iter_timing.generate_proposals_ns = gen_total_ns;
+                iter_timing.apply_updates_ns = apply_total_ns;
+                iter_timing.updates_count = updates_count;
+                iter_timing.total_iteration_ns = iter_timer.read();
+
+                try timing.iterations.append(allocator, iter_timing);
+                timing.num_iterations_completed = iteration + 1;
+
+                log.info("Applied {d} graph updates", .{updates_count});
+
+                if (updates_count <= convergence_threshold) {
+                    log.info("Converged after {d} iterations", .{iteration + 1});
+                    timing.converged = true;
+                    break;
+                }
+            }
+
+            timing.total_training_ns = total_timer.read();
+            log.info("NN-Descent training completed", .{});
+
+            return timing;
         }
 
         pub fn train(self: *Self) void {
