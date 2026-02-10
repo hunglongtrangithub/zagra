@@ -162,7 +162,7 @@ pub fn NNDescent(
         ) (InitError || mod_neighbors.InitError || std.mem.Allocator.Error)!Self {
             if (training_config.max_candidates > std.math.maxInt(i32)) return InitError.MaxCandidatesTooLarge;
             if (training_config.num_threads == 0) return InitError.InvalidNumThreads;
-            if (training_config.num_neighbors_per_node > dataset.len) return InitError.InvalidNumNeighborsPerNode;
+            if (training_config.num_neighbors_per_node >= dataset.len) return InitError.InvalidNumNeighborsPerNode;
 
             var neighbors_list = try NeighborHeapList.init(
                 dataset.len,
@@ -513,10 +513,10 @@ pub fn NNDescent(
                 const node = dataset.getUnchecked(node_id);
 
                 // Try to fill all neighbor entries of the node's neighbor list
-                var num_trials = neighbors_list.num_neighbors_per_node;
-                while (num_trials > 0) : (num_trials -= 1) {
-                    // We accept the possibility of a node pointing to itself here.
+                var success_count: usize = 0;
+                while (success_count < neighbors_list.num_neighbors_per_node) {
                     const neighbor_id = rng.int(usize) % neighbors_list.num_nodes;
+                    if (neighbor_id == node_id) continue; // Don't accept self as neighbor
 
                     const neighbor = dataset.getUnchecked(neighbor_id);
                     const distance = node.sqdist(neighbor);
@@ -529,7 +529,7 @@ pub fn NNDescent(
                     };
 
                     const added = neighbors_list.tryAddNeighbor(node_id, neighbor_entry);
-                    if (!added) num_trials += 1; // Not added => try one more time
+                    success_count += @intFromBool(added);
                 }
             }
         }
@@ -971,31 +971,30 @@ test "NNDescent - no panic on empty dataset & zero graph degree" {
     const N = 128;
     const dummy_buffer: [N]f32 align(64) = undefined;
 
-    // Dataset with 0 vectors + graph degree of 0
+    // Dataset with 0 vectors should return error
     const Dataset = mod_dataset.Dataset(T, N);
     var dataset = Dataset{
         .data_buffer = dummy_buffer[0..0],
         .len = 0,
     };
     var config = TrainingConfig.init(
-        0,
+        1,
         dataset.len,
         null,
         42,
     );
-    var nn_descent = try NNDescent(T, N).init(
+    const result = NNDescent(T, N).init(
         dataset,
         config,
         std.testing.allocator,
     );
-    nn_descent.train();
-    nn_descent.deinit(std.testing.allocator);
+    try std.testing.expectEqual(result, error.InvalidNumNeighborsPerNode);
 
-    // Dataset with 1 vector + graph degree of 0
+    // Dataset with 1 vector + graph degree of 0 should not panic
     dataset.data_buffer = dummy_buffer[0..N];
     dataset.len = 1;
     config.num_neighbors_per_node = 0;
-    nn_descent = try NNDescent(T, N).init(
+    var nn_descent = try NNDescent(T, N).init(
         dataset,
         config,
         std.testing.allocator,

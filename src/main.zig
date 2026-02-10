@@ -4,7 +4,7 @@ const znpy = @import("znpy");
 const zagra = @import("zagra");
 
 pub const std_options: std.Options = .{
-    .log_level = .err,
+    .log_level = .info,
 };
 
 var stdout_buffer: [1024]u8 = undefined;
