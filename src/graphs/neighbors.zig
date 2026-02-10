@@ -211,6 +211,12 @@ pub fn NeighborHeapList(comptime T: type, comptime store_flags: bool) type {
             const start = node_id * self.num_neighbors_per_node;
             return self.entries.items(field)[start .. start + self.num_neighbors_per_node];
         }
+
+        /// Retrieves the maximum distance (the root of the max heap) for the specified node.
+        pub fn getMaxDistance(self: *const Self, node_id: usize) T {
+            std.debug.assert(node_id < self.num_nodes);
+            return self.entries.items(.distance)[node_id * self.num_neighbors_per_node];
+        }
     };
 }
 

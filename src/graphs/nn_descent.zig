@@ -780,7 +780,7 @@ pub fn NNDescent(
                     const cand1_id_usize: usize = @intCast(cand1_id);
                     const cand1_vector = dataset.getUnchecked(cand1_id_usize);
                     // Take current max distance in neighbor heap as threshold
-                    const cand1_distance_threshold: T = neighbors_list.getEntryFieldSlice(cand1_id_usize, .distance)[0];
+                    const cand1_distance_threshold: T = neighbors_list.getMaxDistance(cand1_id_usize);
 
                     // New-New candidate pairs
                     for (new_candidate_ids[i + 1 ..]) |cand2_id| {
@@ -788,7 +788,7 @@ pub fn NNDescent(
                         // SAFETY: cand2_id is not EMPTY_ID, so this cast is safe.
                         const cand2_id_usize: usize = @intCast(cand2_id);
                         const cand2_vector = dataset.getUnchecked(cand2_id_usize);
-                        const cand2_distance_threshold: T = neighbors_list.getEntryFieldSlice(cand2_id_usize, .distance)[0];
+                        const cand2_distance_threshold: T = neighbors_list.getMaxDistance(cand2_id_usize);
 
                         const distance = cand1_vector.sqdist(cand2_vector);
 
@@ -809,7 +809,7 @@ pub fn NNDescent(
                         const cand2_id_usize: usize = @intCast(cand2_id);
                         const cand2_vector = dataset.getUnchecked(cand2_id_usize);
                         // Take current max distance in neighbor heap as threshold
-                        const cand2_distance_threshold: T = neighbors_list.getEntryFieldSlice(cand2_id_usize, .distance)[0];
+                        const cand2_distance_threshold: T = neighbors_list.getMaxDistance(cand2_id_usize);
 
                         const distance = cand1_vector.sqdist(cand2_vector);
 
@@ -1166,7 +1166,7 @@ test "NNDescent - max distance decreases each iteration" {
     nn_descent.populateRandomNeighbors();
     // Record initial max distance
     for (0..num_nodes) |node_id| {
-        max_distances[node_id * num_iterations] = nn_descent.neighbors_list.getEntryFieldSlice(node_id, .distance)[0];
+        max_distances[node_id * num_iterations] = nn_descent.neighbors_list.getMaxDistance(node_id);
     }
 
     var updates_count: usize = 0;
@@ -1192,7 +1192,7 @@ test "NNDescent - max distance decreases each iteration" {
 
         // Get max distance after this iteration
         for (0..num_nodes) |node_id| {
-            max_distances[node_id * num_iterations + iteration] = nn_descent.neighbors_list.getEntryFieldSlice(node_id, .distance)[0];
+            max_distances[node_id * num_iterations + iteration] = nn_descent.neighbors_list.getMaxDistance(node_id);
         }
     }
 
@@ -1253,7 +1253,7 @@ test "NNDescent - single-threaded and multi-threaded produce similar results" {
     const single_maxes = try std.testing.allocator.alloc(T, dataset.len);
     defer std.testing.allocator.free(single_maxes);
     for (0..dataset.len) |node_id| {
-        single_maxes[node_id] = nn_single.neighbors_list.getEntryFieldSlice(node_id, .distance)[0];
+        single_maxes[node_id] = nn_single.neighbors_list.getMaxDistance(node_id);
     }
 
     // Multi-threaded run
@@ -1265,7 +1265,7 @@ test "NNDescent - single-threaded and multi-threaded produce similar results" {
     const multi_maxes = try std.testing.allocator.alloc(T, dataset.len);
     defer std.testing.allocator.free(multi_maxes);
     for (0..dataset.len) |node_id| {
-        multi_maxes[node_id] = nn_single.neighbors_list.getEntryFieldSlice(node_id, .distance)[0];
+        multi_maxes[node_id] = nn_single.neighbors_list.getMaxDistance(node_id);
     }
 
     for (0..dataset.len) |node_id| {
