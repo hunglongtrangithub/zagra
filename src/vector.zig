@@ -67,12 +67,10 @@ pub fn Vector(comptime T: type, comptime N: usize) type {
 
             // Handle remainder elements
             var tail_acc: T = 0;
-            if (remainder > 0) {
-                inline for (0..remainder) |tail_idx| {
-                    const i = num_chunks * vector_size + tail_idx;
-                    const diff = v1.data[i] - v2.data[i];
-                    tail_acc += diff * diff;
-                }
+            inline for (0..remainder) |tail_idx| {
+                const i = num_chunks * vector_size + tail_idx;
+                const diff = v1.data[i] - v2.data[i];
+                tail_acc += diff * diff;
             }
 
             const final_acc = @reduce(.Add, acc) + tail_acc;
