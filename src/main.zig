@@ -87,9 +87,10 @@ pub fn main() !void {
     };
     defer allocator.free(vectors_buffer);
 
-    // Fill with increasing numbers
+    var prng = std.Random.DefaultPrng.init(42);
+    const rng = prng.random();
     for (0..vectors_buffer.len) |i| {
-        vectors_buffer[i] = @floatFromInt(i);
+        vectors_buffer[i] = rng.float(T) * 100;
     }
 
     // Create dataset from buffer
