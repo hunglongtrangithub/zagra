@@ -136,7 +136,9 @@ pub fn NeighborHeapList(comptime T: type, comptime store_flags: bool) type {
 
             // If the new distance is not smaller than the max in the heap, reject it
             const max_distance = self.entries.items(.distance)[heap_start];
-            if (neighbor_entry.distance >= max_distance) return false;
+            if (neighbor_entry.distance >= max_distance) {
+                return false;
+            }
 
             // Check for duplicate neighbor IDs
             const neighbor_ids: []const isize = self.entries.items(.neighbor_id)[heap_start .. heap_start + self.num_neighbors_per_node];
