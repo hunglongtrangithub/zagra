@@ -109,7 +109,7 @@ pub fn main() !void {
     // Benchmark configuration
     const bench_config = BenchmarkConfig{
         .vector_counts = &[_]usize{ 1_000_000, 5_000_000, 10_000_000 },
-        .graph_degrees = &[_]usize{ 8, 16, 32, 64 },
+        .graph_degrees = &[_]usize{ 8, 16, 32, 64, 128 },
         .num_threads = 4,
         .block_processing = true,
     };

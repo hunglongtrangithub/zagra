@@ -135,6 +135,8 @@ pub fn NNDescent(
         num_nodes_per_block: usize,
         /// Number of nodes within one block each thread is responsible for.
         num_block_nodes_per_thread: usize,
+        /// Pre-shuffled node IDs for random neighbor initialization
+        node_ids_random: []const usize,
 
         /// Holds entries with flags
         const NeighborHeapList = mod_neighbors.NeighborHeapList(T, true);
@@ -238,6 +240,15 @@ pub fn NNDescent(
             );
             errdefer allocator.free(graph_update_counts_buffer);
 
+            const node_ids_random = try allocator.alloc(usize, neighbors_list.num_nodes);
+            for (node_ids_random, 0..) |*elem, node_id| {
+                elem.* = node_id;
+            }
+            // Shuffle node IDs for random neighbor initialization
+            var prng = std.Random.DefaultPrng.init(training_config.seed);
+            const rng = prng.random();
+            rng.shuffle(usize, node_ids_random);
+
             const thread_pool = if (training_config.num_threads > 1) blk: {
                 const pool = try allocator.create(std.Thread.Pool);
                 pool.init(.{
@@ -270,6 +281,7 @@ pub fn NNDescent(
                 .num_nodes_per_thread = num_nodes_per_thread,
                 .num_block_nodes_per_thread = num_block_nodes_per_thread,
                 .num_nodes_per_block = num_nodes_per_block,
+                .node_ids_random = node_ids_random,
             };
         }
 
@@ -281,6 +293,7 @@ pub fn NNDescent(
             // NOTE: Just need to free the buffer, since all lists use slices of it
             allocator.free(self.block_graph_updates_buffer);
             allocator.free(self.graph_update_counts_buffer);
+            allocator.free(self.node_ids_random);
             if (self.thread_pool) |pool| {
                 pool.deinit();
                 allocator.destroy(pool);
@@ -467,8 +480,7 @@ pub fn NNDescent(
                             &self.neighbors_list,
                             node_id_start,
                             node_id_end,
-                            // Different thread has different seed
-                            self.training_config.seed + @as(u64, @intCast(thread_id)),
+                            self.node_ids_random,
                         },
                     );
                 }
@@ -479,7 +491,7 @@ pub fn NNDescent(
                     &self.neighbors_list,
                     0,
                     self.dataset.len,
-                    self.training_config.seed,
+                    self.node_ids_random,
                 );
             }
 
@@ -498,38 +510,45 @@ pub fn NNDescent(
             neighbors_list: *NeighborHeapList,
             node_id_start: usize,
             node_id_end: usize,
-            seed: u64,
+            node_ids_random: []const usize,
         ) void {
-            const num_nodes = neighbors_list.num_nodes;
-            std.debug.assert(dataset.len == num_nodes);
+            std.debug.assert(dataset.len == neighbors_list.num_nodes);
+            std.debug.assert(dataset.len == node_ids_random.len);
             // NOTE: When node_id_start == node_id_end, the loop beblow never executes
-            std.debug.assert(node_id_start <= node_id_end and node_id_end <= num_nodes);
-
+            std.debug.assert(node_id_start <= node_id_end and node_id_end <= neighbors_list.num_nodes);
             log.debug("node_id_start: {}, node_id_end: {}", .{ node_id_start, node_id_end });
-            var prng = std.Random.DefaultPrng.init(seed);
-            const rng = prng.random();
 
             for (node_id_start..node_id_end) |node_id| {
                 const node = dataset.getUnchecked(node_id);
 
                 // Try to fill all neighbor entries of the node's neighbor list
-                var success_count: usize = 0;
-                while (success_count < neighbors_list.num_neighbors_per_node) {
-                    const neighbor_id = rng.int(usize) % neighbors_list.num_nodes;
-                    if (neighbor_id == node_id) continue; // Don't accept self as neighbor
+                var idx = node_id;
+                for (0..neighbors_list.num_neighbors_per_node) |_| {
+                    var neighbor_id = node_ids_random[idx % node_ids_random.len];
+                    if (neighbor_id == node_id) {
+                        // Prevent self-loop by skipping this neighbor ID
+                        idx += 1;
+                        neighbor_id = node_ids_random[idx % node_ids_random.len];
+                    }
+                    // Increment idx to get the next random neighbor ID for the next iteration
+                    idx += 1;
 
                     const neighbor = dataset.getUnchecked(neighbor_id);
                     const distance = node.sqdist(neighbor);
 
-                    const neighbor_entry = NeighborHeapList.Entry{
-                        // SAFETY: neighbor_id is in [0, num_nodes), which fits in isize.
-                        .neighbor_id = @intCast(neighbor_id),
-                        .distance = distance,
-                        .is_new = true,
-                    };
-
-                    const added = neighbors_list.tryAddNeighbor(node_id, neighbor_entry);
-                    success_count += @intFromBool(added);
+                    const added = neighbors_list.tryAddNeighbor(
+                        node_id,
+                        NeighborHeapList.Entry{
+                            // SAFETY: neighbor_id is in [0, num_nodes), which fits in isize.
+                            .neighbor_id = @intCast(neighbor_id),
+                            .distance = distance,
+                            .is_new = true,
+                        },
+                    );
+                    // Neighbor must have been added successfully since
+                    // the neighbors do not have duplicates and the initial
+                    // distances in the neighbor heap are set to infinity.
+                    std.debug.assert(added);
                 }
             }
         }
