@@ -11,6 +11,8 @@ pub const InitError = error{
 };
 
 /// A cache-friendly list of max heaps for storing k-nearest neighbors.
+/// One heap per node, with a fixed capacity of neighbors. Each heap is organized by distance,
+/// with the maximum distance at the root.
 ///
 /// This structure stores multiple heaps in a contiguous row-major layout,
 /// where each heap represents the k-nearest neighbors of a point in the dataset.
@@ -19,7 +21,12 @@ pub const InitError = error{
 ///
 /// Generic over the distance type T that is supported in `types.ElemType`,
 /// and whether to store new/old flags for NN-Descent.
-pub fn NeighborHeapList(comptime T: type, comptime store_flags: bool) type {
+pub fn NeighborHeapList(
+    /// The distance type for neighbor entries. Must be a type supported by `types.ElemType`.
+    comptime T: type,
+    /// Whether to store new/old flags for NN-Descent. If `true`, each neighbor entry includes an `is_new` flag.
+    comptime store_flags: bool,
+) type {
     const elem_type = types.ElemType.fromZigType(T) orelse
         @compileError("Unsupported element type: " ++ @typeName(T));
 
@@ -166,27 +173,30 @@ pub fn NeighborHeapList(comptime T: type, comptime store_flags: bool) type {
             var entry_idx: usize = 0;
             while (true) {
                 const left_child_idx = 2 * entry_idx + 1;
-                const right_child_idx = left_child_idx + 1;
 
                 // Find the largest among entry and its children
-                const largest_child_idx = blk: {
+                const largest_child_idx = largest: {
                     if (left_child_idx >= distance_heap.len) {
                         // Left child out of bounds => entry does not have any children => stop
                         break;
                     }
 
                     // Determine which child to compare against (the larger one)
-                    var larger_child_idx = left_child_idx;
-                    if (right_child_idx < distance_heap.len and
-                        distance_heap[right_child_idx] > distance_heap[left_child_idx])
-                    {
-                        // Only use the right child when it is in bounds and larger than left child
-                        larger_child_idx = right_child_idx;
-                    }
+                    const larger_child_idx = larger: {
+                        const right_child_idx = left_child_idx + 1;
+                        if (right_child_idx < distance_heap.len and
+                            distance_heap[right_child_idx] > distance_heap[left_child_idx])
+                        {
+                            // Only use the right child when it is in bounds and larger than left child
+                            break :larger right_child_idx;
+                        } else {
+                            break :larger left_child_idx;
+                        }
+                    };
 
                     // Now compare the larger child with new entry
                     if (distance_heap[larger_child_idx] > new_entry.distance) {
-                        break :blk larger_child_idx;
+                        break :largest larger_child_idx;
                     } else {
                         break; // New entry is in correct position => stop
                     }
