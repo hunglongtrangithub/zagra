@@ -418,6 +418,8 @@ pub fn NNDescent(
             const convergence_threshold = @as(usize, @intFromFloat(self.training_config.delta * @as(f32, @floatFromInt(self.neighbors_list.entries.len))));
             log.info("Convergence threshold: {}", .{convergence_threshold});
 
+            const num_blocks = self.numBlocks();
+
             // Step 2: Iteratively refine the neighbor lists
             for (0..self.training_config.max_iterations) |iteration| {
                 log.info("NN-Descent iteration {d}", .{iteration});
@@ -435,7 +437,6 @@ pub fn NNDescent(
                 // 3. check for convergence based on delta
 
                 var updates_count: usize = 0;
-                const num_blocks = self.numBlocks();
                 for (0..num_blocks) |block_id| {
                     defer {
                         for (self.block_graph_updates_lists) |*list| {
@@ -456,6 +457,10 @@ pub fn NNDescent(
                     log.info("Converged after {d} iterations", .{iteration + 1});
                     break;
                 }
+            }
+
+            for (0..num_blocks) |block_id| {
+                self.sortBlockNeighbors(block_id);
             }
 
             log.info("NN-Descent training completed", .{});
@@ -981,6 +986,48 @@ pub fn NNDescent(
 
             // 3. Final reduction
             return @reduce(.Add, acc) + tail_acc;
+        }
+
+        fn sortBlockNeighbors(self: *Self, block_id: usize) void {
+            const block_start = block_id * self.num_nodes_per_block;
+            const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
+            log.debug("Sorting neighbors for block_id: {} - block_start: {} - block_end: {}", .{ block_id, block_start, block_end });
+
+            if (self.thread_pool) |pool| {
+                self.wait_group.reset();
+                for (0..self.training_config.num_threads) |thread_id| {
+                    const node_id_start = @min(block_start + thread_id * self.num_block_nodes_per_thread, block_end);
+                    const node_id_end = @min(node_id_start + self.num_block_nodes_per_thread, block_end);
+                    log.debug("thread_id: {} - node_id_start: {} - node_id_end: {}", .{ thread_id, node_id_start, node_id_end });
+
+                    const context = struct {
+                        fn sortNeighborsThread(
+                            neighbors_list: *NeighborHeapList,
+                            id_start: usize,
+                            id_end: usize,
+                        ) void {
+                            for (id_start..id_end) |id| {
+                                neighbors_list.sortNeighbors(id);
+                            }
+                        }
+                    };
+
+                    pool.spawnWg(
+                        &self.wait_group,
+                        context.sortNeighborsThread,
+                        .{
+                            &self.neighbors_list,
+                            node_id_start,
+                            node_id_end,
+                        },
+                    );
+                }
+                pool.waitAndWork(&self.wait_group);
+            } else {
+                for (block_start..block_end) |node_id| {
+                    self.neighbors_list.sortNeighbors(node_id);
+                }
+            }
         }
     };
 }

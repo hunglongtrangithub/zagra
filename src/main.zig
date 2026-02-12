@@ -70,7 +70,7 @@ pub fn main() !void {
     try stdout.print("Using block processing for training? {any}\n", .{block_processing});
 
     // Dataset configuration constants
-    const T = f32; // Element type
+    const T = i32; // Element type
     const N: usize = 128; // Vector length
 
     try stdout.print("Creating dataset with {} {}-D vectors\n", .{ vector_count, N });
@@ -90,7 +90,7 @@ pub fn main() !void {
     var prng = std.Random.DefaultPrng.init(42);
     const rng = prng.random();
     for (0..vectors_buffer.len) |i| {
-        vectors_buffer[i] = rng.float(T) * 100;
+        vectors_buffer[i] = @rem(rng.int(T), 2);
     }
 
     // Create dataset from buffer
@@ -129,8 +129,21 @@ pub fn main() !void {
     var timer = try std.time.Timer.start();
     nn_descent.train();
     const elapsed_time_ns = timer.read();
-    const elapsed_time_s: f64 = @as(f64, @floatFromInt(elapsed_time_ns)) / @as(f64, @floatFromInt(1_000_000_000));
+    const elapsed_time_s: f64 = @as(f64, @floatFromInt(elapsed_time_ns)) / 1_000_000_000.0;
 
-    try stdout.print("Training for {} vectors took: {}s\n", .{ dataset.len, elapsed_time_s });
+    try stdout.print("Training for {} vectors with graph degree of {} took: {}s\n", .{ dataset.len, graph_degree, elapsed_time_s });
+    try stdout.flush();
+
+    // Print neighbors of the first few vector
+    for (0..5) |node_id| {
+        if (node_id >= dataset.len) break;
+        const neighbor_ids: []const isize = nn_descent.neighbors_list.getEntryFieldSlice(node_id, .neighbor_id);
+        const neighbor_distances: []const T = nn_descent.neighbors_list.getEntryFieldSlice(node_id, .distance);
+        try stdout.print("Neighbors of node {}:\n", .{node_id});
+        for (neighbor_ids, 0..) |neighbor_id, i| {
+            const distance = neighbor_distances[i];
+            try stdout.print("Neighbor {}: ID={}, Distance={}\n", .{ i, neighbor_id, distance });
+        }
+    }
     try stdout.flush();
 }

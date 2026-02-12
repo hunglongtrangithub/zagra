@@ -229,6 +229,47 @@ pub fn NeighborHeapList(
             std.debug.assert(node_id < self.num_nodes);
             return self.entries.items(.distance)[node_id * self.num_neighbors_per_node];
         }
+
+        /// Sorts a node's neighbor entries in descending order by distance.
+        /// The max heap property is still maintained after this operation.
+        pub fn sortNeighbors(self: *const Self, node_id: usize) void {
+            std.debug.assert(node_id < self.num_nodes);
+
+            // Get the valid slice of entries for this node
+            const entry_base_offset = node_id * self.num_neighbors_per_node;
+            const entries = blk: for (0..self.num_neighbors_per_node) |neighbor_idx| {
+                if (self.entries.items(.neighbor_id)[entry_base_offset + neighbor_idx] != EMPTY_ID) {
+                    break :blk self.entries.subslice(entry_base_offset + neighbor_idx, self.num_neighbors_per_node - neighbor_idx);
+                }
+            } else {
+                return; // No valid neighbors or no neighbors at all, nothing to sort
+            };
+
+            const Context = struct {
+                distances: []T,
+                neighbor_ids: []isize,
+                is_news: []bool,
+
+                pub fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+                    // Sort in descending order by distance, so "less than" means "greater than" for distances.
+                    return ctx.distances[a] > ctx.distances[b];
+                }
+
+                pub fn swap(ctx: @This(), a: usize, b: usize) void {
+                    std.mem.swap(isize, &ctx.neighbor_ids[a], &ctx.neighbor_ids[b]);
+                    std.mem.swap(T, &ctx.distances[a], &ctx.distances[b]);
+                    if (store_flags) {
+                        std.mem.swap(bool, &ctx.is_news[a], &ctx.is_news[b]);
+                    }
+                }
+            };
+
+            std.sort.heapContext(0, entries.len, Context{
+                .distances = entries.items(.distance),
+                .neighbor_ids = entries.items(.neighbor_id),
+                .is_news = entries.items(.is_new),
+            });
+        }
     };
 }
 
@@ -333,4 +374,96 @@ test "NeighborHeapList.tryAddNeighbor - reject bad candidate neighbors" {
     // 2. Neighbor whose distance is larger than node's max neighbor distance
     const added2 = heap_list.tryAddNeighbor(1, .{ .neighbor_id = 4, .distance = 5, .is_new = {} });
     try std.testing.expect(!added2);
+}
+
+test "NeighborHeapList.sortByDistance - sorts neighbors in descending order by distance" {
+    const allocator = std.testing.allocator;
+    const HeapList = NeighborHeapList(i32, true);
+    var heap_list = try HeapList.init(
+        10,
+        8,
+        allocator,
+    );
+    defer heap_list.deinit(allocator);
+
+    const node_id = 1;
+    _ = heap_list.tryAddNeighbor(node_id, .{ .neighbor_id = 9, .distance = 10, .is_new = false });
+    _ = heap_list.tryAddNeighbor(node_id, .{ .neighbor_id = 8, .distance = 8, .is_new = true });
+    _ = heap_list.tryAddNeighbor(node_id, .{ .neighbor_id = 1, .distance = 9, .is_new = true });
+    _ = heap_list.tryAddNeighbor(node_id, .{ .neighbor_id = 5, .distance = 7, .is_new = true });
+    _ = heap_list.tryAddNeighbor(node_id, .{ .neighbor_id = 7, .distance = 3, .is_new = false });
+    _ = heap_list.tryAddNeighbor(node_id, .{ .neighbor_id = 4, .distance = 5, .is_new = false });
+    _ = heap_list.tryAddNeighbor(node_id, .{ .neighbor_id = 6, .distance = 4, .is_new = false });
+    _ = heap_list.tryAddNeighbor(node_id, .{ .neighbor_id = 3, .distance = 6, .is_new = true });
+
+    heap_list.sortNeighbors(node_id);
+
+    try std.testing.expectEqualSlices(
+        i32,
+        &[_]i32{ 10, 9, 8, 7, 6, 5, 4, 3 },
+        heap_list.getEntryFieldSlice(node_id, .distance),
+    );
+    try std.testing.expectEqualSlices(
+        isize,
+        &[_]isize{ 9, 1, 8, 5, 3, 4, 6, 7 },
+        heap_list.getEntryFieldSlice(node_id, .neighbor_id),
+    );
+    try std.testing.expectEqualSlices(
+        bool,
+        &[_]bool{ false, true, true, true, true, false, false, false },
+        heap_list.getEntryFieldSlice(node_id, .is_new),
+    );
+}
+
+test "NeighborHeapList.sortByDistance - handles empty and partially filled heaps" {
+    const allocator = std.testing.allocator;
+    const HeapList = NeighborHeapList(i32, true);
+    var heap_list = try HeapList.init(
+        10,
+        8,
+        allocator,
+    );
+    defer heap_list.deinit(allocator);
+
+    // Node 0: No neighbors
+    heap_list.sortNeighbors(0);
+
+    const i32_max = std.math.maxInt(i32);
+    try std.testing.expectEqualSlices(
+        i32,
+        &[_]i32{i32_max} ** 8,
+        heap_list.getEntryFieldSlice(0, .distance),
+    );
+    try std.testing.expectEqualSlices(
+        isize,
+        &[_]isize{HeapList.EMPTY_ID} ** 8,
+        heap_list.getEntryFieldSlice(0, .neighbor_id),
+    );
+    try std.testing.expectEqualSlices(
+        bool,
+        &[_]bool{true} ** 8,
+        heap_list.getEntryFieldSlice(0, .is_new),
+    );
+
+    // Node 1: Partially filled neighbors
+    const node_id = 1;
+    _ = heap_list.tryAddNeighbor(node_id, .{ .neighbor_id = 2, .distance = 5, .is_new = true });
+    _ = heap_list.tryAddNeighbor(node_id, .{ .neighbor_id = 3, .distance = 3, .is_new = false });
+    heap_list.sortNeighbors(node_id);
+
+    try std.testing.expectEqualSlices(
+        i32,
+        &[_]i32{i32_max} ** 6 ++ &[_]i32{ 5, 3 },
+        heap_list.getEntryFieldSlice(node_id, .distance),
+    );
+    try std.testing.expectEqualSlices(
+        isize,
+        &[_]isize{HeapList.EMPTY_ID} ** 6 ++ &[_]isize{ 2, 3 },
+        heap_list.getEntryFieldSlice(node_id, .neighbor_id),
+    );
+    try std.testing.expectEqualSlices(
+        bool,
+        &[_]bool{true} ** 6 ++ &[_]bool{ true, false },
+        heap_list.getEntryFieldSlice(node_id, .is_new),
+    );
 }
