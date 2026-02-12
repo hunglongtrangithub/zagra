@@ -1,8 +1,8 @@
 const std = @import("std");
 const log = std.log.scoped(.nn_descent);
 
-const mod_neighbors = @import("neighbors.zig");
 const mod_dataset = @import("../dataset.zig");
+const mod_types = @import("../types.zig");
 
 pub const IterationTiming = struct {
     iteration: usize,
@@ -81,15 +81,6 @@ pub const TrainingConfig = struct {
     }
 };
 
-pub const InitError = error{
-    /// The specified maximum number of candidates is too large. Should be no more than i32 max.
-    MaxCandidatesTooLarge,
-    /// Invalid number of threads specified in the training config. Should be larger than zero.
-    InvalidNumThreads,
-    /// Invalid number of neighbors per node. Should be less than the number of vectors in the dataset.
-    InvalidNumNeighborsPerNode,
-};
-
 /// NN-Descent struct to construct the k-NN graph from a dataset.
 pub fn NNDescent(
     /// Element type of the vectors, supported in `types.ElemType`.
@@ -105,11 +96,11 @@ pub fn NNDescent(
         /// Configuration parameters for training.
         training_config: TrainingConfig,
         /// Holds the current neighbor lists for all nodes.
-        neighbors_list: NeighborHeapList,
+        neighbors_list: NeighborsList,
         /// Holds the new neighbor candidates for all nodes.
-        neighbor_candidates_new: CandidateHeapList,
+        neighbor_candidates_new: CandidatesList,
         /// Holds the old neighbor candidates for all nodes.
-        neighbor_candidates_old: CandidateHeapList,
+        neighbor_candidates_old: CandidatesList,
         /// Lists of graph updates during training, one per thread.
         /// Uses the a slice of `graph_updates_buffer` as backing storage.
         /// Capacity of each list is large enough to hold all possible updates in a block.
@@ -139,9 +130,9 @@ pub fn NNDescent(
         node_ids_random: []const usize,
 
         /// Holds entries with flags
-        const NeighborHeapList = mod_neighbors.NeighborHeapList(T, true);
+        const NeighborsList = NeighborHeapList(T, true);
         /// Holds entries without flags
-        const CandidateHeapList = mod_neighbors.NeighborHeapList(i32, false);
+        const CandidatesList = NeighborHeapList(i32, false);
         /// Represents a proposed update to the k-NN graph.
         /// Holds the IDs of the two nodes involved and their distance.
         const GraphUpdate = struct {
@@ -156,30 +147,39 @@ pub fn NNDescent(
 
         const Self = @This();
 
+        pub const InitError = error{
+            /// The specified maximum number of candidates is too large. Should be no more than i32 max.
+            MaxCandidatesTooLarge,
+            /// Invalid number of threads specified in the training config. Should be larger than zero.
+            InvalidNumThreads,
+            /// Invalid number of neighbors per node. Should be less than the number of vectors in the dataset.
+            InvalidNumNeighborsPerNode,
+        };
+
         /// Initialize NN-Descent with the given dataset and training configuration.
         pub fn init(
             dataset: Dataset,
             training_config: TrainingConfig,
             allocator: std.mem.Allocator,
-        ) (InitError || mod_neighbors.InitError || std.mem.Allocator.Error)!Self {
+        ) (InitError || NeighborHeapListInitError || std.mem.Allocator.Error)!Self {
             if (training_config.max_candidates > std.math.maxInt(i32)) return InitError.MaxCandidatesTooLarge;
             if (training_config.num_threads == 0) return InitError.InvalidNumThreads;
             if (training_config.num_neighbors_per_node >= dataset.len) return InitError.InvalidNumNeighborsPerNode;
 
-            var neighbors_list = try NeighborHeapList.init(
+            var neighbors_list = try NeighborsList.init(
                 dataset.len,
                 training_config.num_neighbors_per_node,
                 allocator,
             );
             errdefer neighbors_list.deinit(allocator);
 
-            var neighbor_candidates_new = try CandidateHeapList.init(
+            var neighbor_candidates_new = try CandidatesList.init(
                 dataset.len,
                 training_config.max_candidates,
                 allocator,
             );
             errdefer neighbor_candidates_new.deinit(allocator);
-            var neighbor_candidates_old = try CandidateHeapList.init(
+            var neighbor_candidates_old = try CandidatesList.init(
                 dataset.len,
                 training_config.max_candidates,
                 allocator,
@@ -504,7 +504,7 @@ pub fn NNDescent(
             std.debug.assert(std.mem.indexOfScalar(
                 isize,
                 self.neighbors_list.entries.items(.neighbor_id),
-                NeighborHeapList.EMPTY_ID,
+                NeighborsList.EMPTY_ID,
             ) == null);
         }
 
@@ -512,7 +512,7 @@ pub fn NNDescent(
         /// with random neighbors.
         fn populateRandomNeighborsThread(
             dataset: *const Dataset,
-            neighbors_list: *NeighborHeapList,
+            neighbors_list: *NeighborsList,
             node_id_start: usize,
             node_id_end: usize,
             node_ids_random: []const usize,
@@ -543,7 +543,7 @@ pub fn NNDescent(
 
                     const added = neighbors_list.tryAddNeighbor(
                         node_id,
-                        NeighborHeapList.Entry{
+                        NeighborsList.Entry{
                             // SAFETY: neighbor_id is in [0, num_nodes), which fits in isize.
                             .neighbor_id = @intCast(neighbor_id),
                             .distance = distance,
@@ -633,9 +633,9 @@ pub fn NNDescent(
         /// Goes through all edges in `neighbors_list`, and only tries to add neighbors to a node whose node ID
         /// is in the range `[node_id_start, node_id_end)` to the candidate lists.
         fn sampleNeighborCandidatesThread(
-            neighbors_list: *const NeighborHeapList,
-            neighbor_candidates_new: *CandidateHeapList,
-            neighbor_candidates_old: *CandidateHeapList,
+            neighbors_list: *const NeighborsList,
+            neighbor_candidates_new: *CandidatesList,
+            neighbor_candidates_old: *CandidatesList,
             node_id_start: usize,
             node_id_end: usize,
             seed: u64,
@@ -654,7 +654,7 @@ pub fn NNDescent(
                 for (0..neighbors_list.num_neighbors_per_node) |neighbor_idx| {
                     // Skip this neighbor slot if it's empty
                     const entry_neighbor_id = neighbor_id_slice[neighbor_idx];
-                    if (entry_neighbor_id == CandidateHeapList.EMPTY_ID) continue;
+                    if (entry_neighbor_id == CandidatesList.EMPTY_ID) continue;
                     // SAFETY: neighbor_id is not EMPTY_ID, so this cast is safe.
                     const neighbor_id: usize = @intCast(entry_neighbor_id);
 
@@ -673,7 +673,7 @@ pub fn NNDescent(
                         // Add neighbor_id as a forward neighbor candidate for node_id
                         _ = target_candidate_list.tryAddNeighbor(
                             node_id,
-                            CandidateHeapList.Entry{
+                            CandidatesList.Entry{
                                 // SAFETY: node_id is in [0, num_nodes), which fits in isize.
                                 .neighbor_id = @intCast(neighbor_id),
                                 .distance = priority,
@@ -685,7 +685,7 @@ pub fn NNDescent(
                         // Add node_id as a reverse neighbor candidate for neighbor_id
                         _ = target_candidate_list.tryAddNeighbor(
                             neighbor_id,
-                            CandidateHeapList.Entry{
+                            CandidatesList.Entry{
                                 // SAFETY: node_id is in [0, num_nodes), which fits in isize.
                                 .neighbor_id = @intCast(node_id),
                                 .distance = priority,
@@ -701,8 +701,8 @@ pub fn NNDescent(
         /// into `neighbor_candidates_new`, with respect to a node ID.
         /// Only processes nodes whose IDs are in the range `[node_id_start, node_id_end)`.
         fn markSampledToOldThread(
-            neighbors_list: *NeighborHeapList,
-            neighbor_candidates_new: *const CandidateHeapList,
+            neighbors_list: *NeighborsList,
+            neighbor_candidates_new: *const CandidatesList,
             node_id_start: usize,
             node_id_end: usize,
         ) void {
@@ -718,7 +718,7 @@ pub fn NNDescent(
                     const neighbor_id = neighbor_id_slice[neighbor_idx];
 
                     // Check if the neighbor ID is valid
-                    if (neighbor_id == NeighborHeapList.EMPTY_ID) continue;
+                    if (neighbor_id == NeighborsList.EMPTY_ID) continue;
 
                     if (std.mem.indexOfScalar(
                         isize,
@@ -782,10 +782,10 @@ pub fn NNDescent(
         /// The number of updates added should never exceed the original capacity of the list.
         fn generateGraphUpdateProposalsThread(
             dataset: *const Dataset,
-            neighbors_list: *const NeighborHeapList,
+            neighbors_list: *const NeighborsList,
             graph_updates_list: *std.ArrayList(GraphUpdate),
-            neighbor_candidates_new: *const CandidateHeapList,
-            neighbor_candidates_old: *const CandidateHeapList,
+            neighbor_candidates_new: *const CandidatesList,
+            neighbor_candidates_old: *const CandidatesList,
             local_join_id_start: usize,
             local_join_id_end: usize,
         ) void {
@@ -799,7 +799,7 @@ pub fn NNDescent(
                 const old_candidate_ids: []const isize = neighbor_candidates_old.getEntryFieldSlice(local_join_id, .neighbor_id);
 
                 for (new_candidate_ids, 0..) |cand1_id, i| {
-                    if (cand1_id == CandidateHeapList.EMPTY_ID) continue;
+                    if (cand1_id == CandidatesList.EMPTY_ID) continue;
                     // SAFETY: cand1_id is not EMPTY_ID, so this cast is safe.
                     const cand1_id_usize: usize = @intCast(cand1_id);
                     const cand1_vector = dataset.getUnchecked(cand1_id_usize);
@@ -808,7 +808,7 @@ pub fn NNDescent(
 
                     // New-New candidate pairs
                     for (new_candidate_ids[i + 1 ..]) |cand2_id| {
-                        if (cand2_id == CandidateHeapList.EMPTY_ID) continue;
+                        if (cand2_id == CandidatesList.EMPTY_ID) continue;
                         // SAFETY: cand2_id is not EMPTY_ID, so this cast is safe.
                         const cand2_id_usize: usize = @intCast(cand2_id);
                         const cand2_vector = dataset.getUnchecked(cand2_id_usize);
@@ -828,7 +828,7 @@ pub fn NNDescent(
 
                     // New-Old candidate pairs
                     for (old_candidate_ids) |cand2_id| {
-                        if (cand2_id == CandidateHeapList.EMPTY_ID) continue;
+                        if (cand2_id == CandidatesList.EMPTY_ID) continue;
                         // SAFETY: cand2_id is not EMPTY_ID, so this cast is safe.
                         const cand2_id_usize: usize = @intCast(cand2_id);
                         const cand2_vector = dataset.getUnchecked(cand2_id_usize);
@@ -903,7 +903,7 @@ pub fn NNDescent(
         /// only for nodes whose IDs are in the range `[node_id_start, node_id_end)`.
         /// Count the number of successful updates applied and store in `graph_updates_count_ptr`.
         fn applyGraphUpdatesProposalsThread(
-            neighbors_list: *NeighborHeapList,
+            neighbors_list: *NeighborsList,
             graph_updates_list: *const std.ArrayList(GraphUpdate),
             graph_updates_count_ptr: *usize,
             node_id_start: usize,
@@ -924,7 +924,7 @@ pub fn NNDescent(
 
                 if (node1_id >= node_id_start and node1_id < node_id_end) {
                     // Try to add neighbor to node1
-                    const update1 = neighbors_list.tryAddNeighbor(node1_id, NeighborHeapList.Entry{
+                    const update1 = neighbors_list.tryAddNeighbor(node1_id, NeighborsList.Entry{
                         // SAFETY: neighbor_id is in [0, num_nodes), which fits in isize.
                         .neighbor_id = @intCast(node2_id),
                         .distance = distance,
@@ -936,7 +936,7 @@ pub fn NNDescent(
 
                 if (node2_id >= node_id_start and node2_id < node_id_end) {
                     // Try to add neighbor to node2
-                    const update2 = neighbors_list.tryAddNeighbor(node2_id, NeighborHeapList.Entry{
+                    const update2 = neighbors_list.tryAddNeighbor(node2_id, NeighborsList.Entry{
                         // SAFETY: neighbor_id is in [0, num_nodes), which fits in isize.
                         .neighbor_id = @intCast(node1_id),
                         .distance = distance,
@@ -1002,7 +1002,7 @@ pub fn NNDescent(
 
                     const context = struct {
                         fn sortNeighborsThread(
-                            neighbors_list: *NeighborHeapList,
+                            neighbors_list: *NeighborsList,
                             id_start: usize,
                             id_end: usize,
                         ) void {
@@ -1341,4 +1341,471 @@ test "NNDescent - single-threaded and multi-threaded produce similar results" {
         const ratio = @max(single_max, multi_max) / @min(single_max, multi_max);
         try std.testing.expect(0.9 < ratio and ratio < 1.1);
     }
+}
+
+pub const NeighborHeapListInitError = error{
+    /// The specified number of nodes is too large to fit in isize.
+    NumberOfNodesTooLarge,
+    /// The specified number of neighbors causes an overflow when multiplied by number of nodes.
+    NumberOfEdgesTooLarge,
+};
+
+/// A cache-friendly list of max heaps for storing k-nearest neighbors.
+/// One heap per node, with a fixed capacity of neighbors. Each heap is organized by distance,
+/// with the maximum distance at the root.
+///
+/// This structure stores multiple heaps in a contiguous row-major layout,
+/// where each heap represents the k-nearest neighbors of a point in the dataset.
+/// The row-major organization improves cache locality when iterating through
+/// all points' neighbor lists sequentially.
+///
+/// Generic over the distance type T that is supported in `types.ElemType`,
+/// and whether to store new/old flags for NN-Descent.
+pub fn NeighborHeapList(
+    /// The distance type for neighbor entries. Must be a type supported by `types.ElemType`.
+    comptime T: type,
+    /// Whether to store new/old flags for NN-Descent. If `true`, each neighbor entry includes an `is_new` flag.
+    comptime store_flags: bool,
+) type {
+    const elem_type = mod_types.ElemType.fromZigType(T) orelse
+        @compileError("Unsupported element type: " ++ @typeName(T));
+
+    return struct {
+        /// One entry per heap slot. Entries are heapified by distance.
+        /// Stored internally as structure-of-arrays by MultiArrayList.
+        pub const Entry = struct {
+            /// -1 represents an empty neighbor slot. All valid IDs are in [0, num_nodes).
+            /// NOTE: using isize for point IDs. This is okay since the number of vectors
+            /// in a dataset is no more than std.math.maxInt(isize).
+            neighbor_id: isize,
+
+            /// This is the key used for heap ordering (max heap: largest distance at root).
+            distance: T,
+
+            /// New/old flags for the NN-Descent algorithm.
+            ///
+            /// SEMANTICS: This flag represents an "exploration lease."
+            /// - `true` (NEW): The neighbor is a fresh discovery. It acts as an active
+            ///   "search agent." It must be introduced to all other neighbors in the
+            ///   next local join to find even better connections.
+            /// - `false` (OLD): The neighbor is a "passive contact." It has already
+            ///   participated in a local join as a 'NEW' node. We have already explored
+            ///   its immediate neighborhood, so we skip redundant comparisons.
+            ///
+            /// LIFECYCLE:
+            /// 1. BORN: Set to `true` when first inserted into the NeighborList.
+            /// 2. CONSUMED: Set to `false` immediately after being sampled into a
+            ///    `new_candidates` pool for a local join.
+            /// 3. RE-ARMED: If a local join replaces this slot with an even closer
+            ///    point, the new point starts its life as `true`.
+            is_new: if (store_flags) bool else void,
+        };
+
+        /// Row-major storage of all heap entries.
+        /// Indexing: i * num_neighbors_per_node + j
+        entries: std.MultiArrayList(Entry).Slice,
+
+        /// Total number of points (number of heaps).
+        num_nodes: usize,
+
+        /// Number of neighbors per point (k).
+        num_neighbors_per_node: usize,
+
+        const Self = @This();
+        pub const EMPTY_ID: isize = -1;
+
+        const InitError = NeighborHeapListInitError;
+
+        /// Initializes a new instance with the specified number of nodes and neighbors per node.
+        /// All neighbor IDs are set to -1 (empty), distances to max value, and is_new flags to true.
+        /// `num_nodes * num_neighbors` must not overflow `usize`.
+        pub fn init(
+            num_nodes: usize,
+            num_neighbors_per_node: usize,
+            allocator: std.mem.Allocator,
+        ) (InitError || std.mem.Allocator.Error)!Self {
+            // TODO: Should we make num_nodes u32, and limit num_nodes to be less than maxInt(i32)? Then node IDs can be 32 bits, with -1 as empty.
+            // Should we also limit num_neighbors_per_node to be u32? Then total_size fits in u64, which is usize in 64-bit systems.
+            // u32 limits us to ~ 4 billion nodes, which is probably fine for our needs.
+            if (num_nodes > std.math.maxInt(isize)) return InitError.NumberOfNodesTooLarge;
+            const total_size: usize, const overflow: u1 = @mulWithOverflow(num_nodes, num_neighbors_per_node);
+            if (overflow != 0) return InitError.NumberOfEdgesTooLarge;
+
+            // Allocate contiguous memory for all entries
+            var entries = std.MultiArrayList(Entry).empty;
+            try entries.setCapacity(allocator, total_size);
+            entries.len = total_size;
+
+            const entries_slice = entries.slice();
+            memsetBuffers(entries_slice);
+
+            return Self{
+                .entries = entries_slice,
+                .num_nodes = num_nodes,
+                .num_neighbors_per_node = num_neighbors_per_node,
+            };
+        }
+
+        /// Resets all neighbor entries to their initial state:
+        /// neighbor IDs to -1, distances to max value, and is_new flags to true.
+        pub fn reset(self: *Self) void {
+            memsetBuffers(self.entries);
+        }
+
+        fn memsetBuffers(entries: std.MultiArrayList(Entry).Slice) void {
+            const max_dist = switch (elem_type) {
+                .Int32 => std.math.maxInt(T),
+                .Float, .Half => std.math.floatMax(T),
+            };
+
+            // Reset fields independently
+            @memset(entries.items(.neighbor_id), EMPTY_ID);
+            @memset(entries.items(.distance), max_dist);
+            if (store_flags) @memset(entries.items(.is_new), true);
+        }
+
+        /// Deinitializes the HeapList, freeing its allocated memory.
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            self.entries.deinit(allocator);
+        }
+
+        /// Checks and updates the heap for the given node with a new neighbor entry.
+        /// The neighbor is added only if its distance is smaller than the current maximum distance in the heap,
+        /// and the neighbor ID is not already present in the heap.
+        /// Returns `true` if the neighbor was added, `false` otherwise.
+        pub fn tryAddNeighbor(
+            self: *Self,
+            node_id: usize,
+            neighbor_entry: Entry,
+        ) bool {
+            std.debug.assert(node_id < self.num_nodes);
+
+            // Calculate the start index for the heaps of the specified node
+            const heap_start = node_id * self.num_neighbors_per_node;
+
+            // If the new distance is not smaller than the max in the heap, reject it
+            const max_distance = self.entries.items(.distance)[heap_start];
+            if (neighbor_entry.distance >= max_distance) {
+                return false;
+            }
+
+            // Check for duplicate neighbor IDs
+            const neighbor_ids: []const isize = self.entries.items(.neighbor_id)[heap_start .. heap_start + self.num_neighbors_per_node];
+            if (std.mem.indexOfScalar(isize, neighbor_ids, neighbor_entry.neighbor_id) != null) {
+                return false;
+            }
+
+            // Replace the maximum entry with the new neighbor entry
+            self.replaceMaxEntry(node_id, neighbor_entry);
+            return true;
+        }
+
+        /// Replaces the maximum entry in the heap for the specified node with a new entry,
+        /// and restores the max-heap property for that heap.
+        fn replaceMaxEntry(self: *Self, node_id: usize, new_entry: Entry) void {
+            std.debug.assert(node_id < self.num_nodes);
+            std.debug.assert(new_entry.neighbor_id < self.num_nodes);
+
+            // Get the start index for the heap of the specified node
+            const heap_start = node_id * self.num_neighbors_per_node;
+            const distance_heap: []const T = self.entries.items(.distance)[heap_start .. heap_start + self.num_neighbors_per_node];
+
+            // Heapify down from the root to restore max-heap property
+            // Set the new entry's initial index to 0 (root)
+            var entry_idx: usize = 0;
+            while (true) {
+                const left_child_idx = 2 * entry_idx + 1;
+
+                // Find the largest among entry and its children
+                const largest_child_idx = largest: {
+                    if (left_child_idx >= distance_heap.len) {
+                        // Left child out of bounds => entry does not have any children => stop
+                        break;
+                    }
+
+                    // Determine which child to compare against (the larger one)
+                    const larger_child_idx = larger: {
+                        const right_child_idx = left_child_idx + 1;
+                        if (right_child_idx < distance_heap.len and
+                            distance_heap[right_child_idx] > distance_heap[left_child_idx])
+                        {
+                            // Only use the right child when it is in bounds and larger than left child
+                            break :larger right_child_idx;
+                        } else {
+                            break :larger left_child_idx;
+                        }
+                    };
+
+                    // Now compare the larger child with new entry
+                    if (distance_heap[larger_child_idx] > new_entry.distance) {
+                        break :largest larger_child_idx;
+                    } else {
+                        break; // New entry is in correct position => stop
+                    }
+                };
+
+                // Bring largest child value to current entry index
+                self.entries.set(heap_start + entry_idx, self.entries.get(heap_start + largest_child_idx));
+                // Entry is now at largest child index
+                entry_idx = largest_child_idx;
+            }
+
+            // Place the new entry at the final position
+            self.entries.set(heap_start + entry_idx, new_entry);
+        }
+
+        /// Retrieves a slice of the specified field for all neighbor entries of the given node.
+        // TODO: Should this be inlined?
+        pub inline fn getEntryFieldSlice(
+            self: *const Self,
+            node_id: usize,
+            comptime field: std.meta.FieldEnum(Entry),
+        ) []std.meta.fieldInfo(Entry, field).type {
+            std.debug.assert(node_id < self.num_nodes);
+            const start = node_id * self.num_neighbors_per_node;
+            return self.entries.items(field)[start .. start + self.num_neighbors_per_node];
+        }
+
+        /// Retrieves the maximum distance (the root of the max heap) for the specified node.
+        pub fn getMaxDistance(self: *const Self, node_id: usize) T {
+            std.debug.assert(node_id < self.num_nodes);
+            return self.entries.items(.distance)[node_id * self.num_neighbors_per_node];
+        }
+
+        /// Sorts a node's neighbor entries in descending order by distance.
+        /// The max heap property is still maintained after this operation.
+        pub fn sortNeighbors(self: *const Self, node_id: usize) void {
+            std.debug.assert(node_id < self.num_nodes);
+
+            // Get the valid slice of entries for this node
+            const entry_base_offset = node_id * self.num_neighbors_per_node;
+            const entries = blk: for (0..self.num_neighbors_per_node) |neighbor_idx| {
+                if (self.entries.items(.neighbor_id)[entry_base_offset + neighbor_idx] != EMPTY_ID) {
+                    break :blk self.entries.subslice(entry_base_offset + neighbor_idx, self.num_neighbors_per_node - neighbor_idx);
+                }
+            } else {
+                return; // No valid neighbors or no neighbors at all, nothing to sort
+            };
+
+            const Context = struct {
+                distances: []T,
+                neighbor_ids: []isize,
+                is_news: []bool,
+
+                pub fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+                    // Sort in descending order by distance, so "less than" means "greater than" for distances.
+                    return ctx.distances[a] > ctx.distances[b];
+                }
+
+                pub fn swap(ctx: @This(), a: usize, b: usize) void {
+                    std.mem.swap(isize, &ctx.neighbor_ids[a], &ctx.neighbor_ids[b]);
+                    std.mem.swap(T, &ctx.distances[a], &ctx.distances[b]);
+                    if (store_flags) {
+                        std.mem.swap(bool, &ctx.is_news[a], &ctx.is_news[b]);
+                    }
+                }
+            };
+
+            std.sort.heapContext(0, entries.len, Context{
+                .distances = entries.items(.distance),
+                .neighbor_ids = entries.items(.neighbor_id),
+                .is_news = entries.items(.is_new),
+            });
+        }
+    };
+}
+
+test "NeighborHeapList.init - init default entry values" {
+    const HeapList = NeighborHeapList(i32, true);
+    var buffer: [1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buffer);
+    const allocator = fba.allocator();
+    var heap_list = try HeapList.init(
+        8,
+        4,
+        allocator,
+    );
+    defer heap_list.deinit(allocator);
+
+    for (0..heap_list.num_nodes) |node_id| {
+        for (0..heap_list.num_neighbors_per_node) |neighbor_idx| {
+            const entry = heap_list.entries.get(node_id * heap_list.num_neighbors_per_node + neighbor_idx);
+            try std.testing.expectEqual(entry.is_new, true);
+            try std.testing.expectEqual(entry.neighbor_id, -1);
+            try std.testing.expectEqual(entry.distance, std.math.maxInt(i32));
+        }
+    }
+}
+
+test "NeighborHeapList.tryAddNeighbor - heap invariant maintained with added neighbors" {
+    const HeapList = NeighborHeapList(i32, false);
+    var buffer: [1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buffer);
+    const allocator = fba.allocator();
+    var heap_list = try HeapList.init(
+        8,
+        4,
+        allocator,
+    );
+    defer heap_list.deinit(allocator);
+
+    const i32_max = std.math.maxInt(i32);
+
+    const added1 = heap_list.tryAddNeighbor(1, .{ .neighbor_id = 0, .distance = 4, .is_new = {} });
+    try std.testing.expect(added1);
+    try std.testing.expectEqualSlices(
+        i32,
+        &[_]i32{ i32_max, i32_max, i32_max, 4 },
+        heap_list.getEntryFieldSlice(1, .distance),
+    );
+
+    const added2 = heap_list.tryAddNeighbor(1, .{ .neighbor_id = 1, .distance = 3, .is_new = {} });
+    try std.testing.expect(added2);
+    try std.testing.expectEqualSlices(
+        i32,
+        &[_]i32{ i32_max, 4, i32_max, 3 },
+        heap_list.getEntryFieldSlice(1, .distance),
+    );
+
+    const added3 = heap_list.tryAddNeighbor(1, .{ .neighbor_id = 2, .distance = 2, .is_new = {} });
+    try std.testing.expect(added3);
+    try std.testing.expectEqualSlices(
+        i32,
+        &[_]i32{ i32_max, 4, 2, 3 },
+        heap_list.getEntryFieldSlice(1, .distance),
+    );
+
+    const added4 = heap_list.tryAddNeighbor(1, .{ .neighbor_id = 3, .distance = 1, .is_new = {} });
+    try std.testing.expect(added4);
+    try std.testing.expectEqualSlices(
+        i32,
+        &[_]i32{ 4, 3, 2, 1 },
+        heap_list.getEntryFieldSlice(1, .distance),
+    );
+}
+
+test "NeighborHeapList.tryAddNeighbor - reject bad candidate neighbors" {
+    const HeapList = NeighborHeapList(i32, false);
+    var buffer: [1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buffer);
+    const allocator = fba.allocator();
+    var heap_list = try HeapList.init(
+        8,
+        4,
+        allocator,
+    );
+    defer heap_list.deinit(allocator);
+
+    // Fill valid neighbors first
+    _ = heap_list.tryAddNeighbor(1, .{ .neighbor_id = 0, .distance = 4, .is_new = {} });
+    _ = heap_list.tryAddNeighbor(1, .{ .neighbor_id = 1, .distance = 3, .is_new = {} });
+    _ = heap_list.tryAddNeighbor(1, .{ .neighbor_id = 2, .distance = 2, .is_new = {} });
+    _ = heap_list.tryAddNeighbor(1, .{ .neighbor_id = 3, .distance = 1, .is_new = {} });
+    try std.testing.expectEqualSlices(
+        i32,
+        &[_]i32{ 4, 3, 2, 1 },
+        heap_list.getEntryFieldSlice(1, .distance),
+    );
+
+    // Should reject bad neighbors
+
+    // 1. Duplicate neighbor
+    const added1 = heap_list.tryAddNeighbor(1, .{ .neighbor_id = 1, .distance = 3, .is_new = {} });
+    try std.testing.expect(!added1);
+
+    // 2. Neighbor whose distance is larger than node's max neighbor distance
+    const added2 = heap_list.tryAddNeighbor(1, .{ .neighbor_id = 4, .distance = 5, .is_new = {} });
+    try std.testing.expect(!added2);
+}
+
+test "NeighborHeapList.sortByDistance - sorts neighbors in descending order by distance" {
+    const allocator = std.testing.allocator;
+    const HeapList = NeighborHeapList(i32, true);
+    var heap_list = try HeapList.init(
+        10,
+        8,
+        allocator,
+    );
+    defer heap_list.deinit(allocator);
+
+    const node_id = 1;
+    _ = heap_list.tryAddNeighbor(node_id, .{ .neighbor_id = 9, .distance = 10, .is_new = false });
+    _ = heap_list.tryAddNeighbor(node_id, .{ .neighbor_id = 8, .distance = 8, .is_new = true });
+    _ = heap_list.tryAddNeighbor(node_id, .{ .neighbor_id = 1, .distance = 9, .is_new = true });
+    _ = heap_list.tryAddNeighbor(node_id, .{ .neighbor_id = 5, .distance = 7, .is_new = true });
+    _ = heap_list.tryAddNeighbor(node_id, .{ .neighbor_id = 7, .distance = 3, .is_new = false });
+    _ = heap_list.tryAddNeighbor(node_id, .{ .neighbor_id = 4, .distance = 5, .is_new = false });
+    _ = heap_list.tryAddNeighbor(node_id, .{ .neighbor_id = 6, .distance = 4, .is_new = false });
+    _ = heap_list.tryAddNeighbor(node_id, .{ .neighbor_id = 3, .distance = 6, .is_new = true });
+
+    heap_list.sortNeighbors(node_id);
+
+    try std.testing.expectEqualSlices(
+        i32,
+        &[_]i32{ 10, 9, 8, 7, 6, 5, 4, 3 },
+        heap_list.getEntryFieldSlice(node_id, .distance),
+    );
+    try std.testing.expectEqualSlices(
+        isize,
+        &[_]isize{ 9, 1, 8, 5, 3, 4, 6, 7 },
+        heap_list.getEntryFieldSlice(node_id, .neighbor_id),
+    );
+    try std.testing.expectEqualSlices(
+        bool,
+        &[_]bool{ false, true, true, true, true, false, false, false },
+        heap_list.getEntryFieldSlice(node_id, .is_new),
+    );
+}
+
+test "NeighborHeapList.sortByDistance - handles empty and partially filled heaps" {
+    const allocator = std.testing.allocator;
+    const HeapList = NeighborHeapList(i32, true);
+    var heap_list = try HeapList.init(
+        10,
+        8,
+        allocator,
+    );
+    defer heap_list.deinit(allocator);
+
+    // Node 0: No neighbors
+    heap_list.sortNeighbors(0);
+
+    const i32_max = std.math.maxInt(i32);
+    try std.testing.expectEqualSlices(
+        i32,
+        &[_]i32{i32_max} ** 8,
+        heap_list.getEntryFieldSlice(0, .distance),
+    );
+    try std.testing.expectEqualSlices(
+        isize,
+        &[_]isize{HeapList.EMPTY_ID} ** 8,
+        heap_list.getEntryFieldSlice(0, .neighbor_id),
+    );
+    try std.testing.expectEqualSlices(
+        bool,
+        &[_]bool{true} ** 8,
+        heap_list.getEntryFieldSlice(0, .is_new),
+    );
+
+    // Node 1: Partially filled neighbors
+    const node_id = 1;
+    _ = heap_list.tryAddNeighbor(node_id, .{ .neighbor_id = 2, .distance = 5, .is_new = true });
+    _ = heap_list.tryAddNeighbor(node_id, .{ .neighbor_id = 3, .distance = 3, .is_new = false });
+    heap_list.sortNeighbors(node_id);
+
+    try std.testing.expectEqualSlices(
+        i32,
+        &[_]i32{i32_max} ** 6 ++ &[_]i32{ 5, 3 },
+        heap_list.getEntryFieldSlice(node_id, .distance),
+    );
+    try std.testing.expectEqualSlices(
+        isize,
+        &[_]isize{HeapList.EMPTY_ID} ** 6 ++ &[_]isize{ 2, 3 },
+        heap_list.getEntryFieldSlice(node_id, .neighbor_id),
+    );
+    try std.testing.expectEqualSlices(
+        bool,
+        &[_]bool{true} ** 6 ++ &[_]bool{ true, false },
+        heap_list.getEntryFieldSlice(node_id, .is_new),
+    );
 }

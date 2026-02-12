@@ -103,8 +103,8 @@ pub fn main() !void {
     std.debug.assert(dataset.len == vector_count);
 
     // Do NN-Descent
-    const NNDescent = zagra.graphs.nn_descent.NNDescent(T, N);
-    var training_config = zagra.graphs.nn_descent.TrainingConfig.init(
+    const NNDescent = zagra.index.nn_descent.NNDescent(T, N);
+    var training_config = zagra.index.nn_descent.TrainingConfig.init(
         4,
         vector_count,
         null,

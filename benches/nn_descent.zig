@@ -19,7 +19,7 @@ const BenchmarkConfig = struct {
 const BenchmarkResult = struct {
     vector_count: usize,
     graph_degree: usize,
-    timing: zagra.graphs.nn_descent.TrainingTiming,
+    timing: zagra.index.nn_descent.TrainingTiming,
 
     fn deinit(self: *BenchmarkResult, allocator: std.mem.Allocator) void {
         self.timing.deinit(allocator);
@@ -34,8 +34,8 @@ fn runBenchmark(
     config: BenchmarkConfig,
     allocator: std.mem.Allocator,
 ) !BenchmarkResult {
-    const NNDescent = zagra.graphs.nn_descent.NNDescent(T, N);
-    var training_config = zagra.graphs.nn_descent.TrainingConfig.init(
+    const NNDescent = zagra.index.nn_descent.NNDescent(T, N);
+    var training_config = zagra.index.nn_descent.TrainingConfig.init(
         config.num_threads,
         dataset.len,
         null,
