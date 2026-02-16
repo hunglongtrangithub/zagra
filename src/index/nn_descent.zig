@@ -459,10 +459,6 @@ pub fn NNDescent(
                 }
             }
 
-            for (0..num_blocks) |block_id| {
-                self.sortBlockNeighbors(block_id);
-            }
-
             log.info("NN-Descent training completed", .{});
         }
 
@@ -988,6 +984,15 @@ pub fn NNDescent(
             return @reduce(.Add, acc) + tail_acc;
         }
 
+        /// Sort in descending order neighbors of all nodes in the neighbors list by distance.
+        pub fn sortNeighbors(self: *Self) void {
+            const num_blocks = self.numBlocks();
+            for (0..num_blocks) |block_id| {
+                self.sortBlockNeighbors(block_id);
+            }
+        }
+
+        /// Sort in descending order neighbors of all nodes in a block by distance.
         fn sortBlockNeighbors(self: *Self, block_id: usize) void {
             const block_start = block_id * self.num_nodes_per_block;
             const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);

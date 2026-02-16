@@ -14,7 +14,8 @@ const stdout = &stdout_writer.interface;
 const HELP =
     \\zagra <vector_count> <graph_degree> [block_processing]
     \\- vector_count (required): Number of vectors in the dataset
-    \\- graph_degree (required): Graph degree of vectors in the KNN graph
+    \\- graph_degree (optional - default to 64): Graph degree of vectors in the KNN graph
+    \\- intermediate_graph_degree (optional - default to 2 * graph_degree): Graph degree of intermediate graphs during training
     \\- block_processing (optional - default to true): Whether to use block processing mode during training
 ;
 
@@ -54,6 +55,18 @@ pub fn main() !void {
         return;
     };
     try stdout.print("Number of neighbors per vector: {any}\n", .{graph_degree});
+
+    const intermediate_graph_degree_str = args.next();
+    const intermediate_graph_degree = if (intermediate_graph_degree_str) |str| blk: {
+        break :blk std.fmt.parseInt(usize, str, 10) catch |e| {
+            switch (e) {
+                error.Overflow => std.debug.print("Entered intermediate graph degree is too large for usize\n", .{}),
+                error.InvalidCharacter => std.debug.print("Entered intermediate graph degree is not a valid number\n", .{}),
+            }
+            return;
+        };
+    } else graph_degree * 2;
+    try stdout.print("Graph degree of intermediate graphs during training: {any}\n", .{intermediate_graph_degree});
 
     const block_processing = blk: {
         if (args.next()) |str| {
@@ -103,8 +116,8 @@ pub fn main() !void {
     std.debug.assert(dataset.len == vector_count);
 
     // Do NN-Descent
-    const NNDescent = zagra.index.nn_descent.NNDescent(T, N);
-    var training_config = zagra.index.nn_descent.TrainingConfig.init(
+    const NNDescent = zagra.index.mod_nn_descent.NNDescent(T, N);
+    var training_config = zagra.index.mod_nn_descent.TrainingConfig.init(
         4,
         vector_count,
         null,
