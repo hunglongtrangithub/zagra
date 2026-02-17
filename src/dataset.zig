@@ -117,7 +117,7 @@ pub fn Dataset(comptime T: type, comptime N: usize) type {
             std.debug.assert(index < self.len);
             // We return the address of the data already living in the data buffer.
             // No new struct is created; no data is moved.
-            // NOTE: This cast works because:
+            // SAFETY: This cast works because:
             // 1. for @alignCast: The base buffer is 64-byte aligned and each vector has a stride
             // of either 128, 256, or 512 (a multiple of 64). Thus the address at self.data_buffer[index * N]
             // has alignment of 64.

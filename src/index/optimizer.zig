@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const mod_types = @import("../types.zig");
+const mod_soa_slice = @import("soa_slice.zig");
 const mod_nn_descent = @import("nn_descent.zig");
 
 pub const Optimizer = struct {
@@ -17,7 +18,7 @@ pub const Optimizer = struct {
     num_neighbors_per_node: usize,
     /// Row-major storage of all entries.
     /// Indexing: i * num_neighbors_per_node + j
-    entries: std.MultiArrayList(Entry).Slice,
+    entries: mod_soa_slice.SoaSlice(Entry),
 
     /// Thread pool for multi-threaded operations.
     /// `null` when requested number of threads is <= 1.

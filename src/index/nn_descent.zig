@@ -3,6 +3,7 @@ const log = std.log.scoped(.nn_descent);
 
 const mod_dataset = @import("../dataset.zig");
 const mod_types = @import("../types.zig");
+const mod_soa_slice = @import("soa_slice.zig");
 
 pub const IterationTiming = struct {
     iteration: usize,
@@ -409,6 +410,9 @@ pub fn NNDescent(
             return timing;
         }
 
+        /// Train the k-NN graph using the NN-descent algorithm.
+        /// Iteratively refines the neighbor lists until convergence or reaching the maximum number of iterations.
+        /// The neighbors list is updated in-place during training, and can be accessed after this function returns.
         pub fn train(self: *Self) void {
             log.debug("Using {} threads", .{self.training_config.num_threads});
             log.info("Populating random neighbors", .{});
@@ -1366,7 +1370,7 @@ pub const NeighborHeapListInitError = error{
 ///
 /// Generic over the distance type T that is supported in `types.ElemType`,
 /// and whether to store new/old flags for NN-Descent.
-pub fn NeighborHeapList(
+fn NeighborHeapList(
     /// The distance type for neighbor entries. Must be a type supported by `types.ElemType`.
     comptime T: type,
     /// Whether to store new/old flags for NN-Descent. If `true`, each neighbor entry includes an `is_new` flag.
@@ -1408,7 +1412,7 @@ pub fn NeighborHeapList(
 
         /// Row-major storage of all heap entries.
         /// Indexing: i * num_neighbors_per_node + j
-        entries: std.MultiArrayList(Entry).Slice,
+        entries: mod_soa_slice.SoaSlice(Entry),
 
         /// Total number of points (number of heaps).
         num_nodes: usize,
@@ -1436,13 +1440,8 @@ pub fn NeighborHeapList(
             const total_size: usize, const overflow: u1 = @mulWithOverflow(num_nodes, num_neighbors_per_node);
             if (overflow != 0) return InitError.NumberOfEdgesTooLarge;
 
-            // Allocate contiguous memory for all entries
-            var entries = std.MultiArrayList(Entry).empty;
-            try entries.setCapacity(allocator, total_size);
-            entries.len = total_size;
-
-            const entries_slice = entries.slice();
-            memsetBuffers(entries_slice);
+            var entries_slice = try mod_soa_slice.SoaSlice(Entry).init(total_size, allocator);
+            memsetBuffers(&entries_slice);
 
             return Self{
                 .entries = entries_slice,
@@ -1454,19 +1453,21 @@ pub fn NeighborHeapList(
         /// Resets all neighbor entries to their initial state:
         /// neighbor IDs to -1, distances to max value, and is_new flags to true.
         pub fn reset(self: *Self) void {
-            memsetBuffers(self.entries);
+            memsetBuffers(&self.entries);
         }
 
-        fn memsetBuffers(entries: std.MultiArrayList(Entry).Slice) void {
+        fn memsetBuffers(entries: *mod_soa_slice.SoaSlice(Entry)) void {
             const max_dist = switch (elem_type) {
                 .Int32 => std.math.maxInt(T),
                 .Float, .Half => std.math.floatMax(T),
             };
 
-            // Reset fields independently
-            @memset(entries.items(.neighbor_id), EMPTY_ID);
-            @memset(entries.items(.distance), max_dist);
-            if (store_flags) @memset(entries.items(.is_new), true);
+            const entry = Entry{
+                .neighbor_id = EMPTY_ID,
+                .distance = max_dist,
+                .is_new = if (store_flags) true else {},
+            };
+            entries.fill(entry);
         }
 
         /// Deinitializes the HeapList, freeing its allocated memory.
