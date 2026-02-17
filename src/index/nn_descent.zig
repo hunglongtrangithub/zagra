@@ -302,7 +302,6 @@ pub fn NNDescent(
         }
 
         /// Number of blocks for training.
-        /// Equal to 0 when the dataset is empty.
         pub fn numBlocks(self: *const Self) usize {
             return std.math.divCeil(
                 usize,
@@ -729,9 +728,10 @@ pub fn NNDescent(
 
         /// Generate graph updates for all graph update lists for a block of nodes at a block ID.
         fn generateBlockGraphUpdateProposals(self: *Self, block_id: usize) void {
+            std.debug.assert(self.training_config.num_threads > 0);
             std.debug.assert(self.block_graph_updates_lists.len == self.training_config.num_threads);
 
-            const block_start = block_id * self.num_nodes_per_block;
+            const block_start = @min(block_id * self.num_nodes_per_block, self.neighbors_list.num_nodes);
             const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
             log.debug("block_id: {} - block_start: {} - block_end: {}", .{ block_id, block_start, block_end });
 
@@ -845,10 +845,11 @@ pub fn NNDescent(
         /// Apply graph updates from all threads' graph updates lists for a block of nodes at block ID to the `neighbors_list`.
         /// Return the total number of successful updates applied.
         fn applyBlockGraphUpdatesProposals(self: *Self, block_id: usize) usize {
+            std.debug.assert(self.training_config.num_threads > 0);
             std.debug.assert(self.graph_update_counts_buffer.len == self.training_config.num_threads);
             std.debug.assert(self.block_graph_updates_lists.len == self.training_config.num_threads);
 
-            const block_start = block_id * self.num_nodes_per_block;
+            const block_start = @min(block_id * self.num_nodes_per_block, self.neighbors_list.num_nodes);
             const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
             log.debug("block_id: {} - block_start: {} - block_end: {}", .{ block_id, block_start, block_end });
 
@@ -985,7 +986,7 @@ pub fn NNDescent(
 
         /// Sort in descending order neighbors of all nodes in a block by distance.
         fn sortBlockNeighbors(self: *Self, block_id: usize) void {
-            const block_start = block_id * self.num_nodes_per_block;
+            const block_start = @min(block_id * self.num_nodes_per_block, self.neighbors_list.num_nodes);
             const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
             log.debug("Sorting neighbors for block_id: {} - block_start: {} - block_end: {}", .{ block_id, block_start, block_end });
 
