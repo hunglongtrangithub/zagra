@@ -150,7 +150,7 @@ pub fn main() !void {
     // Print neighbors of the first few vector
     for (0..5) |node_id| {
         if (node_id >= dataset.len) break;
-        const neighbor_ids: []const isize = nn_descent.neighbors_list.getEntryFieldSlice(node_id, .neighbor_id);
+        const neighbor_ids: []const usize = nn_descent.neighbors_list.getEntryFieldSlice(node_id, .neighbor_id);
         const neighbor_distances: []const T = nn_descent.neighbors_list.getEntryFieldSlice(node_id, .distance);
         try stdout.print("Neighbors of node {}:\n", .{node_id});
         for (neighbor_ids, 0..) |neighbor_id, i| {

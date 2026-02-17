@@ -35,7 +35,7 @@ pub const BuildConfig = struct {
 pub fn Index(comptime T: type, comptime N: usize) type {
     return struct {
         dataset: Dataset,
-        graph: []isize,
+        graph: []usize,
         num_nodes: usize,
         num_neighbors_per_node: usize,
 
@@ -69,7 +69,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
 
             // Extract the neighbor ID slice from the neighbors list and free everything else.
             const neighbor_entries = nn_descent.neighbors_list.entries;
-            const neighbor_ids: []isize = neighbor_entries.items(.neighbor_id);
+            const neighbor_ids: []usize = neighbor_entries.items(.neighbor_id);
             {
                 allocator.free(neighbor_entries.items(.distance));
                 allocator.free(neighbor_entries.items(.is_new));

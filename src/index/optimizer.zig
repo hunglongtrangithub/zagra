@@ -7,9 +7,9 @@ const mod_nn_descent = @import("nn_descent.zig");
 pub const Optimizer = struct {
     pub const Entry = struct {
         /// Node ID of a neighbor. Inherited from `NeighborHeapList`.
-        neighbor_id: isize,
+        neighbor_id: usize,
         /// Number of detourable routes for the edge between the node and this neighbor.
-        detourable_count: usize,
+        detour_count: usize,
     };
 
     /// Total number of points (n).
@@ -27,6 +27,12 @@ pub const Optimizer = struct {
     wait_group: std.Thread.WaitGroup,
 
     const Self = @This();
+
+    /// Optimizes the graph by removing redundant edges based on the number of detourable routes.
+    /// Final graph degree should be less than or equal to the initial number of neighbors per node.
+    pub fn optimize(self: *Self, graph_degree: usize) void {
+        std.debug.assert(graph_degree <= self.num_neighbors_per_node);
+    }
 };
 
 test "optimizer" {
