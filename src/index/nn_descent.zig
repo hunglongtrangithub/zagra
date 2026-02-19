@@ -223,7 +223,7 @@ pub fn NNDescent(
                 usize,
                 num_nodes_per_block,
                 training_config.num_threads,
-            ) catch 0;
+            ) catch unreachable; // training_config.num_threads > 0
 
             // Each thread takes an exclusive batch of nodes which corresponds to an exclusive slice in graph_updates_buffer
             for (block_graph_updates_lists, 0..) |*list, thread_id| {
@@ -266,7 +266,7 @@ pub fn NNDescent(
                 usize,
                 neighbors_list.num_nodes,
                 training_config.num_threads,
-            ) catch 0;
+            ) catch unreachable; // training_config.num_threads > 0
 
             return Self{
                 .dataset = dataset,
@@ -373,12 +373,10 @@ pub fn NNDescent(
 
                     log.info("NN-Descent iteration {d} - block {d}", .{ iteration, block_id });
 
-                    log.info("generating graph update proposals...", .{});
                     timer.reset();
                     self.generateBlockGraphUpdateProposals(block_id);
                     gen_total_ns += timer.read();
 
-                    log.info("applying graph update proposals...", .{});
                     timer.reset();
                     const count = self.applyBlockGraphUpdatesProposals(block_id);
                     apply_total_ns += timer.read();
@@ -447,9 +445,7 @@ pub fn NNDescent(
                         }
                     }
                     log.info("NN-Descent iteration {d} - block {d}", .{ iteration, block_id });
-                    log.info("generating graph update proposals...", .{});
                     self.generateBlockGraphUpdateProposals(block_id);
-                    log.info("applying graph update proposals...", .{});
                     const count = self.applyBlockGraphUpdatesProposals(block_id);
                     updates_count += count;
                 }

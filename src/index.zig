@@ -4,7 +4,7 @@ const mod_types = @import("types.zig");
 const mod_dataset = @import("dataset.zig");
 const mod_soa_slice = @import("index/soa_slice.zig");
 const mod_optimizer = @import("index/optimizer.zig");
-const mod_nn_descent = @import("index/nn_descent.zig");
+pub const mod_nn_descent = @import("index/nn_descent.zig");
 
 pub const BuildConfig = struct {
     graph_degree: usize,
@@ -68,6 +68,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             }
 
             // Extract the neighbor ID slice from the neighbors list and free everything else.
+            // The neighbor entries should include only valid neighbor IDs with no empty slots.
             const neighbor_entries = nn_descent.neighbors_list.entries;
             const neighbor_ids: []usize = neighbor_entries.items(.neighbor_id);
             {
@@ -76,9 +77,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             }
 
             const detour_counts: []usize = try allocator.alloc(usize, neighbor_entries.len);
-            @memset(detour_counts, 0);
-
-            // Craft the optimizer entries by borrowing the neighbor IDs and detourable counts.
+            // Craft the optimizer entries by moving the neighbor IDs and detourable counts into the SoaSlice
             const optimizer_entries = mod_soa_slice.SoaSlice(mod_optimizer.Optimizer.Entry){
                 .ptrs = [_][*]u8{
                     @ptrCast(neighbor_ids.ptr),
@@ -87,13 +86,26 @@ pub fn Index(comptime T: type, comptime N: usize) type {
                 .len = neighbor_entries.len,
             };
 
-            _ = mod_optimizer.Optimizer{
-                .entries = optimizer_entries,
-                .num_neighbors_per_node = nn_descent.neighbors_list.num_neighbors_per_node,
-                .num_nodes = nn_descent.neighbors_list.num_nodes,
-                .thread_pool = nn_descent.thread_pool,
-                .wait_group = nn_descent.wait_group,
-            };
+            // We let the optimizer borrow the entries and thread pool
+            const optimizer = mod_optimizer.Optimizer.init(
+                mod_optimizer.Optimizer.NeighborsList{
+                    .entries = optimizer_entries,
+                    .num_neighbors_per_node = nn_descent.neighbors_list.num_neighbors_per_node,
+                    .num_nodes = nn_descent.neighbors_list.num_nodes,
+                },
+                nn_descent.thread_pool,
+                nn_descent.num_nodes_per_block,
+            );
+            defer {
+                optimizer_entries.deinit(allocator);
+                if (nn_descent.thread_pool) |pool| {
+                    pool.deinit();
+                    allocator.destroy(pool);
+                }
+            }
+
+            optimizer.optimize(config.graph_degree);
+            // TODO: Extract the optimized neighbor IDs from the optimizer and construct the final graph structure for the index.
         }
     };
 }

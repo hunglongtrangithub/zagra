@@ -12,29 +12,208 @@ pub const Optimizer = struct {
         detour_count: usize,
     };
 
-    /// Total number of points (n).
-    num_nodes: usize,
-    /// Number of neighbors per point (k).
-    num_neighbors_per_node: usize,
-    /// Row-major storage of all entries.
-    /// Indexing: i * num_neighbors_per_node + j
-    entries: mod_soa_slice.SoaSlice(Entry),
+    pub const NeighborsList = struct {
+        /// Total number of points (n).
+        num_nodes: usize,
+        /// Number of neighbors per point (k).
+        num_neighbors_per_node: usize,
+        /// Row-major storage of all entries.
+        /// Indexing: i * num_neighbors_per_node + j
+        entries: mod_soa_slice.SoaSlice(Entry),
+
+        pub inline fn getEntryFieldSlice(
+            self: *const @This(),
+            node_id: usize,
+            comptime field: std.meta.FieldEnum(Entry),
+        ) []std.meta.fieldInfo(Entry, field).type {
+            std.debug.assert(node_id < self.num_nodes);
+            const start = node_id * self.num_neighbors_per_node;
+            return self.entries.items(field)[start .. start + self.num_neighbors_per_node];
+        }
+    };
+
+    /// Entries for all neighbors of all nodes, stored in row-major order.
+    /// Neighbor slots for every node are all valid (non-empty) and there are no self-loops (a node cannot be its own neighbor).
+    /// Neighbors for a node are arranged in descending order of distance, thus descending order of rank (this is guaranteed by the caller).
+    neighbors_list: NeighborsList,
+    /// Number of nodes in one block for block-wise computation.
+    num_nodes_per_block: usize,
 
     /// Thread pool for multi-threaded operations.
-    /// `null` when requested number of threads is <= 1.
+    /// If null or number of threads is 0, the optimizer will run in single-threaded mode.
     thread_pool: ?*std.Thread.Pool,
     /// Wait group for synchronizing threads.
     wait_group: std.Thread.WaitGroup,
 
     const Self = @This();
 
+    /// Initializes the optimizer with the given neighbors list, thread pool, and number of nodes per block.
+    pub fn init(
+        neighbors_list: NeighborsList,
+        thread_pool: ?*std.Thread.Pool,
+        num_nodes_per_block: usize,
+    ) Self {
+        var wait_group: std.Thread.WaitGroup = undefined;
+        wait_group.reset();
+
+        return Self{
+            .neighbors_list = neighbors_list,
+            .num_nodes_per_block = num_nodes_per_block,
+            .thread_pool = thread_pool,
+            .wait_group = wait_group,
+        };
+    }
+
     /// Optimizes the graph by removing redundant edges based on the number of detourable routes.
     /// Final graph degree should be less than or equal to the initial number of neighbors per node.
     pub fn optimize(self: *Self, graph_degree: usize) void {
         std.debug.assert(graph_degree <= self.num_neighbors_per_node);
+
+        self.countDetours();
+        // TODO: Prune neighbors based on detour counts and graph_degree.
+    }
+
+    /// Number of blocks for training.
+    /// Equal to 0 when num_nodes_per_block or number of nodes is 0.
+    fn numBlocks(self: *const Self) usize {
+        return std.math.divCeil(
+            usize,
+            self.neighbors_list.num_nodes,
+            self.num_nodes_per_block,
+        ) catch 0;
+    }
+
+    /// Returns the thread pool and the number of nodes each thread should process for one block.
+    /// We guard when the thread pool is null or has 0 threads, in which case the optimizer should run in single-threaded mode.
+    fn poolWithNumBlockNodesPerThread(self: *Self) ?struct { *std.Thread.Pool, usize } {
+        if (self.thread_pool) |pool| {
+            if (pool.threads.len > 0) {
+                const num_block_nodes_per_thread = std.math.divCeil(
+                    usize,
+                    self.num_nodes_per_block,
+                    pool.threads.len,
+                ) catch unreachable; // pool.threads.len > 0.
+                return .{ pool, num_block_nodes_per_thread };
+            }
+        }
+        return null;
+    }
+
+    fn countDetours(self: *Self) void {
+        // Reset detour counts to 0 before counting
+        const detour_counts: []usize = self.neighbors_list.entries.items(.detour_count);
+        @memset(detour_counts, 0);
+
+        const num_blocks = self.numBlocks();
+
+        for (0..num_blocks) |block_id| {
+            self.countDetoursBlock(block_id);
+        }
+    }
+
+    fn countDetoursBlock(self: *Self, block_id: usize) void {
+        const block_start = @min(block_id * self.num_nodes_per_block, self.neighbors_list.num_nodes);
+        const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
+
+        if (self.poolWithNumBlockNodesPerThread()) |pool_info| {
+            const pool, const num_block_nodes_per_thread = pool_info;
+            self.wait_group.reset();
+            for (0..pool.threads.len) |thread_id| {
+                const node_id_start = @min(block_start + thread_id * num_block_nodes_per_thread, block_end);
+                const node_id_end = @min(node_id_start + num_block_nodes_per_thread, block_end);
+                pool.spawnWg(
+                    &self.wait_group,
+                    countDetoursThread,
+                    .{
+                        &self.neighbors_list,
+                        node_id_start,
+                        node_id_end,
+                    },
+                );
+            }
+            pool.waitAndWork(&self.wait_group);
+        } else {
+            countDetoursThread(
+                &self.neighbors_list,
+                block_start,
+                block_end,
+            );
+        }
+    }
+
+    fn countDetoursThread(neighbors_list: *NeighborsList, node_id_start: usize, node_id_end: usize) void {
+        std.debug.assert(node_id_start <= node_id_end and node_id_end <= neighbors_list.num_nodes);
+
+        // TODO: make the detour counting faster by using data structures
+        for (node_id_start..node_id_end) |node_id| {
+            const neighbor_ids: []const usize = neighbors_list.getEntryFieldSlice(node_id, .neighbor_id);
+            const detours_counts: []usize = neighbors_list.getEntryFieldSlice(node_id, .detour_count);
+            for (neighbor_ids, 0..) |neighbor_id, idx| {
+                // We look at middle nodes whose ranks are less than the current neighbor_id's rank.
+                // These nodes are on the right of the current neighbor in the node_id's neighbors list.
+                for (neighbor_ids[idx + 1 ..]) |middle_node_id| {
+                    const node_ids: []const usize = neighbors_list.getEntryFieldSlice(middle_node_id, .neighbor_id);
+                    if (std.mem.indexOfScalar(
+                        usize,
+                        // If neighbor_id exists in the middle_node_id's neighbors list,
+                        // it must have a smaller rank than its rank in the node_id's neighbors list.
+                        // Thus we only look at the right side of the middle_node_id's neighbors list
+                        // right after the neighbor_id's rank in the node_id's neighbors list (idx).
+                        node_ids[idx + 1 ..],
+                        neighbor_id,
+                    ) != null) {
+                        detours_counts[idx] += 1;
+                    }
+                }
+            }
+        }
     }
 };
 
-test "optimizer" {
-    _ = Optimizer;
+test "count detours" {
+    // Adjacency list representation of the graph
+    // Node 0: neighbors 1, 2, 3
+    // Node 1: neighbors 0, 2, 3
+    // Node 2: neighbors 0, 1, 3
+    // Node 3: neighbors 0, 1, 2
+    var neighbor_ids = [_]usize{
+        1, 2, 3,
+        0, 2, 3,
+        0, 1, 3,
+        0, 1, 2,
+    };
+    var detour_counts = [_]usize{undefined} ** 12;
+
+    const neighbors_list = Optimizer.NeighborsList{
+        .num_nodes = 4,
+        .num_neighbors_per_node = 3,
+        .entries = mod_soa_slice.SoaSlice(Optimizer.Entry){
+            .ptrs = [_][*]u8{
+                @ptrCast(&neighbor_ids),
+                @ptrCast(&detour_counts),
+            },
+            .len = 12,
+        },
+    };
+
+    var optimizer = Optimizer.init(
+        neighbors_list,
+        null,
+        2,
+    );
+    optimizer.countDetours();
+
+    try std.testing.expectEqualSlices(
+        usize,
+        &[_]usize{
+            // 0-1: 0-2-1, 0-3-1
+            // 0-2: 0-3-2
+            // 1-2: 1-3-2
+            2, 1, 0,
+            0, 1, 0,
+            0, 0, 0,
+            0, 0, 0,
+        },
+        &detour_counts,
+    );
 }

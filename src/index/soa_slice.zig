@@ -38,6 +38,7 @@ pub fn SoaSlice(comptime T: type) type {
             };
         }
 
+        /// Deinitializes the SoaSlice by freeing the allocated memory for each field.
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             inline for (0..fields.len) |i| {
                 allocator.free(self.items(@enumFromInt(i)));
