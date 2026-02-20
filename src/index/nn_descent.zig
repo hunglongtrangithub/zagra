@@ -52,19 +52,28 @@ pub const TrainingConfig = struct {
     delta: f32 = 0.001,
 
     /// The number of parallel threads to use. Default is the number or cores.
-    /// > 1 means multi-threading, otherwise single-threading.
+    /// > 1 means multi-threading, 1 means single-threading, 0 means doing nothing.
     num_threads: usize = 1,
 
     /// Random seed for any randomized components of the algorithm.
     seed: u64,
 
-    /// Whether to generate & apply graph updates in a block of vectors at a time.
-    /// Block processing is faster and saves memory usage when number of vectors gets large. Default to true.
-    block_processing: bool = true,
+    /// Number of nodes to process in one block during block processing.
+    /// If larger than or equal to the total number of nodes, then all nodes will be processed in one block.
+    /// If zero, then no node will be processed in any block, which effectively disables training.
+    block_size: usize = DEFAULT_BLOCK_SIZE,
+
+    const DEFAULT_BLOCK_SIZE = 16384;
+    comptime {
+        if (DEFAULT_BLOCK_SIZE <= 0) @compileError("DEFAULT_BLOCK_SIZE must be larger than 0.");
+    }
 
     const Self = @This();
 
-    /// Initializes a training config with default values based on the dataset size.
+    /// Initializes a training config with default values based on the number of vectors.
+    /// If `num_threads` or `seed` is not provided, default values will be used:
+    /// - `num_threads`: number of CPU cores (at least 1)
+    /// - `seed`: a random u64 generated from `std.crypto.random`
     pub fn init(
         num_neighbors_per_node: usize,
         num_vectors: usize,
@@ -122,10 +131,11 @@ pub fn NNDescent(
         /// Last batch of nodes is less than or equal to this value.
         /// Is 0 when either number of dataset is empty or number of threads is 0.
         num_nodes_per_thread: usize,
-        /// Number of nodes in one block. Equal to the total number of nodes when
-        /// total number of nodes <= `DEFAULT_BLOCK_SIZE` or when `training_config.block_processing == false`.
+        /// Number of nodes in one block, capped at the total number of nodes.
+        /// Each block is processed in one iteration in the main loop of NN-descent.
         num_nodes_per_block: usize,
         /// Number of nodes within one block each thread is responsible for.
+        /// Zero when num_threads is zero, otherwise is the ceiling of num_nodes_per_block / num_threads.
         num_block_nodes_per_thread: usize,
         /// Pre-shuffled node IDs in range `[0, num_nodes)` for random neighbor initialization
         node_ids_random: []const usize,
@@ -141,18 +151,12 @@ pub fn NNDescent(
             node2_id: usize,
             distance: T,
         };
-        const DEFAULT_BLOCK_SIZE = 16384;
-        comptime {
-            if (DEFAULT_BLOCK_SIZE == 0) @compileError("DEFAULT_BLOCK_SIZE must be larger than 0.");
-        }
 
         const Self = @This();
 
         pub const InitError = error{
             /// The specified maximum number of candidates is too large. Should be no more than i32 max.
             MaxCandidatesTooLarge,
-            /// Invalid number of threads specified in the training config. Should be larger than zero.
-            InvalidNumThreads,
             /// Invalid number of neighbors per node. Should be less than the number of vectors in the dataset.
             InvalidNumNeighborsPerNode,
         };
@@ -164,7 +168,6 @@ pub fn NNDescent(
             allocator: std.mem.Allocator,
         ) (InitError || NeighborHeapListInitError || std.mem.Allocator.Error)!Self {
             if (training_config.max_candidates > std.math.maxInt(i32)) return InitError.MaxCandidatesTooLarge;
-            if (training_config.num_threads == 0) return InitError.InvalidNumThreads;
             if (training_config.num_neighbors_per_node >= dataset.len) return InitError.InvalidNumNeighborsPerNode;
 
             var neighbors_list = try NeighborsList.init(
@@ -205,10 +208,8 @@ pub fn NNDescent(
             const capacity_per_node = std.math.cast(usize, capacity_per_node_u64) orelse
                 return InitError.MaxCandidatesTooLarge;
 
-            const num_nodes_per_block = if (training_config.block_processing)
-                @min(DEFAULT_BLOCK_SIZE, neighbors_list.num_nodes)
-            else
-                neighbors_list.num_nodes;
+            // Cap num_nodes_per_block at num_nodes
+            const num_nodes_per_block: usize = @min(training_config.block_size, neighbors_list.num_nodes);
 
             const num_max_graph_updates: usize, const overflow = @mulWithOverflow(capacity_per_node, num_nodes_per_block);
             if (overflow != 0) return InitError.MaxCandidatesTooLarge;
@@ -223,7 +224,7 @@ pub fn NNDescent(
                 usize,
                 num_nodes_per_block,
                 training_config.num_threads,
-            ) catch unreachable; // training_config.num_threads > 0
+            ) catch 0;
 
             // Each thread takes an exclusive batch of nodes which corresponds to an exclusive slice in graph_updates_buffer
             for (block_graph_updates_lists, 0..) |*list, thread_id| {
@@ -250,14 +251,14 @@ pub fn NNDescent(
             const rng = prng.random();
             rng.shuffle(usize, node_ids_random);
 
-            const thread_pool = if (training_config.num_threads > 1) blk: {
+            const thread_pool = if (training_config.num_threads != 1) blk: {
                 const pool = try allocator.create(std.Thread.Pool);
                 pool.init(.{
                     .n_jobs = training_config.num_threads,
                     .allocator = allocator,
                 }) catch return std.mem.Allocator.Error.OutOfMemory;
                 break :blk pool;
-            } else null;
+            } else null; // Only null when num_threads is 1
 
             var wait_group: std.Thread.WaitGroup = undefined;
             wait_group.reset();
@@ -266,7 +267,7 @@ pub fn NNDescent(
                 usize,
                 neighbors_list.num_nodes,
                 training_config.num_threads,
-            ) catch unreachable; // training_config.num_threads > 0
+            ) catch 0;
 
             return Self{
                 .dataset = dataset,
@@ -302,6 +303,7 @@ pub fn NNDescent(
         }
 
         /// Number of blocks for training.
+        /// Zero when there is no node in the graph, or `self.num_nodes_per_block` is set to zero.
         pub fn numBlocks(self: *const Self) usize {
             return std.math.divCeil(
                 usize,
@@ -724,7 +726,6 @@ pub fn NNDescent(
 
         /// Generate graph updates for all graph update lists for a block of nodes at a block ID.
         fn generateBlockGraphUpdateProposals(self: *Self, block_id: usize) void {
-            std.debug.assert(self.training_config.num_threads > 0);
             std.debug.assert(self.block_graph_updates_lists.len == self.training_config.num_threads);
 
             const block_start = @min(block_id * self.num_nodes_per_block, self.neighbors_list.num_nodes);
@@ -755,6 +756,7 @@ pub fn NNDescent(
                 }
                 pool.waitAndWork(&self.wait_group);
             } else {
+                std.debug.assert(self.training_config.num_threads == 1);
                 generateGraphUpdateProposalsThread(
                     &self.dataset,
                     &self.neighbors_list,
@@ -841,7 +843,6 @@ pub fn NNDescent(
         /// Apply graph updates from all threads' graph updates lists for a block of nodes at block ID to the `neighbors_list`.
         /// Return the total number of successful updates applied.
         fn applyBlockGraphUpdatesProposals(self: *Self, block_id: usize) usize {
-            std.debug.assert(self.training_config.num_threads > 0);
             std.debug.assert(self.graph_update_counts_buffer.len == self.training_config.num_threads);
             std.debug.assert(self.block_graph_updates_lists.len == self.training_config.num_threads);
 
@@ -874,6 +875,7 @@ pub fn NNDescent(
                 // Reduce the counts from all threads with SIMD
                 return sumUpGraphUpdateCountsSIMD(self.graph_update_counts_buffer);
             } else {
+                std.debug.assert(self.training_config.num_threads == 1);
                 applyGraphUpdatesProposalsThread(
                     &self.neighbors_list,
                     &self.block_graph_updates_lists[0],
@@ -939,6 +941,7 @@ pub fn NNDescent(
         }
 
         /// Sum up the graph update counts from all threads using SIMD.
+        /// Return 0 when the buffer is empty.
         fn sumUpGraphUpdateCountsSIMD(graph_update_counts_buffer: []align(64) const usize) usize {
             const counts_ptr: [*]align(64) const usize = graph_update_counts_buffer.ptr;
             const num_counts = graph_update_counts_buffer.len;
@@ -1025,7 +1028,7 @@ pub fn NNDescent(
     };
 }
 
-test "NNDescent - no panic on empty dataset & zero graph degree" {
+test "NNDescent - no panic on empty dataset & zero graph degree & zero threads" {
     const T = f32;
     const N = 128;
     const dummy_buffer: [N]f32 align(64) = undefined;
@@ -1054,6 +1057,17 @@ test "NNDescent - no panic on empty dataset & zero graph degree" {
     dataset.len = 1;
     config.num_neighbors_per_node = 0;
     var nn_descent = try NNDescent(T, N).init(
+        dataset,
+        config,
+        std.testing.allocator,
+    );
+    nn_descent.train();
+    nn_descent.deinit(std.testing.allocator);
+
+    // Zero threads
+    config.num_neighbors_per_node = 0;
+    config.num_threads = 0;
+    nn_descent = try NNDescent(T, N).init(
         dataset,
         config,
         std.testing.allocator,

@@ -16,7 +16,6 @@ const HELP =
     \\- vector_count (required): Number of vectors in the dataset
     \\- graph_degree (optional - default to 64): Graph degree of vectors in the KNN graph
     \\- intermediate_graph_degree (optional - default to 2 * graph_degree): Graph degree of intermediate graphs during training
-    \\- block_processing (optional - default to true): Whether to use block processing mode during training
 ;
 
 pub fn main() !void {
@@ -68,20 +67,6 @@ pub fn main() !void {
     } else graph_degree * 2;
     try stdout.print("Graph degree of intermediate graphs during training: {any}\n", .{intermediate_graph_degree});
 
-    const block_processing = blk: {
-        if (args.next()) |str| {
-            if (std.mem.eql(u8, str, "true"))
-                break :blk true
-            else if (std.mem.eql(u8, str, "false"))
-                break :blk false
-            else {
-                std.debug.print("Expected 'true' or 'false' for block_processing", .{});
-                return;
-            }
-        } else break :blk true;
-    };
-    try stdout.print("Using block processing for training? {any}\n", .{block_processing});
-
     // Dataset configuration constants
     const T = i32; // Element type
     const N: usize = 128; // Vector length
@@ -117,14 +102,12 @@ pub fn main() !void {
 
     // Do NN-Descent
     const NNDescent = zagra.index.mod_nn_descent.NNDescent(T, N);
-    var training_config = zagra.index.mod_nn_descent.TrainingConfig.init(
-        4,
+    const training_config = zagra.index.mod_nn_descent.TrainingConfig.init(
+        graph_degree,
         vector_count,
         null,
         42,
     );
-    training_config.block_processing = block_processing;
-    training_config.num_neighbors_per_node = graph_degree;
 
     var nn_descent = NNDescent.init(
         dataset,
