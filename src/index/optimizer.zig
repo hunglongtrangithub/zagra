@@ -55,6 +55,10 @@ pub const Optimizer = struct {
     neighbors_list: NeighborsList,
     /// Number of nodes in one block for block-wise computation. Capped by the total number of nodes.
     num_nodes_per_block: usize,
+    /// Buffer for storing 2-hop neighbors during detour counting for each thread.
+    two_hop_neighbors_buffer: []usize,
+    /// Number of 2-hop neighbors to store for one node.
+    num_two_hop_neighbors_per_node: usize,
 
     /// Thread pool for multi-threaded operations.
     /// If null, the optimizer will run in single-threaded mode.
@@ -65,18 +69,35 @@ pub const Optimizer = struct {
 
     const Self = @This();
 
+    pub const InitError = error{
+        /// num_neighbors_per_node is too large, causing overflow when calculating the number of 2-hop neighbors or the buffer size.
+        NumNeighborsPerNodeTooLarge,
+    };
+
     /// Initializes the optimizer with the borrowed neighbors list, thread pool, and number of nodes per block.
     pub fn init(
         neighbors_list: NeighborsList,
         thread_pool: ?*std.Thread.Pool,
         num_nodes_per_block: usize,
-    ) Self {
+        allocator: std.mem.Allocator,
+    ) (InitError || std.mem.Allocator.Error)!Self {
         var optimizer: Self = undefined;
         optimizer.neighbors_list = neighbors_list;
         optimizer.thread_pool = thread_pool;
         optimizer.num_nodes_per_block = @min(num_nodes_per_block, neighbors_list.num_nodes);
 
+        // If num_neighbors_per_node is 0, the number will just be 0
+        optimizer.num_two_hop_neighbors_per_node =
+            std.math.mul(usize, neighbors_list.num_neighbors_per_node -| 1, neighbors_list.num_neighbors_per_node -| 1) catch return InitError.NumNeighborsPerNodeTooLarge;
+        const two_hop_neighbors_buffer_size =
+            std.math.mul(usize, optimizer.numThreads(), optimizer.num_two_hop_neighbors_per_node) catch return InitError.NumNeighborsPerNodeTooLarge;
+        optimizer.two_hop_neighbors_buffer = try allocator.alloc(usize, two_hop_neighbors_buffer_size);
+
         return optimizer;
+    }
+
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        allocator.free(self.two_hop_neighbors_buffer);
     }
 
     /// Optimizes the graph by removing redundant edges based on the number of detourable routes.
@@ -126,6 +147,7 @@ pub const Optimizer = struct {
     }
 
     fn countDetoursBlock(self: *Self, block_id: usize) void {
+        std.debug.assert(self.two_hop_neighbors_buffer.len == self.numThreads() * self.num_two_hop_neighbors_per_node);
         const block_start = @min(block_id * self.num_nodes_per_block, self.neighbors_list.num_nodes);
         const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
 
@@ -135,6 +157,8 @@ pub const Optimizer = struct {
             for (0..pool.threads.len) |thread_id| {
                 const node_id_start = @min(block_start + thread_id * num_block_nodes_per_thread, block_end);
                 const node_id_end = @min(node_id_start + num_block_nodes_per_thread, block_end);
+                const two_hop_neighbors_buffer_start = thread_id * self.num_two_hop_neighbors_per_node;
+                const two_hop_neighbors_buffer_end = two_hop_neighbors_buffer_start + self.num_two_hop_neighbors_per_node;
                 pool.spawnWg(
                     &self.wait_group,
                     countDetoursThread,
@@ -142,6 +166,7 @@ pub const Optimizer = struct {
                         &self.neighbors_list,
                         node_id_start,
                         node_id_end,
+                        self.two_hop_neighbors_buffer[two_hop_neighbors_buffer_start..two_hop_neighbors_buffer_end],
                     },
                 );
             }
@@ -151,34 +176,67 @@ pub const Optimizer = struct {
                 &self.neighbors_list,
                 block_start,
                 block_end,
+                self.two_hop_neighbors_buffer,
             );
         }
     }
 
-    fn countDetoursThread(neighbors_list: *NeighborsList, node_id_start: usize, node_id_end: usize) void {
+    fn countDetoursThread(
+        neighbors_list: *NeighborsList,
+        node_id_start: usize,
+        node_id_end: usize,
+        two_hop_neighbors_buffer: []usize,
+    ) void {
         std.debug.assert(node_id_start <= node_id_end and node_id_end <= neighbors_list.num_nodes);
+        std.debug.assert(two_hop_neighbors_buffer.len == (neighbors_list.num_neighbors_per_node -| 1) * (neighbors_list.num_neighbors_per_node -| 1));
 
-        // TODO: make the detour counting faster by using data structures
         for (node_id_start..node_id_end) |node_id| {
-            const neighbor_ids: []const usize = neighbors_list.getEntryFieldSlice(node_id, .neighbor_id);
-            const detours_counts: []usize = neighbors_list.getEntryFieldSlice(node_id, .detour_count);
-            for (neighbor_ids, 0..) |neighbor_id, idx| {
-                // We look at middle nodes whose ranks are less than the current neighbor_id's rank.
-                // These nodes are on the right of the current neighbor in the node_id's neighbors list.
-                for (neighbor_ids[idx + 1 ..]) |middle_node_id| {
-                    const node_ids: []const usize = neighbors_list.getEntryFieldSlice(middle_node_id, .neighbor_id);
-                    if (std.mem.indexOfScalar(
-                        usize,
-                        // If neighbor_id exists in the middle_node_id's neighbors list,
-                        // it must have a smaller rank than its rank in the node_id's neighbors list.
-                        // Thus we only look at the right side of the middle_node_id's neighbors list
-                        // right after the neighbor_id's rank in the node_id's neighbors list (idx).
-                        node_ids[idx + 1 ..],
-                        neighbor_id,
-                    ) != null) {
-                        detours_counts[idx] += 1;
+            // For one node, look at all nodes the node can reach in 2 hops by looking at all neighbors of its neighbors.
+            // Store these 2-hop neighbors in a buffer for quick lookup later. The buffer is fully filled.
+            // We ignore the farthest neighbor at both hops since it cannot be part of any detour starting from the node.
+            for (0..neighbors_list.num_neighbors_per_node -| 1) |neighbor_rank_hop1| {
+                const neighbor_idx_hop1 = neighbors_list.num_neighbors_per_node - 1 - neighbor_rank_hop1;
+                const neighbor_id_hop1: usize = neighbors_list.getEntryFieldSlice(node_id, .neighbor_id)[neighbor_idx_hop1];
+                std.debug.assert(neighbor_id_hop1 < neighbors_list.num_nodes);
+
+                for (0..neighbors_list.num_neighbors_per_node -| 1) |neighbor_rank_hop2| {
+                    const neighbor_idx_hop2 = neighbors_list.num_neighbors_per_node - 1 - neighbor_rank_hop2;
+                    var neighbor_id_hop2: usize = neighbors_list.getEntryFieldSlice(neighbor_id_hop1, .neighbor_id)[neighbor_idx_hop2];
+                    std.debug.assert(neighbor_id_hop2 < neighbors_list.num_nodes);
+
+                    if (neighbor_id_hop2 == node_id) {
+                        // Detected bidirectional edge: node_id -> neighbor_id_hop1 -> node_id.
+                        // Mark with an invalid neighbor ID to avoid counting it as a detour later.
+                        neighbor_id_hop2 = neighbors_list.num_nodes;
+                    }
+
+                    // Convert the pair of neighbor ranks (neighbor_rank_hop1, neighbor_rank_hop2) to an index in the buffer.
+                    const idx = if (neighbor_rank_hop1 < neighbor_rank_hop2)
+                        neighbor_rank_hop2 * neighbor_rank_hop2 + neighbor_rank_hop1
+                    else
+                        neighbor_rank_hop1 * (neighbor_rank_hop1 + 1) + neighbor_rank_hop2;
+                    two_hop_neighbors_buffer[idx] = neighbor_id_hop2;
+                }
+            }
+
+            for (0..neighbors_list.num_neighbors_per_node) |neighbor_rank| {
+                const neighbor_idx = neighbors_list.num_neighbors_per_node - 1 - neighbor_rank;
+                const neighbor_id: usize = neighbors_list.getEntryFieldSlice(node_id, .neighbor_id)[neighbor_idx];
+                std.debug.assert(neighbor_id < neighbors_list.num_nodes);
+
+                var detour_count: usize = 0;
+                // We only count detours with neighbor_rank_hop1 and neighbor_rank_hop2 of at most neighbor_rank - 1,
+                // so the largest possible idx in the two-hop neighbors buffer is:
+                // (neighbor_rank - 1) * neighbor_rank + (neighbor_rank - 1) = neighbor_rank * neighbor_rank - 1,
+                // which is less than neighbor_rank * neighbor_rank.
+                for (0..neighbor_rank * neighbor_rank) |idx| {
+                    if (two_hop_neighbors_buffer[idx] == neighbor_id) {
+                        // Found a detour: node_id -> some_neighbor -> neighbor_id.
+                        // Increment detour count for the edge between node_id and neighbor_id.
+                        detour_count += 1;
                     }
                 }
+                neighbors_list.getEntryFieldSlice(node_id, .detour_count)[neighbor_idx] = detour_count;
             }
         }
     }
@@ -210,11 +268,14 @@ test "count detours" {
         },
     };
 
-    var optimizer = Optimizer.init(
+    var optimizer = try Optimizer.init(
         neighbors_list,
         null,
         2,
+        std.testing.allocator,
     );
+    defer optimizer.deinit(std.testing.allocator);
+
     optimizer.countDetours();
 
     try std.testing.expectEqualSlices(

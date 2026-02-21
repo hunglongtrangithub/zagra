@@ -100,6 +100,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
                 },
                 nn_descent.thread_pool,
                 nn_descent.num_nodes_per_block,
+                allocator,
             );
             defer {
                 optimizer_entries.deinit(allocator);
@@ -107,6 +108,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
                     pool.deinit();
                     allocator.destroy(pool);
                 }
+                optimizer.deinit(allocator);
             }
 
             optimizer.optimize(config.graph_degree);

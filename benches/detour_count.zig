@@ -61,10 +61,11 @@ pub fn main() !void {
 
             try fillRandomNeighbors(&neighbors_list, seed, allocator);
 
-            var optimizer = Optimizer.init(
+            var optimizer = try Optimizer.init(
                 neighbors_list,
                 &thread_pool,
                 neighbors_list.num_nodes,
+                allocator,
             );
 
             var timer = try std.time.Timer.start();
