@@ -650,7 +650,7 @@ pub fn NNDescent(
                 for (0..neighbors_list.num_neighbors_per_node) |neighbor_idx| {
                     // Skip this neighbor slot if it's empty
                     const neighbor_id = neighbor_id_slice[neighbor_idx];
-                    if (neighbor_id == neighbors_list.num_nodes) continue;
+                    if (neighbor_id >= neighbors_list.num_nodes) continue;
 
                     // Generate a random priority for this neighbor
                     // TODO: Consider if this sampling strategy is appropriate
@@ -710,7 +710,7 @@ pub fn NNDescent(
                     const neighbor_id = neighbor_id_slice[neighbor_idx];
 
                     // Check if the neighbor ID is valid
-                    if (neighbor_id == neighbors_list.num_nodes) continue;
+                    if (neighbor_id >= neighbors_list.num_nodes) continue;
 
                     if (std.mem.indexOfScalar(
                         usize,
@@ -792,14 +792,14 @@ pub fn NNDescent(
                 const old_candidate_ids: []const usize = neighbor_candidates_old.getEntryFieldSlice(local_join_id, .neighbor_id);
 
                 for (new_candidate_ids, 0..) |cand1_id, i| {
-                    if (cand1_id == neighbors_list.num_nodes) continue;
+                    if (cand1_id >= neighbors_list.num_nodes) continue;
                     const cand1_vector = dataset.getUnchecked(cand1_id);
                     // Take current max distance in neighbor heap as threshold
                     const cand1_distance_threshold: T = neighbors_list.getMaxDistance(cand1_id);
 
                     // New-New candidate pairs
                     for (new_candidate_ids[i + 1 ..]) |cand2_id| {
-                        if (cand2_id == neighbors_list.num_nodes) continue;
+                        if (cand2_id >= neighbors_list.num_nodes) continue;
                         const cand2_vector = dataset.getUnchecked(cand2_id);
                         const cand2_distance_threshold: T = neighbors_list.getMaxDistance(cand2_id);
 
@@ -817,7 +817,7 @@ pub fn NNDescent(
 
                     // New-Old candidate pairs
                     for (old_candidate_ids) |cand2_id| {
-                        if (cand2_id == neighbors_list.num_nodes) continue;
+                        if (cand2_id >= neighbors_list.num_nodes) continue;
                         const cand2_vector = dataset.getUnchecked(cand2_id);
                         // Take current max distance in neighbor heap as threshold
                         const cand2_distance_threshold: T = neighbors_list.getMaxDistance(cand2_id);

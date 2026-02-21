@@ -36,41 +36,44 @@ pub const Optimizer = struct {
     /// Neighbor slots for every node are all valid (non-empty) and there are no self-loops (a node cannot be its own neighbor).
     /// Neighbors for a node are arranged in descending order of distance, thus descending order of rank (this is guaranteed by the caller).
     neighbors_list: NeighborsList,
-    /// Number of nodes in one block for block-wise computation.
+    /// Number of nodes in one block for block-wise computation. Capped by the total number of nodes.
     num_nodes_per_block: usize,
 
     /// Thread pool for multi-threaded operations.
-    /// If null or number of threads is 0, the optimizer will run in single-threaded mode.
+    /// If null, the optimizer will run in single-threaded mode.
+    /// If the thread pool has 0 threads, the optimizer will do nothing.
     thread_pool: ?*std.Thread.Pool,
     /// Wait group for synchronizing threads.
     wait_group: std.Thread.WaitGroup,
 
     const Self = @This();
 
-    /// Initializes the optimizer with the given neighbors list, thread pool, and number of nodes per block.
+    /// Initializes the optimizer with the borrowed neighbors list, thread pool, and number of nodes per block.
     pub fn init(
         neighbors_list: NeighborsList,
         thread_pool: ?*std.Thread.Pool,
         num_nodes_per_block: usize,
     ) Self {
-        var wait_group: std.Thread.WaitGroup = undefined;
-        wait_group.reset();
+        var optimizer: Self = undefined;
+        optimizer.neighbors_list = neighbors_list;
+        optimizer.thread_pool = thread_pool;
+        optimizer.num_nodes_per_block = @min(num_nodes_per_block, neighbors_list.num_nodes);
 
-        return Self{
-            .neighbors_list = neighbors_list,
-            .num_nodes_per_block = num_nodes_per_block,
-            .thread_pool = thread_pool,
-            .wait_group = wait_group,
-        };
+        return optimizer;
     }
 
     /// Optimizes the graph by removing redundant edges based on the number of detourable routes.
     /// Final graph degree should be less than or equal to the initial number of neighbors per node.
     pub fn optimize(self: *Self, graph_degree: usize) void {
-        std.debug.assert(graph_degree <= self.num_neighbors_per_node);
+        std.debug.assert(graph_degree <= self.neighbors_list.num_neighbors_per_node);
 
         self.countDetours();
         // TODO: Prune neighbors based on detour counts and graph_degree.
+    }
+
+    /// Number of threads to use for optimization. Returns 1 if thread_pool is null, otherwise returns the number of threads in the pool.
+    inline fn numThreads(self: *const Self) usize {
+        return if (self.thread_pool) |pool| pool.threads.len else 1;
     }
 
     /// Number of blocks for training.
@@ -83,20 +86,14 @@ pub const Optimizer = struct {
         ) catch 0;
     }
 
-    /// Returns the thread pool and the number of nodes each thread should process for one block.
-    /// We guard when the thread pool is null or has 0 threads, in which case the optimizer should run in single-threaded mode.
-    fn poolWithNumBlockNodesPerThread(self: *Self) ?struct { *std.Thread.Pool, usize } {
-        if (self.thread_pool) |pool| {
-            if (pool.threads.len > 0) {
-                const num_block_nodes_per_thread = std.math.divCeil(
-                    usize,
-                    self.num_nodes_per_block,
-                    pool.threads.len,
-                ) catch unreachable; // pool.threads.len > 0.
-                return .{ pool, num_block_nodes_per_thread };
-            }
-        }
-        return null;
+    /// Number of nodes each thread should process for one block.
+    /// Zero when num_nodes_per_block is 0 or when the thread pool has 0 threads.
+    fn numBlockNodesPerThread(self: *const Self) usize {
+        return std.math.divCeil(
+            usize,
+            self.num_nodes_per_block,
+            if (self.thread_pool) |pool| pool.threads.len else 1,
+        ) catch 0;
     }
 
     fn countDetours(self: *Self) void {
@@ -115,9 +112,9 @@ pub const Optimizer = struct {
         const block_start = @min(block_id * self.num_nodes_per_block, self.neighbors_list.num_nodes);
         const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
 
-        if (self.poolWithNumBlockNodesPerThread()) |pool_info| {
-            const pool, const num_block_nodes_per_thread = pool_info;
+        if (self.thread_pool) |pool| {
             self.wait_group.reset();
+            const num_block_nodes_per_thread = self.numBlockNodesPerThread();
             for (0..pool.threads.len) |thread_id| {
                 const node_id_start = @min(block_start + thread_id * num_block_nodes_per_thread, block_end);
                 const node_id_end = @min(node_id_start + num_block_nodes_per_thread, block_end);
