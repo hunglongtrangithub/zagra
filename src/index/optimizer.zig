@@ -21,6 +21,23 @@ pub const Optimizer = struct {
         /// Indexing: i * num_neighbors_per_node + j
         entries: mod_soa_slice.SoaSlice(Entry),
 
+        pub fn init(
+            num_nodes: usize,
+            num_neighbors_per_node: usize,
+            allocator: std.mem.Allocator,
+        ) !@This() {
+            const total_entries = try std.math.mul(usize, num_nodes, num_neighbors_per_node);
+            return .{
+                .num_nodes = num_nodes,
+                .num_neighbors_per_node = num_neighbors_per_node,
+                .entries = try mod_soa_slice.SoaSlice(Entry).init(total_entries, allocator),
+            };
+        }
+
+        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+            self.entries.deinit(allocator);
+        }
+
         pub inline fn getEntryFieldSlice(
             self: *const @This(),
             node_id: usize,
@@ -96,7 +113,7 @@ pub const Optimizer = struct {
         ) catch 0;
     }
 
-    fn countDetours(self: *Self) void {
+    pub fn countDetours(self: *Self) void {
         // Reset detour counts to 0 before counting
         const detour_counts: []usize = self.neighbors_list.entries.items(.detour_count);
         @memset(detour_counts, 0);

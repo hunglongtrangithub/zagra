@@ -4,13 +4,12 @@ const builtin = @import("builtin");
 const znpy = @import("znpy");
 
 const mod_vector = @import("vector.zig");
-const Vector = mod_vector.Vector;
 
 /// A dataset of fixed-size vectors loaded from a .npy file.
 /// The dataset contains vectors of type `Vector(T, N)`, where `T` is the element type
 /// and `N` is the dimension of each vector.
 pub fn Dataset(comptime T: type, comptime N: usize) type {
-    const Vec = Vector(T, N);
+    const Vec = mod_vector.Vector(T, N);
 
     return struct {
         /// Buffer containing the dataset's data.

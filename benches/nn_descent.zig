@@ -13,13 +13,12 @@ const BenchmarkConfig = struct {
     max_iterations: usize = 30,
     delta: f32 = 0.001,
     seed: u64 = 42,
-    block_processing: bool = true,
 };
 
 const BenchmarkResult = struct {
     vector_count: usize,
     graph_degree: usize,
-    timing: zagra.index.nn_descent.TrainingTiming,
+    timing: zagra.index.TrainingTiming,
 
     fn deinit(self: *BenchmarkResult, allocator: std.mem.Allocator) void {
         self.timing.deinit(allocator);
@@ -34,14 +33,13 @@ fn runBenchmark(
     config: BenchmarkConfig,
     allocator: std.mem.Allocator,
 ) !BenchmarkResult {
-    const NNDescent = zagra.index.nn_descent.NNDescent(T, N);
-    var training_config = zagra.index.nn_descent.TrainingConfig.init(
+    const NNDescent = zagra.index.NNDescent(T, N);
+    var training_config = zagra.index.TrainingConfig.init(
         config.num_threads,
         dataset.len,
         null,
         config.seed,
     );
-    training_config.block_processing = config.block_processing;
     training_config.num_neighbors_per_node = graph_degree;
     training_config.max_iterations = config.max_iterations;
     training_config.delta = config.delta;
@@ -111,7 +109,6 @@ pub fn main() !void {
         .vector_counts = &[_]usize{ 1_000_000, 5_000_000, 10_000_000 },
         .graph_degrees = &[_]usize{ 8, 16, 32, 64, 128 },
         .num_threads = 4,
-        .block_processing = true,
     };
 
     // Allocate the largest vector buffer upfront
@@ -125,9 +122,9 @@ pub fn main() !void {
     defer allocator.free(vectors_buffer);
     // Fill with synthetic data
     var prng = std.Random.DefaultPrng.init(bench_config.seed);
-    const rng = prng.random();
+    const random = prng.random();
     for (0..vectors_buffer.len) |i| {
-        vectors_buffer[i] = rng.float(T) * 100;
+        vectors_buffer[i] = random.float(T) * 100;
     }
     std.debug.print("Running benchmarks...\n\n", .{});
 

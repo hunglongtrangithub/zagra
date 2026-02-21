@@ -4,7 +4,13 @@ const mod_types = @import("types.zig");
 const mod_dataset = @import("dataset.zig");
 const mod_soa_slice = @import("index/soa_slice.zig");
 const mod_optimizer = @import("index/optimizer.zig");
-pub const mod_nn_descent = @import("index/nn_descent.zig");
+const mod_nn_descent = @import("index/nn_descent.zig");
+
+pub const NNDescent = mod_nn_descent.NNDescent;
+pub const TrainingConfig = mod_nn_descent.TrainingConfig;
+pub const TrainingTiming = mod_nn_descent.TrainingTiming;
+pub const SoaSlice = mod_soa_slice.SoaSlice;
+pub const Optimizer = mod_optimizer.Optimizer;
 
 pub const BuildConfig = struct {
     graph_degree: usize,
@@ -19,7 +25,7 @@ pub const BuildConfig = struct {
         num_threads: ?usize,
         seed: ?u64,
     ) Self {
-        const nn_descent_config = mod_nn_descent.TrainingConfig.init(
+        const nn_descent_config = TrainingConfig.init(
             intermediate_graph_degree,
             num_vectors,
             num_threads,
@@ -40,7 +46,6 @@ pub fn Index(comptime T: type, comptime N: usize) type {
         num_neighbors_per_node: usize,
 
         const Dataset = mod_dataset.Dataset(T, N);
-        const NNDescent = mod_nn_descent.NNDescent(T, N);
         const NeighborsList = mod_nn_descent.NeighborHeapList(T, true);
 
         const Self = @This();
@@ -50,7 +55,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
                 return error.InvalidBuildConfig;
             }
 
-            var nn_descent = try NNDescent.init(
+            var nn_descent = try NNDescent(T, N).init(
                 dataset,
                 config.nn_descent_config,
                 allocator,
@@ -87,7 +92,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             };
 
             // We let the optimizer borrow the entries and thread pool
-            const optimizer = mod_optimizer.Optimizer.init(
+            const optimizer = try mod_optimizer.Optimizer.init(
                 mod_optimizer.Optimizer.NeighborsList{
                     .entries = optimizer_entries,
                     .num_neighbors_per_node = nn_descent.neighbors_list.num_neighbors_per_node,

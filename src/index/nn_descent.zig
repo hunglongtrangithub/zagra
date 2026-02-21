@@ -158,6 +158,7 @@ pub fn NNDescent(
             /// The specified maximum number of candidates is too large. Should be no more than i32 max.
             MaxCandidatesTooLarge,
             /// Invalid number of neighbors per node. Should be less than the number of vectors in the dataset.
+            /// This error is always returned when the dataset is empty, since in that case there cannot be any neighbor.
             InvalidNumNeighborsPerNode,
         };
 
@@ -248,8 +249,8 @@ pub fn NNDescent(
             }
             // Shuffle node IDs for random neighbor initialization
             var prng = std.Random.DefaultPrng.init(training_config.seed);
-            const rng = prng.random();
-            rng.shuffle(usize, node_ids_random);
+            const random = prng.random();
+            random.shuffle(usize, node_ids_random);
 
             const thread_pool = if (training_config.num_threads != 1) blk: {
                 const pool = try allocator.create(std.Thread.Pool);
@@ -641,7 +642,7 @@ pub fn NNDescent(
 
             // Initialize PRNG with thread-specific seed
             var prng = std.Random.DefaultPrng.init(seed);
-            const rng = prng.random();
+            const random = prng.random();
 
             for (0..neighbors_list.num_nodes) |node_id| {
                 const neighbor_id_slice: []const usize = neighbors_list.getEntryFieldSlice(node_id, .neighbor_id);
@@ -654,7 +655,7 @@ pub fn NNDescent(
 
                     // Generate a random priority for this neighbor
                     // TODO: Consider if this sampling strategy is appropriate
-                    const priority = rng.int(i32);
+                    const priority = random.int(i32);
 
                     // Assign to neighbor_candidates_new or neighbor_candidates_old based on is_new flag
                     const entry_is_new = is_new_slice[neighbor_idx];
@@ -1305,7 +1306,7 @@ test "NNDescent - single-threaded and multi-threaded produce similar results" {
     defer std.testing.allocator.free(data_buffer);
 
     // Fixed data for reproducibility
-    var prng = std.Random.DefaultPrng.init(12345);
+    var prng = std.Random.DefaultPrng.init(42);
     const random = prng.random();
     for (data_buffer) |*elem| {
         elem.* = random.float(T);

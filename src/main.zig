@@ -86,9 +86,9 @@ pub fn main() !void {
     defer allocator.free(vectors_buffer);
 
     var prng = std.Random.DefaultPrng.init(42);
-    const rng = prng.random();
+    const random = prng.random();
     for (0..vectors_buffer.len) |i| {
-        vectors_buffer[i] = @rem(rng.int(T), 2);
+        vectors_buffer[i] = @rem(random.int(T), 2);
     }
 
     // Create dataset from buffer
@@ -101,8 +101,8 @@ pub fn main() !void {
     std.debug.assert(dataset.len == vector_count);
 
     // Do NN-Descent
-    const NNDescent = zagra.index.mod_nn_descent.NNDescent(T, N);
-    const training_config = zagra.index.mod_nn_descent.TrainingConfig.init(
+    const NNDescent = zagra.index.NNDescent(T, N);
+    const training_config = zagra.index.TrainingConfig.init(
         graph_degree,
         vector_count,
         null,

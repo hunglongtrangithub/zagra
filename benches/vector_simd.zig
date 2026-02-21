@@ -100,10 +100,10 @@ fn benchmarkComparison(
 
     // Initialize test vectors
     var prng = std.Random.DefaultPrng.init(42);
-    var rng = prng.random();
+    var random = prng.random();
 
-    const v1 = VecType.initRandom(&rng);
-    const v2 = VecType.initRandom(&rng);
+    const v1 = VecType.initRandom(&random);
+    const v2 = VecType.initRandom(&random);
 
     try writer.print("\n" ++ "=" ** 80 ++ "\n", .{});
     try writer.print("Benchmarking Vector({}, {d})\n", .{ T, N });

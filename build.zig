@@ -1,8 +1,9 @@
 const std = @import("std");
 
-const benches = [2][]const u8{
+const benches = [_][]const u8{
     "vector_simd",
     "nn_descent",
+    "detour_count",
 };
 
 pub fn build(b: *std.Build) void {
