@@ -1,5 +1,7 @@
 const std = @import("std");
 const zagra = @import("zagra");
+const csv = @import("csv.zig");
+
 const Optimizer = zagra.index.Optimizer;
 
 fn fillRandomNeighbors(
@@ -27,21 +29,6 @@ fn fillRandomNeighbors(
             idx += 1;
             neighbors[neighbor_idx] = neighbor_id;
         }
-    }
-}
-
-fn formatDuration(ns: u64, buf: []u8) []const u8 {
-    if (ns >= 1_000_000_000) {
-        const secs = @as(f64, @floatFromInt(ns)) / 1_000_000_000.0;
-        return std.fmt.bufPrint(buf, "{d:.2}s", .{secs}) catch buf[0..0];
-    } else if (ns >= 1_000_000) {
-        const ms = @as(f64, @floatFromInt(ns)) / 1_000_000.0;
-        return std.fmt.bufPrint(buf, "{d:.1}ms", .{ms}) catch buf[0..0];
-    } else if (ns >= 1_000) {
-        const us = @as(f64, @floatFromInt(ns)) / 1_000.0;
-        return std.fmt.bufPrint(buf, "{d:.1}µs", .{us}) catch buf[0..0];
-    } else {
-        return std.fmt.bufPrint(buf, "{d}ns", .{ns}) catch buf[0..0];
     }
 }
 
@@ -86,43 +73,30 @@ pub fn main() !void {
         }
     }
 
-    // Print results table
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-    const stdout = &stdout_writer.interface;
+    const results_dir = "benches/results";
+    std.fs.cwd().access(results_dir, .{}) catch |e| switch (e) {
+        error.FileNotFound => try std.fs.cwd().makeDir(results_dir),
+        else => return e,
+    };
 
-    const col_width = 12;
+    const file_name = results_dir ++ "/detour_count.csv";
+    const csv_file = try std.fs.cwd().createFile(file_name, .{});
+    defer csv_file.close();
 
-    try stdout.print("\n╔══════════════", .{});
-    for (ks_values) |_| try stdout.print("╦{s}", .{"═" ** col_width});
-    try stdout.print("╗\n", .{});
+    std.debug.print("Writing results to {s}...\n", .{file_name});
 
-    try stdout.print("║  N \\ K       ", .{});
-    for (ks_values) |k| try stdout.print("║ K={d:<9}", .{k});
-    try stdout.print("║\n", .{});
+    var csv_buffer: [1024]u8 = undefined;
+    var csv_writer = csv_file.writer(&csv_buffer);
+    const writer = &csv_writer.interface;
 
-    try stdout.print("╠══════════════", .{});
-    for (ks_values) |_| try stdout.print("╬{s}", .{"═" ** col_width});
-    try stdout.print("╣\n", .{});
-
+    const headers = &[_][]const u8{ "n", "k", "time_ns" };
+    try csv.writeHeaders(writer, headers);
     for (ns_values, 0..) |num_nodes, n_idx| {
-        try stdout.print("║ N={d:<10} ", .{num_nodes});
-        for (ks_values, 0..) |_, k_idx| {
-            var buf: [32]u8 = undefined;
-            const dur_str = formatDuration(results[n_idx][k_idx], &buf);
-            try stdout.print("║ {s:<10} ", .{dur_str});
-        }
-        try stdout.print("║\n", .{});
-
-        if (n_idx < ns_values.len - 1) {
-            try stdout.print("╠══════════════", .{});
-            for (ks_values) |_| try stdout.print("╬{s}", .{"═" ** col_width});
-            try stdout.print("╣\n", .{});
+        for (ks_values, 0..) |k_val, k_idx| {
+            const row = .{ num_nodes, k_val, results[n_idx][k_idx] };
+            try csv.writeRow(writer, row);
         }
     }
-
-    try stdout.print("╚══════════════", .{});
-    for (ks_values) |_| try stdout.print("╩{s}", .{"═" ** col_width});
-    try stdout.print("╝\n", .{});
-    try stdout.flush();
+    try writer.flush();
+    std.debug.print("Results written to {s}\n", .{file_name});
 }

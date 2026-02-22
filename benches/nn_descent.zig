@@ -1,6 +1,7 @@
 const std = @import("std");
 const znpy = @import("znpy");
 const zagra = @import("zagra");
+const csv = @import("csv.zig");
 
 pub const std_options: std.Options = .{
     .log_level = .err,
@@ -56,46 +57,6 @@ fn runBenchmark(
     };
 }
 
-fn printResults(results: []BenchmarkResult, writer: *std.io.Writer) !void {
-    try writer.print("\n", .{});
-    try writer.print("=" ** 80 ++ "\n", .{});
-    try writer.print("NN-DESCENT BENCHMARK RESULTS\n", .{});
-    try writer.print("=" ** 80 ++ "\n\n", .{});
-
-    for (results) |result| {
-        const train_timing = result.timing;
-        try writer.print("Vectors: {d:>8} | Degree: {d:>3} | Total: {d:>8.3}s | Iters: {d:>2} | Converged: {}\n", .{
-            result.vector_count,
-            result.graph_degree,
-            @as(f64, @floatFromInt(train_timing.total_training_ns)) / 1_000_000_000.0,
-            train_timing.num_iterations_completed,
-            train_timing.converged,
-        });
-
-        try writer.print("  Init random neighbors: {d:>8.3}s\n", .{
-            @as(f64, @floatFromInt(train_timing.init_random_ns)) / 1_000_000_000.0,
-        });
-
-        try writer.print("  Iteration breakdown:\n", .{});
-        try writer.print("    {s:>4} | {s:>10} | {s:>10} | {s:>10} | {s:>10} | {s:>8}\n", .{ "Iter", "Sample (s)", "Gen (s)", "Apply (s)", "Total (s)", "Updates" });
-        try writer.print("    " ++ "-" ** 70 ++ "\n", .{});
-
-        for (train_timing.iterations.items) |iter_timing| {
-            try writer.print("    {d:>4} | {d:>10.3} | {d:>10.3} | {d:>10.3} | {d:>10.3} | {d:>8}\n", .{
-                iter_timing.iteration,
-                @as(f64, @floatFromInt(iter_timing.sample_candidates_ns)) / 1_000_000_000.0,
-                @as(f64, @floatFromInt(iter_timing.generate_proposals_ns)) / 1_000_000_000.0,
-                @as(f64, @floatFromInt(iter_timing.apply_updates_ns)) / 1_000_000_000.0,
-                @as(f64, @floatFromInt(iter_timing.total_iteration_ns)) / 1_000_000_000.0,
-                iter_timing.updates_count,
-            });
-        }
-        try writer.print("\n", .{});
-    }
-
-    try writer.print("=" ** 80 ++ "\n", .{});
-}
-
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -106,8 +67,8 @@ pub fn main() !void {
 
     // Benchmark configuration
     const bench_config = BenchmarkConfig{
-        .vector_counts = &[_]usize{ 1_000_000, 5_000_000, 10_000_000 },
-        .graph_degrees = &[_]usize{ 8, 16, 32, 64, 128 },
+        .vector_counts = &[_]usize{ 1_000_000, 5_000_000 },
+        .graph_degrees = &[_]usize{ 8, 16, 32, 64 },
         .num_threads = 4,
     };
 
@@ -159,10 +120,57 @@ pub fn main() !void {
         }
     }
 
-    // Print results
-    var write_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&write_buffer);
-    const stdout = &stdout_writer.interface;
-    try printResults(all_results.items, stdout);
-    try stdout.flush();
+    // Write results to CSV files
+    const results_dir = "benches/results";
+    std.fs.cwd().access(results_dir, .{}) catch |e| switch (e) {
+        error.FileNotFound => try std.fs.cwd().makeDir(results_dir),
+        else => return e,
+    };
+
+    const summary_file_name = results_dir ++ "/nn_descent_summary.csv";
+    const summary_csv_file = try std.fs.cwd().createFile(summary_file_name, .{});
+    defer summary_csv_file.close();
+    var summary_csv_buffer: [1024]u8 = undefined;
+    var summary_csv_writer = summary_csv_file.writer(&summary_csv_buffer);
+    const summary_csv = &summary_csv_writer.interface;
+
+    const iterations_file_name = results_dir ++ "/nn_descent_iterations.csv";
+    const iterations_csv_file = try std.fs.cwd().createFile(iterations_file_name, .{});
+    defer iterations_csv_file.close();
+    var iterations_csv_buffer: [1024]u8 = undefined;
+    var iterations_csv_writer = iterations_csv_file.writer(&iterations_csv_buffer);
+    const iterations_csv = &iterations_csv_writer.interface;
+
+    try csv.writeHeaders(iterations_csv, &[_][]const u8{
+        "vector_count", "graph_degree", "iteration", "sample_s", "gen_s", "apply_s", "total_s", "updates",
+    });
+
+    for (all_results.items) |result| {
+        const train_timing = result.timing;
+        try csv.writeRow(summary_csv, .{
+            result.vector_count,
+            result.graph_degree,
+            @as(f64, @floatFromInt(train_timing.total_training_ns)) / 1_000_000_000.0,
+            @as(f64, @floatFromInt(train_timing.init_random_ns)) / 1_000_000_000.0,
+            train_timing.num_iterations_completed,
+            if (train_timing.converged) "true" else "false",
+        });
+
+        for (train_timing.iterations.items) |iter_timing| {
+            try csv.writeRow(iterations_csv, .{
+                result.vector_count,
+                result.graph_degree,
+                iter_timing.iteration,
+                @as(f64, @floatFromInt(iter_timing.sample_candidates_ns)) / 1_000_000_000.0,
+                @as(f64, @floatFromInt(iter_timing.generate_proposals_ns)) / 1_000_000_000.0,
+                @as(f64, @floatFromInt(iter_timing.apply_updates_ns)) / 1_000_000_000.0,
+                @as(f64, @floatFromInt(iter_timing.total_iteration_ns)) / 1_000_000_000.0,
+                iter_timing.updates_count,
+            });
+        }
+    }
+    try summary_csv.flush();
+    try iterations_csv.flush();
+
+    std.debug.print("Benchmarks completed.\nSummary written to {s}\nIteration details written to {s}\n", .{ summary_file_name, iterations_file_name });
 }

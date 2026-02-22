@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const zagra = @import("zagra");
+const csv = @import("csv.zig");
 
 /// Benchmark configuration
 const BenchmarkConfig = struct {
@@ -25,6 +26,14 @@ const BenchmarkResult = struct {
         try writer.print("  Median: {d:>10.2} ns\n", .{@as(f64, @floatFromInt(self.median_ns))});
         try writer.print("  StdDev: {d:>10.2} ns\n", .{self.stddev_ns});
     }
+};
+
+const ComparisonResult = struct {
+    element_type: []const u8,
+    vector_length: usize,
+    naive: BenchmarkResult,
+    simd: BenchmarkResult,
+    speedup: f64,
 };
 
 /// Run a benchmark and collect statistics
@@ -95,7 +104,7 @@ fn benchmarkComparison(
     comptime N: usize,
     allocator: std.mem.Allocator,
     writer: *std.io.Writer,
-) !void {
+) !ComparisonResult {
     const VecType = zagra.Vector(T, N);
 
     // Initialize test vectors
@@ -170,6 +179,20 @@ fn benchmarkComparison(
     }
 
     try writer.flush();
+
+    const type_name = switch (@typeInfo(T)) {
+        .float => "f32",
+        .int => @typeName(T),
+        else => @compileError("Unsupported type"),
+    };
+
+    return ComparisonResult{
+        .element_type = type_name,
+        .vector_length = N,
+        .naive = naive_result,
+        .simd = simd_result,
+        .speedup = 1.0,
+    };
 }
 
 pub fn main() !void {
@@ -182,13 +205,58 @@ pub fn main() !void {
     try stdout.print("\n", .{});
     try stdout.print("SIMD Vector Distance Benchmark Suite\n", .{});
 
-    try benchmarkComparison(f32, 128, allocator, stdout);
-    try benchmarkComparison(f32, 256, allocator, stdout);
-    try benchmarkComparison(f32, 512, allocator, stdout);
+    const results = [_]ComparisonResult{
+        try benchmarkComparison(f32, 128, allocator, stdout),
+        try benchmarkComparison(f32, 256, allocator, stdout),
+        try benchmarkComparison(f32, 512, allocator, stdout),
+    };
 
     try stdout.print("\n" ++ "=" ** 80 ++ "\n", .{});
     try stdout.print("Benchmark complete!\n", .{});
     try stdout.print("\n" ++ "=" ** 80 ++ "\n", .{});
 
     try stdout.flush();
+
+    const results_dir = "benches/results";
+    std.fs.cwd().access(results_dir, .{}) catch |e| switch (e) {
+        error.FileNotFound => try std.fs.cwd().makeDir(results_dir),
+        else => return e,
+    };
+
+    const csv_file_name = results_dir ++ "/vector_simd.csv";
+    const csv_file = try std.fs.cwd().createFile(csv_file_name, .{});
+    defer csv_file.close();
+
+    var file_buffer: [1024]u8 = undefined;
+    var file_writer = csv_file.writer(&file_buffer);
+    const file = &file_writer.interface;
+    try csv.writeHeaders(file, &[_][]const u8{
+        "vector_type", "element_type", "vector_length", "min_ns", "max_ns", "mean_ns", "median_ns", "stddev_ns", "speedup",
+    });
+    for (results) |result| {
+        try csv.writeRow(file, .{
+            "naive",
+            result.element_type,
+            result.vector_length,
+            result.naive.min_ns,
+            result.naive.max_ns,
+            result.naive.mean_ns,
+            result.naive.median_ns,
+            result.naive.stddev_ns,
+            result.speedup,
+        });
+        try csv.writeRow(file, .{
+            "simd",
+            result.element_type,
+            result.vector_length,
+            result.simd.min_ns,
+            result.simd.max_ns,
+            result.simd.mean_ns,
+            result.simd.median_ns,
+            result.simd.stddev_ns,
+            result.speedup,
+        });
+    }
+    try file.flush();
+    std.debug.print("Results written to {s}\n", .{csv_file_name});
 }
