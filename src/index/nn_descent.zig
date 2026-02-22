@@ -160,6 +160,8 @@ pub fn NNDescent(
             /// Invalid number of neighbors per node. Should be less than the number of vectors in the dataset.
             /// This error is always returned when the dataset is empty, since in that case there cannot be any neighbor.
             InvalidNumNeighborsPerNode,
+            /// The specified number of neighbors causes an overflow when multiplied by number of nodes.
+            NumberOfEdgesTooLarge,
         };
 
         /// Initialize NN-Descent with the given dataset and training configuration.
@@ -167,7 +169,7 @@ pub fn NNDescent(
             dataset: Dataset,
             training_config: TrainingConfig,
             allocator: std.mem.Allocator,
-        ) (InitError || NeighborHeapListInitError || std.mem.Allocator.Error)!Self {
+        ) (InitError || std.mem.Allocator.Error)!Self {
             if (training_config.max_candidates > std.math.maxInt(i32)) return InitError.MaxCandidatesTooLarge;
             if (training_config.num_neighbors_per_node >= dataset.len) return InitError.InvalidNumNeighborsPerNode;
 
@@ -997,7 +999,7 @@ pub fn NNDescent(
                     const node_id_end = @min(node_id_start + self.num_block_nodes_per_thread, block_end);
                     log.debug("thread_id: {} - node_id_start: {} - node_id_end: {}", .{ thread_id, node_id_start, node_id_end });
 
-                    const context = struct {
+                    const Context = struct {
                         fn sortNeighborsThread(
                             neighbors_list: *NeighborsList,
                             id_start: usize,
@@ -1011,7 +1013,7 @@ pub fn NNDescent(
 
                     pool.spawnWg(
                         &self.wait_group,
-                        context.sortNeighborsThread,
+                        Context.sortNeighborsThread,
                         .{
                             &self.neighbors_list,
                             node_id_start,
@@ -1352,7 +1354,6 @@ test "NNDescent - single-threaded and multi-threaded produce similar results" {
 }
 
 pub const NeighborHeapListInitError = error{
-    /// The specified number of neighbors causes an overflow when multiplied by number of nodes.
     NumberOfEdgesTooLarge,
 };
 
@@ -1417,18 +1418,16 @@ fn NeighborHeapList(
 
         const Self = @This();
 
-        const InitError = NeighborHeapListInitError;
-
         /// Initializes a new instance with the specified number of nodes and neighbors per node.
         /// All neighbor IDs are set to `num_nodes`, distances to max value, and is_new flags to true.
         pub fn init(
             num_nodes: usize,
             num_neighbors_per_node: usize,
             allocator: std.mem.Allocator,
-        ) (InitError || std.mem.Allocator.Error)!Self {
-            const total_edges = std.math.mul(usize, num_nodes, num_neighbors_per_node) catch return InitError.NumberOfEdgesTooLarge;
-            const total_size = std.math.mul(usize, total_edges, @sizeOf(Entry)) catch return InitError.NumberOfEdgesTooLarge;
-            if (total_size > std.math.maxInt(isize)) return InitError.NumberOfEdgesTooLarge;
+        ) (error{NumberOfEdgesTooLarge} || std.mem.Allocator.Error)!Self {
+            const total_edges = std.math.mul(usize, num_nodes, num_neighbors_per_node) catch return error.NumberOfEdgesTooLarge;
+            const total_size = std.math.mul(usize, total_edges, @sizeOf(Entry)) catch return error.NumberOfEdgesTooLarge;
+            if (total_size > std.math.maxInt(isize)) return error.NumberOfEdgesTooLarge;
 
             var entries_slice = try mod_soa_slice.SoaSlice(Entry).init(total_edges, allocator);
             memsetBuffers(&entries_slice, num_nodes);
