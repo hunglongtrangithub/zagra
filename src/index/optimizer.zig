@@ -5,54 +5,64 @@ const mod_soa_slice = @import("soa_slice.zig");
 const mod_nn_descent = @import("nn_descent.zig");
 
 pub const Optimizer = struct {
-    pub const Entry = struct {
-        /// Node ID of a neighbor. Inherited from `NeighborHeapList`.
-        neighbor_id: usize,
-        /// Number of detourable routes for the edge between the node and this neighbor.
-        detour_count: usize,
+    pub const Error = error{
+        /// The number of edges (num_nodes * num_neighbors_per_node) is too large to fit in memory.
+        NumberOfEdgesTooLarge,
     };
-
-    pub const NeighborsList = struct {
-        /// Total number of points (n).
-        num_nodes: usize,
-        /// Number of neighbors per point (k).
-        num_neighbors_per_node: usize,
-        /// Row-major storage of all entries.
-        /// Indexing: i * num_neighbors_per_node + j
-        entries: mod_soa_slice.SoaSlice(Entry),
-
-        pub fn init(
-            num_nodes: usize,
-            num_neighbors_per_node: usize,
-            allocator: std.mem.Allocator,
-        ) !@This() {
-            const total_entries = try std.math.mul(usize, num_nodes, num_neighbors_per_node);
-            return .{
-                .num_nodes = num_nodes,
-                .num_neighbors_per_node = num_neighbors_per_node,
-                .entries = try mod_soa_slice.SoaSlice(Entry).init(total_entries, allocator),
+    /// Generic neighbors list container.
+    /// - `store_detour_count`:
+    ///   if `true`, detour_count field is a `usize` (for input graph)
+    ///   if `false`, detour_count field is a `void` (for output graph)
+    pub fn NeighborsList(comptime store_detour_count: bool) type {
+        return struct {
+            pub const Entry = struct {
+                neighbor_id: usize,
+                detour_count: if (store_detour_count) usize else void,
             };
-        }
 
-        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
-            self.entries.deinit(allocator);
-        }
+            /// Total number of points (n).
+            num_nodes: usize,
+            /// Number of neighbors per point (k).
+            num_neighbors_per_node: usize,
+            /// Row-major storage of all entries.
+            /// Indexing: i * num_neighbors_per_node + j
+            entries: mod_soa_slice.SoaSlice(Entry),
 
-        pub inline fn getEntryFieldSlice(
-            self: *const @This(),
-            node_id: usize,
-            comptime field: std.meta.FieldEnum(Entry),
-        ) []std.meta.fieldInfo(Entry, field).type {
-            std.debug.assert(node_id < self.num_nodes);
-            const start = node_id * self.num_neighbors_per_node;
-            return self.entries.items(field)[start .. start + self.num_neighbors_per_node];
-        }
-    };
+            pub fn init(
+                num_nodes: usize,
+                num_neighbors_per_node: usize,
+                allocator: std.mem.Allocator,
+            ) (Error || std.mem.Allocator.Error)!@This() {
+                const total_edges = std.math.mul(usize, num_nodes, num_neighbors_per_node) catch return Error.NumberOfEdgesTooLarge;
+                const total_size = std.math.mul(usize, total_edges, @sizeOf(Entry)) catch return Error.NumberOfEdgesTooLarge;
+                if (total_size > std.math.maxInt(isize)) return Error.NumberOfEdgesTooLarge;
+                return .{
+                    .num_nodes = num_nodes,
+                    .num_neighbors_per_node = num_neighbors_per_node,
+                    .entries = try mod_soa_slice.SoaSlice(Entry).init(total_edges, allocator),
+                };
+            }
+
+            pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+                self.entries.deinit(allocator);
+            }
+
+            pub inline fn getEntryFieldSlice(
+                self: *const @This(),
+                node_id: usize,
+                comptime field: std.meta.FieldEnum(Entry),
+            ) []std.meta.fieldInfo(Entry, field).type {
+                std.debug.assert(node_id < self.num_nodes);
+                const start = node_id * self.num_neighbors_per_node;
+                return self.entries.items(field)[start .. start + self.num_neighbors_per_node];
+            }
+        };
+    }
 
     /// Entries for all neighbors of all nodes, stored in row-major order.
     /// Neighbor slots for every node are all valid (non-empty) and there are no self-loops (a node cannot be its own neighbor).
     /// Neighbors for a node are arranged in descending order of distance, thus descending order of rank (this is guaranteed by the caller).
-    neighbors_list: NeighborsList,
+    neighbors_list: NeighborsList(true),
     /// Number of nodes in one block for block-wise computation. Capped by the total number of nodes.
     num_nodes_per_block: usize,
 
@@ -67,25 +77,59 @@ pub const Optimizer = struct {
 
     /// Initializes the optimizer with the borrowed neighbors list, thread pool, and number of nodes per block.
     pub fn init(
-        neighbors_list: NeighborsList,
+        neighbors_list: NeighborsList(true),
         thread_pool: ?*std.Thread.Pool,
         num_nodes_per_block: usize,
     ) Self {
         var optimizer: Self = undefined;
         optimizer.neighbors_list = neighbors_list;
-        optimizer.thread_pool = thread_pool;
         optimizer.num_nodes_per_block = @min(num_nodes_per_block, neighbors_list.num_nodes);
+        optimizer.thread_pool = thread_pool;
+        optimizer.wait_group.reset();
 
         return optimizer;
     }
 
     /// Optimizes the graph by removing redundant edges based on the number of detourable routes.
-    /// Final graph degree should be less than or equal to the initial number of neighbors per node.
-    pub fn optimize(self: *Self, graph_degree: usize) void {
-        std.debug.assert(graph_degree <= self.neighbors_list.num_neighbors_per_node);
+    /// Final graph degree is less than or equal to the initial number of neighbors per node.
+    pub fn optimize(
+        self: *Self,
+        graph_degree: usize,
+        allocator: std.mem.Allocator,
+    ) (Error || std.mem.Allocator.Error)!NeighborsList(false) {
+        const output_degree = @min(graph_degree, self.neighbors_list.num_neighbors_per_node);
 
         self.countDetours();
-        // TODO: Prune neighbors based on detour counts and graph_degree.
+
+        // Output graph that will store the optimized neighbors.
+        // Does not store detour counts, only neighbor IDs.
+        var output_graph = try NeighborsList(false).init(
+            self.neighbors_list.num_nodes,
+            output_degree,
+            allocator,
+        );
+        errdefer output_graph.deinit(allocator);
+
+        // Each node has an ArrayList since the number of reverse neighbors is not fixed and can be less than output_degree.
+        const reverse_graph = try allocator.alloc(std.ArrayList(usize), self.neighbors_list.num_nodes);
+        defer allocator.free(reverse_graph);
+
+        // Buffer for storing reverse neighbors for all nodes.
+        // Each node can only have at most `output_degree` reverse neighbors.
+        const reverse_neighbors_buffer = try allocator.alloc(usize, self.neighbors_list.num_nodes * output_degree);
+        defer allocator.free(reverse_neighbors_buffer);
+
+        // Assign each node's reverse neighbor list to a portion of the reverse neighbors buffer.
+        for (reverse_graph, 0..) |*list, node_id| {
+            const buffer_start = node_id * output_degree;
+            list.* = std.ArrayList(usize).initBuffer(reverse_neighbors_buffer[buffer_start .. buffer_start + output_degree]);
+        }
+
+        self.prune(&output_graph);
+        self.buildReverseGraph(&output_graph, reverse_graph);
+        self.combine(&output_graph, reverse_graph, &output_graph);
+
+        return output_graph;
     }
 
     /// Number of threads to use for optimization. Returns 1 if thread_pool is null, otherwise returns the number of threads in the pool.
@@ -94,7 +138,7 @@ pub const Optimizer = struct {
     }
 
     /// Number of blocks for training.
-    /// Equal to 0 when num_nodes_per_block or number of nodes is 0.
+    /// Equal to 0 when `self.num_nodes_per_block` or number of nodes is 0.
     fn numBlocks(self: *const Self) usize {
         return std.math.divCeil(
             usize,
@@ -104,15 +148,21 @@ pub const Optimizer = struct {
     }
 
     /// Number of nodes each thread should process for one block.
-    /// Zero when num_nodes_per_block is 0 or when the thread pool has 0 threads.
+    /// Zero when `self.num_nodes_per_block` is 0 or when the thread pool has 0 threads.
     fn numBlockNodesPerThread(self: *const Self) usize {
         return std.math.divCeil(
             usize,
             self.num_nodes_per_block,
-            if (self.thread_pool) |pool| pool.threads.len else 1,
+            self.numThreads(),
         ) catch 0;
     }
 
+    /// Counts the number of detourable routes for each edge in the graph.
+    /// A detourable route exists when there's a path of length 2 between two nodes
+    /// that are already neighbors. The count represents how many such paths exist.
+    /// For each edge (u, v), counts how many middle nodes w exist such that:
+    ///   - w is to the right of v in u's neighbor list (w has lower rank than v)
+    ///   - u is to the right of v in w's neighbor list (u has lower rank than v)
     pub fn countDetours(self: *Self) void {
         // Reset detour counts to 0 before counting
         const detour_counts: []usize = self.neighbors_list.entries.items(.detour_count);
@@ -125,6 +175,8 @@ pub const Optimizer = struct {
         }
     }
 
+    /// Processes a block of nodes for detour counting.
+    /// Splits the block across threads if a thread pool is available.
     fn countDetoursBlock(self: *Self, block_id: usize) void {
         const block_start = @min(block_id * self.num_nodes_per_block, self.neighbors_list.num_nodes);
         const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
@@ -135,6 +187,7 @@ pub const Optimizer = struct {
             for (0..pool.threads.len) |thread_id| {
                 const node_id_start = @min(block_start + thread_id * num_block_nodes_per_thread, block_end);
                 const node_id_end = @min(node_id_start + num_block_nodes_per_thread, block_end);
+                // SAFETY: Each thread only touches neighbor data for nodes in the range [node_id_start, node_id_end), so no data races.
                 pool.spawnWg(
                     &self.wait_group,
                     countDetoursThread,
@@ -155,29 +208,363 @@ pub const Optimizer = struct {
         }
     }
 
-    fn countDetoursThread(neighbors_list: *NeighborsList, node_id_start: usize, node_id_end: usize) void {
+    /// Counts detourable routes for a range of nodes.
+    /// For each node, examines each neighbor and counts how many middle nodes create a detour for that node-neighbor pair.
+    fn countDetoursThread(
+        neighbors_list: *NeighborsList(true),
+        node_id_start: usize,
+        node_id_end: usize,
+    ) void {
         std.debug.assert(node_id_start <= node_id_end and node_id_end <= neighbors_list.num_nodes);
 
-        // TODO: make the detour counting faster by using data structures
         for (node_id_start..node_id_end) |node_id| {
             const neighbor_ids: []const usize = neighbors_list.getEntryFieldSlice(node_id, .neighbor_id);
-            const detours_counts: []usize = neighbors_list.getEntryFieldSlice(node_id, .detour_count);
+            const detour_counts: []usize = neighbors_list.getEntryFieldSlice(node_id, .detour_count);
             for (neighbor_ids, 0..) |neighbor_id, idx| {
                 // We look at middle nodes whose ranks are less than the current neighbor_id's rank.
                 // These nodes are on the right of the current neighbor in the node_id's neighbors list.
                 for (neighbor_ids[idx + 1 ..]) |middle_node_id| {
-                    const node_ids: []const usize = neighbors_list.getEntryFieldSlice(middle_node_id, .neighbor_id);
+                    const middle_neighbor_ids = neighbors_list.getEntryFieldSlice(middle_node_id, .neighbor_id);
                     if (std.mem.indexOfScalar(
                         usize,
                         // If neighbor_id exists in the middle_node_id's neighbors list,
                         // it must have a smaller rank than its rank in the node_id's neighbors list.
                         // Thus we only look at the right side of the middle_node_id's neighbors list
                         // right after the neighbor_id's rank in the node_id's neighbors list (idx).
-                        node_ids[idx + 1 ..],
+                        middle_neighbor_ids[idx + 1 ..],
                         neighbor_id,
                     ) != null) {
-                        detours_counts[idx] += 1;
+                        detour_counts[idx] += 1;
                     }
+                }
+            }
+        }
+    }
+
+    /// Prunes the graph by selecting neighbors with the smallest detour counts.
+    /// For each node, sorts neighbors by `detour_count` (ascending) and copies the first
+    /// `output_graph.num_neighbors_per_node` neighbors to the output graph.
+    fn prune(self: *Self, output_graph: *NeighborsList(false)) void {
+        const num_blocks = self.numBlocks();
+        for (0..num_blocks) |block_id| {
+            self.pruneBlock(block_id, output_graph);
+        }
+    }
+
+    /// Processes a block of nodes for pruning.
+    /// Splits the block across threads if a thread pool is available.
+    fn pruneBlock(
+        self: *Self,
+        block_id: usize,
+        output_graph: *NeighborsList(false),
+    ) void {
+        const block_start = @min(block_id * self.num_nodes_per_block, self.neighbors_list.num_nodes);
+        const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
+
+        if (self.thread_pool) |pool| {
+            self.wait_group.reset();
+            const num_nodes_per_thread = self.numBlockNodesPerThread();
+            for (0..pool.threads.len) |thread_id| {
+                const node_id_start = @min(block_start + thread_id * num_nodes_per_thread, block_end);
+                const node_id_end = @min(node_id_start + num_nodes_per_thread, block_end);
+                // SAFETY: Each thread only touches neighbor data for nodes in the range [node_id_start, node_id_end), so no data races.
+                pool.spawnWg(
+                    &self.wait_group,
+                    pruneThread,
+                    .{
+                        &self.neighbors_list,
+                        output_graph,
+                        node_id_start,
+                        node_id_end,
+                    },
+                );
+            }
+            pool.waitAndWork(&self.wait_group);
+        } else {
+            pruneThread(
+                &self.neighbors_list,
+                output_graph,
+                block_start,
+                block_end,
+            );
+        }
+    }
+
+    /// Prunes neighbors for a range of nodes.
+    /// Output graph must have the same number of nodes as the input graph, but may have fewer neighbors per node.
+    /// For each node in `[node_id_start, node_id_end)`:
+    ///   1. Sorts neighbors by `detour_count` in ascending order (in-place)
+    ///   2. Copies the first `output_graph.num_neighbors_per_node` neighbors to `output_graph`
+    fn pruneThread(
+        input_graph: *NeighborsList(true),
+        output_graph: *NeighborsList(false),
+        node_id_start: usize,
+        node_id_end: usize,
+    ) void {
+        std.debug.assert(input_graph.num_nodes == output_graph.num_nodes);
+        std.debug.assert(node_id_start <= node_id_end and node_id_end <= input_graph.num_nodes);
+
+        const input_degree = input_graph.num_neighbors_per_node;
+        const output_degree = output_graph.num_neighbors_per_node;
+        std.debug.assert(output_degree <= input_degree);
+
+        for (node_id_start..node_id_end) |node_id| {
+            const input_neighbor_ids: []usize = input_graph.getEntryFieldSlice(node_id, .neighbor_id);
+            const input_detour_counts: []usize = input_graph.getEntryFieldSlice(node_id, .detour_count);
+
+            const Context = struct {
+                neighbor_ids: []usize,
+                detour_counts: []usize,
+
+                pub fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+                    return ctx.detour_counts[a] < ctx.detour_counts[b];
+                }
+
+                pub fn swap(ctx: @This(), a: usize, b: usize) void {
+                    std.mem.swap(usize, &ctx.neighbor_ids[a], &ctx.neighbor_ids[b]);
+                    std.mem.swap(usize, &ctx.detour_counts[a], &ctx.detour_counts[b]);
+                }
+            };
+
+            // Sort by detour count in ascending order
+            std.sort.heapContext(0, input_degree, Context{
+                .neighbor_ids = input_neighbor_ids,
+                .detour_counts = input_detour_counts,
+            });
+
+            // Copy the first output_degree neighbors to the output graph
+            const output_neighbor_ids: []usize = output_graph.getEntryFieldSlice(node_id, .neighbor_id);
+            @memcpy(output_neighbor_ids, input_neighbor_ids[0..output_degree]);
+        }
+    }
+
+    /// Builds a reverse graph where each node stores which nodes have it as a neighbor.
+    /// For each edge `(u, v)` in `pruned_graph`, adds `u` to `reverse_graph[v]`'s neighbor list.
+    fn buildReverseGraph(
+        self: *Self,
+        pruned_graph: *NeighborsList(false),
+        reverse_graph: []std.ArrayList(usize),
+    ) void {
+        const num_blocks = self.numBlocks();
+        for (0..num_blocks) |block_id| {
+            self.buildReverseGraphBlock(block_id, pruned_graph, reverse_graph);
+        }
+    }
+
+    /// Processes a block of nodes for building the reverse graph.
+    /// Splits the block across threads if a thread pool is available.
+    fn buildReverseGraphBlock(
+        self: *Self,
+        block_id: usize,
+        pruned_graph: *NeighborsList(false),
+        reverse_graph: []std.ArrayList(usize),
+    ) void {
+        const block_start = @min(block_id * self.num_nodes_per_block, self.neighbors_list.num_nodes);
+        const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
+
+        if (self.thread_pool) |pool| {
+            self.wait_group.reset();
+            const num_nodes_per_thread = self.numBlockNodesPerThread();
+            for (0..pool.threads.len) |thread_id| {
+                const node_id_start = @min(block_start + thread_id * num_nodes_per_thread, block_end);
+                const node_id_end = @min(node_id_start + num_nodes_per_thread, block_end);
+                // SAFETY: Multiple threads can write to the same reverse list concurrently, but each uses
+                // an atomic compare-and-swap to claim a slot, so there are no data races
+                pool.spawnWg(
+                    &self.wait_group,
+                    buildReverseGraphThread,
+                    .{
+                        pruned_graph,
+                        reverse_graph,
+                        node_id_start,
+                        node_id_end,
+                    },
+                );
+            }
+            pool.waitAndWork(&self.wait_group);
+        } else {
+            buildReverseGraphThread(
+                pruned_graph,
+                reverse_graph,
+                block_start,
+                block_end,
+            );
+        }
+    }
+
+    /// Builds reverse graph for a range of source nodes.
+    /// For each edge `(src_node, dst_node)` in `pruned_graph` where `src_node` is in the range
+    /// `[node_id_start, node_id_end)`, adds `src_node` to `reverse_graph[dst_node]`'s list.
+    /// All lists in `reverse_graph` must have a capacity of at least `pruned_graph.num_neighbors_per_node`.
+    /// All node IDs in `pruned_graph` must be valid.
+    fn buildReverseGraphThread(
+        pruned_graph: *NeighborsList(false),
+        reverse_graph: []std.ArrayList(usize),
+        node_id_start: usize,
+        node_id_end: usize,
+    ) void {
+        std.debug.assert(pruned_graph.num_nodes == reverse_graph.len);
+        std.debug.assert(node_id_start <= node_id_end and node_id_end <= pruned_graph.num_nodes);
+
+        const capacity = pruned_graph.num_neighbors_per_node;
+
+        // Iterate over source nodes in this thread's range
+        for (node_id_start..node_id_end) |src_node| {
+            const neighbor_ids: []const usize = pruned_graph.getEntryFieldSlice(src_node, .neighbor_id);
+            for (neighbor_ids) |dst_node| {
+                std.debug.assert(dst_node < pruned_graph.num_nodes);
+
+                const list = &reverse_graph[dst_node];
+                std.debug.assert(list.capacity >= capacity);
+
+                // Use CAS (compare-and-swap) loop to atomically claim a slot in the reverse list
+                const list_len_ptr = &list.items.len;
+                while (true) {
+                    const current_len = @atomicLoad(usize, list_len_ptr, .monotonic);
+                    if (current_len >= capacity) break; // List is full, don't add
+
+                    // Try to atomically increment from current_len to current_len + 1
+                    // Returns null on success, old value on failure
+                    const old: ?usize = @cmpxchgWeak(
+                        usize,
+                        list_len_ptr,
+                        current_len,
+                        current_len + 1,
+                        .monotonic,
+                        .monotonic,
+                    );
+
+                    if (old == null) {
+                        // CAS succeeded - we claimed the slot at current_len
+                        list.items.ptr[current_len] = src_node;
+                        break;
+                    }
+                    // CAS failed (value changed), retry
+                }
+            }
+        }
+    }
+
+    /// Combines the pruned graph and reverse graph into the final output graph.
+    /// Copies pruned neighbors first, then adds reverse neighbors (avoiding duplicates).
+    fn combine(
+        self: *Self,
+        pruned_graph: *NeighborsList(false),
+        reverse_graph: []std.ArrayList(usize),
+        output_graph: *NeighborsList(false),
+    ) void {
+        const num_blocks = self.numBlocks();
+        for (0..num_blocks) |block_id| {
+            self.combineBlock(block_id, pruned_graph, reverse_graph, output_graph);
+        }
+    }
+
+    /// Processes a block of nodes for combining graphs.
+    /// Splits the block across threads if a thread pool is available.
+    fn combineBlock(
+        self: *Self,
+        block_id: usize,
+        pruned_graph: *NeighborsList(false),
+        reverse_graph: []std.ArrayList(usize),
+        output_graph: *NeighborsList(false),
+    ) void {
+        const block_start = @min(block_id * self.num_nodes_per_block, self.neighbors_list.num_nodes);
+        const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
+
+        if (self.thread_pool) |pool| {
+            self.wait_group.reset();
+            const num_nodes_per_thread = self.numBlockNodesPerThread();
+            for (0..pool.threads.len) |thread_id| {
+                const node_id_start = @min(block_start + thread_id * num_nodes_per_thread, block_end);
+                const node_id_end = @min(node_id_start + num_nodes_per_thread, block_end);
+                // SAFETY: Each thread only touches neighbor data for nodes in the range [node_id_start, node_id_end), so no data races.
+                pool.spawnWg(
+                    &self.wait_group,
+                    combineThread,
+                    .{
+                        pruned_graph,
+                        reverse_graph,
+                        output_graph,
+                        node_id_start,
+                        node_id_end,
+                    },
+                );
+            }
+            pool.waitAndWork(&self.wait_group);
+        } else {
+            combineThread(
+                pruned_graph,
+                reverse_graph,
+                output_graph,
+                block_start,
+                block_end,
+            );
+        }
+    }
+
+    /// Combines pruned and reverse graphs for a range of nodes.
+    /// For each node:
+    ///   1. Protect first half of pruned neighbors (lowest detour counts)
+    ///   2. Fill remaining slots with reverse edges, avoiding duplicates
+    ///   3. If there are still empty slots, fill with remaining pruned neighbors (higher detour counts), avoiding duplicates
+    fn combineThread(
+        pruned_graph: *NeighborsList(false),
+        reverse_graph: []std.ArrayList(usize),
+        output_graph: *NeighborsList(false),
+        node_id_start: usize,
+        node_id_end: usize,
+    ) void {
+        std.debug.assert(pruned_graph.num_nodes == reverse_graph.len and reverse_graph.len == output_graph.num_nodes);
+        std.debug.assert(node_id_start <= node_id_end and node_id_end <= pruned_graph.num_nodes);
+
+        const num_nodes = pruned_graph.num_nodes;
+        const output_degree = pruned_graph.num_neighbors_per_node;
+        const num_protected_edges = output_degree / 2; // Protect first half
+
+        for (node_id_start..node_id_end) |node_id| {
+            const pruned_neighbor_ids: []const usize = pruned_graph.getEntryFieldSlice(node_id, .neighbor_id);
+            const output_neighbor_ids: []usize = output_graph.getEntryFieldSlice(node_id, .neighbor_id);
+
+            // The current index in the output neighbor list where we will write the next neighbor ID.
+            var current_neighbor_idx: usize = 0;
+
+            // Step 1: Copy protected neighbors from pruned graph (first half)
+            for (pruned_neighbor_ids, 0..) |neighbor_id, neighbor_idx| {
+                if (neighbor_idx >= num_protected_edges) break; // Only first half is protected
+                if (neighbor_id >= num_nodes) continue; // Skip invalid neighbor ID
+                output_neighbor_ids[current_neighbor_idx] = neighbor_id;
+                current_neighbor_idx += 1;
+            }
+
+            // Step 2: Fill non-protected region with reverse edges
+            for (reverse_graph[node_id].items) |neighbor_id| {
+                if (current_neighbor_idx < output_degree) break;
+                if (neighbor_id >= num_nodes) continue;
+
+                // Check if already in output (including protected region)
+                // Only add if it's not a duplicate
+                if (std.mem.indexOfScalar(
+                    usize,
+                    output_neighbor_ids[0..current_neighbor_idx],
+                    neighbor_id,
+                ) == null) {
+                    output_neighbor_ids[current_neighbor_idx] = neighbor_id;
+                    current_neighbor_idx += 1;
+                }
+            }
+
+            // Step 3: If we still have space, fill with remaining pruned neighbors
+            for (pruned_neighbor_ids[num_protected_edges..]) |neighbor_id| {
+                if (current_neighbor_idx >= output_degree) break;
+                if (neighbor_id >= num_nodes) continue;
+
+                if (std.mem.indexOfScalar(
+                    usize,
+                    output_neighbor_ids[0..current_neighbor_idx],
+                    neighbor_id,
+                ) == null) {
+                    output_neighbor_ids[current_neighbor_idx] = neighbor_id;
+                    current_neighbor_idx += 1;
                 }
             }
         }
@@ -198,10 +585,10 @@ test "count detours" {
     };
     var detour_counts = [_]usize{undefined} ** 12;
 
-    const neighbors_list = Optimizer.NeighborsList{
+    const neighbors_list = Optimizer.NeighborsList(true){
         .num_nodes = 4,
         .num_neighbors_per_node = 3,
-        .entries = mod_soa_slice.SoaSlice(Optimizer.Entry){
+        .entries = mod_soa_slice.SoaSlice(struct { neighbor_id: usize, detour_count: usize }){
             .ptrs = [_][*]u8{
                 @ptrCast(&neighbor_ids),
                 @ptrCast(&detour_counts),

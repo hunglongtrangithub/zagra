@@ -5,7 +5,7 @@ const csv = @import("csv.zig");
 const Optimizer = zagra.index.Optimizer;
 
 fn fillRandomNeighbors(
-    neighbors_list: *const Optimizer.NeighborsList,
+    neighbors_list: *const Optimizer.NeighborsList(true),
     seed: u64,
     allocator: std.mem.Allocator,
 ) !void {
@@ -52,7 +52,7 @@ pub fn main() !void {
         for (ks_values, 0..) |num_neighbors_per_node, k_idx| {
             std.debug.print("Benchmarking N={d}, K={d}...\n", .{ num_nodes, num_neighbors_per_node });
 
-            var neighbors_list = try Optimizer.NeighborsList.init(
+            var neighbors_list = try Optimizer.NeighborsList(true).init(
                 num_nodes,
                 num_neighbors_per_node,
                 allocator,

@@ -24,6 +24,7 @@ pub const BuildConfig = struct {
         num_vectors: usize,
         num_threads: ?usize,
         seed: ?u64,
+        block_size: usize,
     ) Self {
         const nn_descent_config = TrainingConfig.init(
             intermediate_graph_degree,
@@ -31,24 +32,30 @@ pub const BuildConfig = struct {
             num_threads,
             seed,
         );
-        return Self{
+        var config = Self{
             .graph_degree = graph_degree,
             .nn_descent_config = nn_descent_config,
         };
+        config.nn_descent_config.block_size = block_size;
+        return config;
     }
 };
 
 pub fn Index(comptime T: type, comptime N: usize) type {
     return struct {
         dataset: Dataset,
-        graph: []usize,
+        graph: []const usize,
         num_nodes: usize,
         num_neighbors_per_node: usize,
 
         const Dataset = mod_dataset.Dataset(T, N);
-        const NeighborsList = mod_nn_descent.NeighborHeapList(T, true);
+        const NeighborsList = mod_optimizer.Optimizer.NeighborsList;
 
         const Self = @This();
+
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            allocator.free(self.graph);
+        }
 
         pub fn build(dataset: Dataset, config: BuildConfig, allocator: std.mem.Allocator) !Self {
             if (config.nn_descent_config.num_neighbors_per_node < config.graph_degree) {
@@ -62,28 +69,32 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             );
             nn_descent.train();
             nn_descent.sortNeighbors();
-            {
-                // Free everything except the neighbors list and thread pool
-                nn_descent.neighbor_candidates_new.deinit(allocator);
-                nn_descent.neighbor_candidates_old.deinit(allocator);
-                allocator.free(nn_descent.block_graph_updates_lists);
-                allocator.free(nn_descent.block_graph_updates_buffer);
-                allocator.free(nn_descent.graph_update_counts_buffer);
-                allocator.free(nn_descent.node_ids_random);
-            }
 
-            // Extract the neighbor ID slice from the neighbors list and free everything else.
-            // The neighbor entries should include only valid neighbor IDs with no empty slots.
             const neighbor_entries = nn_descent.neighbors_list.entries;
-            const neighbor_ids: []usize = neighbor_entries.items(.neighbor_id);
-            {
-                allocator.free(neighbor_entries.items(.distance));
-                allocator.free(neighbor_entries.items(.is_new));
-            }
 
+            // Free everything except the neighbor ids and the thread pool (which the optimizer will borrow)
+            allocator.free(neighbor_entries.items(.distance));
+            allocator.free(neighbor_entries.items(.is_new));
+            nn_descent.neighbor_candidates_new.deinit(allocator);
+            nn_descent.neighbor_candidates_old.deinit(allocator);
+            allocator.free(nn_descent.block_graph_updates_lists);
+            allocator.free(nn_descent.block_graph_updates_buffer);
+            allocator.free(nn_descent.graph_update_counts_buffer);
+            allocator.free(nn_descent.node_ids_random);
+
+            // We need to keep the neighbor IDs and the thread pool alive for the optimizer, so defer their cleanup
+            const neighbor_ids: []usize = neighbor_entries.items(.neighbor_id);
+            defer allocator.free(neighbor_ids);
+            const thread_pool = nn_descent.thread_pool;
+            defer if (thread_pool) |pool| {
+                pool.deinit();
+                allocator.destroy(pool);
+            };
             const detour_counts: []usize = try allocator.alloc(usize, neighbor_entries.len);
-            // Craft the optimizer entries by moving the neighbor IDs and detourable counts into the SoaSlice
-            const optimizer_entries = mod_soa_slice.SoaSlice(mod_optimizer.Optimizer.Entry){
+            defer allocator.free(detour_counts);
+
+            // Craft the optimizer entries by borrowing the neighbor IDs and detourable counts
+            const optimizer_entries = mod_soa_slice.SoaSlice(NeighborsList(true).Entry){
                 .ptrs = [_][*]u8{
                     @ptrCast(neighbor_ids.ptr),
                     @ptrCast(detour_counts.ptr),
@@ -92,25 +103,24 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             };
 
             // We let the optimizer borrow the entries and thread pool
-            const optimizer = try mod_optimizer.Optimizer.init(
-                mod_optimizer.Optimizer.NeighborsList{
+            var optimizer = mod_optimizer.Optimizer.init(
+                NeighborsList(true){
                     .entries = optimizer_entries,
                     .num_neighbors_per_node = nn_descent.neighbors_list.num_neighbors_per_node,
                     .num_nodes = nn_descent.neighbors_list.num_nodes,
                 },
-                nn_descent.thread_pool,
+                thread_pool,
                 nn_descent.num_nodes_per_block,
             );
-            defer {
-                optimizer_entries.deinit(allocator);
-                if (nn_descent.thread_pool) |pool| {
-                    pool.deinit();
-                    allocator.destroy(pool);
-                }
-            }
 
-            optimizer.optimize(config.graph_degree);
-            // TODO: Extract the optimized neighbor IDs from the optimizer and construct the final graph structure for the index.
+            const optimized_graph = try optimizer.optimize(config.graph_degree, allocator);
+
+            return Self{
+                .dataset = dataset,
+                .graph = optimized_graph.entries.items(.neighbor_id),
+                .num_nodes = nn_descent.neighbors_list.num_nodes,
+                .num_neighbors_per_node = config.graph_degree,
+            };
         }
     };
 }
