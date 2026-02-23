@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const log = std.log.scoped(.index);
 
 const znpy = @import("znpy");
 
@@ -58,11 +59,182 @@ pub fn Index(comptime T: type, comptime N: usize) type {
         const Dataset = mod_dataset.Dataset(T, N);
         const NeighborsList = mod_optimizer.Optimizer.NeighborsList;
 
+        pub const DATASET_FILENAME = "dataset.npy";
+        pub const GRAPH_FILENAME = "graph.npy";
+
         const Self = @This();
 
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             allocator.free(self.graph);
             self.dataset.deinit(allocator);
+        }
+
+        /// Loads the dataset from a .npy file reader.
+        /// Validates that the shape has 2 dimensions and the second dimension equals N.
+        fn loadDataset(
+            reader: *std.io.Reader,
+            allocator: std.mem.Allocator,
+        ) !Dataset {
+            const array = try znpy.array.static.StaticArray(T, 2).fromFileAllocAligned(
+                reader,
+                std.mem.Alignment.@"64",
+                allocator,
+            );
+
+            const shape = array.shape.dims;
+            // Second dimension must equal N (vector length)
+            if (shape[1] != N) {
+                return error.InvalidDatasetDimension;
+            }
+
+            return Dataset{
+                .data_buffer = @as([]align(64) const T, @alignCast(array.data_buffer)),
+                .len = shape[0],
+            };
+        }
+
+        /// Loads the graph from a .npy file reader.
+        /// Validates that:
+        ///   - The shape has 2 dimensions
+        ///   - The first dimension equals `expected_num_nodes`
+        ///   - The dtype is `u32` or `u64` and fits in `usize`
+        ///   - All neighbor IDs are in valid range
+        /// Return the graph as a slice of `usize` neighbor IDs in row-major order (length = num_nodes * degree),
+        /// and the graph degree (number of neighbors per node).
+        fn loadGraph(
+            reader: *std.io.Reader,
+            allocator: std.mem.Allocator,
+            expected_num_nodes: usize,
+        ) !struct { []usize, usize } {
+            // Read header first to get dtype
+            const header = try znpy.header.Header.fromReader(reader, allocator);
+            defer header.deinit(allocator);
+            const shape = header.shape;
+
+            // Validate shape
+            if (shape.len != 2) {
+                return error.InvalidGraphShape;
+            }
+            const num_nodes = shape[0];
+            const degree = shape[1];
+            const num_elements = num_nodes * degree;
+
+            if (num_nodes != expected_num_nodes) {
+                return error.GraphDatasetMismatch;
+            }
+
+            // Check dtype
+            const dtype_size: usize = switch (header.descr) {
+                .UInt8 => @sizeOf(u8),
+                .UInt16 => @sizeOf(u16),
+                .UInt32 => @sizeOf(u32),
+                .UInt64 => @sizeOf(u64),
+                else => return error.InvalidGraphDtype,
+            };
+            // usize must be large enough to hold the neighbor ID
+            if (dtype_size > @sizeOf(usize)) {
+                return error.GraphDtypeTooLarge;
+            }
+
+            log.debug("loadGraph: num_nodes={}, degree={}, num_elements={}, dtype_size={}", .{
+                num_nodes, degree, num_elements, dtype_size,
+            });
+
+            // Read and parse based on dtype
+            const graph_data = try allocator.alloc(usize, num_elements);
+            switch (header.descr) {
+                .UInt8 => {
+                    const typed_data = try allocator.alloc(u8, num_elements);
+                    defer allocator.free(typed_data);
+                    try reader.readSliceAll(std.mem.sliceAsBytes(typed_data));
+                    for (typed_data, 0..) |v, i| {
+                        graph_data[i] = @intCast(v);
+                    }
+                },
+                .UInt16 => {
+                    const typed_data = try allocator.alloc(u16, num_elements);
+                    defer allocator.free(typed_data);
+                    try reader.readSliceAll(std.mem.sliceAsBytes(typed_data));
+                    for (typed_data, 0..) |v, i| {
+                        graph_data[i] = @intCast(v);
+                    }
+                },
+                .UInt32 => {
+                    const typed_data = try allocator.alloc(u32, num_elements);
+                    defer allocator.free(typed_data);
+                    try reader.readSliceAll(std.mem.sliceAsBytes(typed_data));
+                    for (typed_data, 0..) |v, i| {
+                        graph_data[i] = @intCast(v);
+                    }
+                },
+                .UInt64 => {
+                    const typed_data = try allocator.alloc(u64, num_elements);
+                    defer allocator.free(typed_data);
+                    try reader.readSliceAll(std.mem.sliceAsBytes(typed_data));
+                    for (typed_data, 0..) |v, i| {
+                        graph_data[i] = @intCast(v);
+                    }
+                },
+                else => unreachable,
+            }
+
+            // Validate all neighbor IDs are in range
+            for (graph_data) |neighbor_id| {
+                if (neighbor_id >= expected_num_nodes) {
+                    return error.InvalidNeighborId;
+                }
+            }
+
+            return .{ graph_data, degree };
+        }
+
+        /// Loads an index from a directory.
+        ///
+        /// Expected files in the directory:
+        ///   - `dataset.npy`: The vector data (shape: (num_vectors, N), dtype: T)
+        ///   - `graph.npy`: The k-NN graph (shape: (num_nodes, degree), dtype: u32 or u64)
+        ///
+        /// Validates that:
+        ///   - The graph has 2 dimensions
+        ///   - The first dimension of graph equals the number of vectors in dataset
+        ///   - All neighbor IDs in the graph are valid (within [0, num_nodes))
+        ///
+        /// Returns an error if validation fails.
+        pub fn load(
+            dir_path: []const u8,
+            allocator: std.mem.Allocator,
+        ) !Self {
+            var read_buffer: [4096]u8 = undefined;
+
+            // Validate directory exists
+            var dir = try std.fs.cwd().openDir(dir_path, .{});
+            defer dir.close();
+
+            // Load dataset.npy
+            const dataset_file = try dir.openFile(DATASET_FILENAME, .{});
+            defer dataset_file.close();
+
+            var dataset_reader = dataset_file.reader(&read_buffer);
+            const dataset = try loadDataset(&dataset_reader.interface, allocator);
+            errdefer dataset.deinit(allocator);
+
+            // Load graph.npy
+            const graph_file = try dir.openFile(GRAPH_FILENAME, .{});
+            defer graph_file.close();
+
+            var graph_reader = graph_file.reader(&read_buffer);
+            const graph_data, const graph_degree = try loadGraph(
+                &graph_reader.interface,
+                allocator,
+                dataset.len,
+            );
+
+            return Self{
+                .dataset = dataset,
+                .graph = graph_data,
+                .num_nodes = dataset.len,
+                .num_neighbors_per_node = graph_degree,
+            };
         }
 
         /// Saves the index to a directory.
@@ -97,7 +269,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             var write_buffer: [4096]u8 = undefined;
 
             // Create the dataset file and writer
-            const dataset_file_path = try std.fs.path.join(allocator, &[_][]const u8{ dir_path, "dataset.npy" });
+            const dataset_file_path = try std.fs.path.join(allocator, &[_][]const u8{ dir_path, DATASET_FILENAME });
             defer allocator.free(dataset_file_path);
             const dataset_file = try std.fs.cwd().createFile(dataset_file_path, .{});
             defer dataset_file.close();
@@ -107,7 +279,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             try dataset_file_writer.interface.flush();
 
             // Create the graph file and writer
-            const graph_file_path = try std.fs.path.join(allocator, &[_][]const u8{ dir_path, "graph.npy" });
+            const graph_file_path = try std.fs.path.join(allocator, &[_][]const u8{ dir_path, GRAPH_FILENAME });
             defer allocator.free(graph_file_path);
             const graph_file = try std.fs.cwd().createFile(graph_file_path, .{});
             defer graph_file.close();
@@ -131,16 +303,19 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             writer: *std.io.Writer,
             allocator: std.mem.Allocator,
         ) !void {
-            // Determine the appropriate element type based on the number of nodes
-            const element_type = if (self.num_nodes <= std.math.maxInt(u32))
-                znpy.ElementType{ .UInt32 = null }
-            else
-                znpy.ElementType{ .UInt64 = null };
+            // Determine the appropriate element type based on usize size
+            const element_type: znpy.ElementType = switch (@sizeOf(usize)) {
+                1 => znpy.ElementType.UInt8,
+                2 => znpy.ElementType{ .UInt16 = null },
+                4 => znpy.ElementType{ .UInt32 = null },
+                8 => znpy.ElementType{ .UInt64 = null },
+                else => return error.UnsupportedUsizeSize,
+            };
 
             // Write the graph in .npy format
             const header = znpy.header.Header{
                 .descr = element_type,
-                .order = znpy.Order.C,
+                .order = .C,
                 .shape = &[_]usize{ self.num_nodes, self.num_neighbors_per_node },
             };
             try header.writeAll(writer, allocator);
@@ -152,6 +327,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
                 return error.InvalidBuildConfig;
             }
 
+            log.info("Training initial graph with degree {d} using NN-Descent...", .{config.nn_descent_config.num_neighbors_per_node});
             var nn_descent = try NNDescent(T, N).init(
                 dataset,
                 config.nn_descent_config,
@@ -163,6 +339,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             const neighbor_entries = nn_descent.neighbors_list.entries;
 
             // Free everything except the neighbor ids and the thread pool (which the optimizer will borrow)
+            log.info("Freeing NN-Descent resources...", .{});
             allocator.free(neighbor_entries.items(.distance));
             allocator.free(neighbor_entries.items(.is_new));
             nn_descent.neighbor_candidates_new.deinit(allocator);
@@ -203,6 +380,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
                 nn_descent.num_nodes_per_block,
             );
 
+            log.info("Optimizing graph with degree {d}...", .{config.graph_degree});
             const optimized_graph = try optimizer.optimize(config.graph_degree, allocator);
 
             return Self{

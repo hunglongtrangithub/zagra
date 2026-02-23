@@ -187,10 +187,27 @@ pub fn main() !void {
 
     // Save the index to disk if path is provided
     if (save_path) |path| {
-        try stdout.print("Saving index to {s}...\n", .{path});
+        try stdout.print("Saving index to {s}\n", .{path});
         try stdout.flush();
         try index.save(path, allocator);
         try stdout.print("Index saved.\n", .{});
+        try stdout.flush();
+
+        // Load the index back from disk to verify
+        try stdout.print("Loading index from {s}\n", .{path});
+        try stdout.flush();
+        var loaded_index = try Index.load(path, allocator);
+        defer loaded_index.deinit(allocator);
+        try stdout.print("Index loaded. Verifying...\n", .{});
+        try stdout.flush();
+
+        const graph_match = loaded_index.num_nodes == index.num_nodes and loaded_index.num_neighbors_per_node == index.num_neighbors_per_node and std.mem.eql(usize, loaded_index.graph, index.graph);
+        const dataset_match = loaded_index.dataset.len == index.dataset.len and std.mem.eql(T, loaded_index.dataset.data_buffer, index.dataset.data_buffer);
+        if (graph_match and dataset_match) {
+            try stdout.print("Loaded index matches original index.\n", .{});
+        } else {
+            try stdout.print("Loaded index does not match original index!\n", .{});
+        }
         try stdout.flush();
     }
 }
