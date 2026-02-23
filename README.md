@@ -28,12 +28,13 @@ To achieve this, I chose Zig to leverages Zig's unique capabilities, such as **c
 - [x] Lock-free, multi-threaded graph operations
 - [x] Unit tests for correctness verification
 
-### Phase 3: Graph Optimization (Planned)
-- [ ] Implement graph optimization techniques from CAGRA paper
-  - [ ] Rank-based edge reordering
-  - [ ] Reversed graph construction
-  - [ ] Reordered graph and reversed graph combination
-- [ ] Graph serialization and de-serialization for persistence
+### Phase 3: Graph Optimization (Ongoing)
+- [x] Implement graph optimization techniques from CAGRA paper
+  - [x] Rank-based edge reordering
+  - [x] Reversed graph construction
+  - [x] Reordered graph and reversed graph combination
+- [x] Graph serialization and de-serialization for persistence
+- [ ] Unit tests for graph optimization correctness
 
 ### Phase 4: Search Algorithm (Planned)
 - [ ] Implement search algorithm as described in CAGRA paper
