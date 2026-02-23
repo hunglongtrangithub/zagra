@@ -12,15 +12,16 @@ var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
 const stdout = &stdout_writer.interface;
 
 const HELP =
-    \\zagra <vector_count> <graph_degree> [block_processing]
+    \\zagra <vector_count> <graph_degree> [intermediate_graph_degree] [options]
     \\- vector_count (required): Number of vectors in the dataset
-    \\- graph_degree (optional - default to 64): Graph degree of vectors in the KNN graph
-    \\- intermediate_graph_degree (optional - default to 2 * graph_degree): Graph degree of intermediate graphs during training
+    \\- graph_degree (required): Graph degree of the final CAGRA graph
+    \\- intermediate_graph_degree (optional - default to 2 * graph_degree): Graph degree during NN-Descent training
+    \\Options:
+    \\- --threads <n>: Number of threads for NN-Descent and Optimizer (default: CPU core count)
+    \\- --block-size <n>: Block size for processing (default: 16384)
 ;
 
 pub fn main() !void {
-    std.debug.print("This is Zagra!\n", .{});
-
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -53,26 +54,71 @@ pub fn main() !void {
         }
         return;
     };
-    try stdout.print("Number of neighbors per vector: {any}\n", .{graph_degree});
 
-    const intermediate_graph_degree_str = args.next();
-    const intermediate_graph_degree = if (intermediate_graph_degree_str) |str| blk: {
-        break :blk std.fmt.parseInt(usize, str, 10) catch |e| {
+    var intermediate_graph_degree: usize = graph_degree * 2;
+    if (args.next()) |str| {
+        intermediate_graph_degree = std.fmt.parseInt(usize, str, 10) catch |e| {
             switch (e) {
                 error.Overflow => std.debug.print("Entered intermediate graph degree is too large for usize\n", .{}),
                 error.InvalidCharacter => std.debug.print("Entered intermediate graph degree is not a valid number\n", .{}),
             }
             return;
         };
-    } else graph_degree * 2;
-    try stdout.print("Graph degree of intermediate graphs during training: {any}\n", .{intermediate_graph_degree});
+    }
+
+    // Default values
+    var num_threads: ?usize = null;
+    var block_size: usize = 16384;
+
+    // Parse optional flags
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--threads")) {
+            const threads_str = args.next() orelse {
+                std.debug.print("--threads requires a value\n", .{});
+                return;
+            };
+            num_threads = std.fmt.parseInt(usize, threads_str, 10) catch |e| {
+                switch (e) {
+                    error.Overflow => std.debug.print("Entered thread count is too large for usize\n", .{}),
+                    error.InvalidCharacter => std.debug.print("Entered thread count is not a valid number\n", .{}),
+                }
+                return;
+            };
+        } else if (std.mem.eql(u8, arg, "--block-size")) {
+            const bs_str = args.next() orelse {
+                std.debug.print("--block-size requires a value\n", .{});
+                return;
+            };
+            block_size = std.fmt.parseInt(usize, bs_str, 10) catch |e| {
+                switch (e) {
+                    error.Overflow => std.debug.print("Entered block size is too large for usize\n", .{}),
+                    error.InvalidCharacter => std.debug.print("Entered block size is not a valid number\n", .{}),
+                }
+                return;
+            };
+        } else {
+            std.debug.print("Unknown argument: {s}\n{s}", .{ arg, HELP });
+            return;
+        }
+    }
+
+    try stdout.print("=== Zagra Index Build ===\n", .{});
+    try stdout.print("Number of vectors: {}\n", .{vector_count});
+    try stdout.print("Vector dimensions: 128\n", .{});
+    try stdout.print("Graph degree: {}\n", .{graph_degree});
+    try stdout.print("Intermediate graph degree: {}\n", .{intermediate_graph_degree});
+    if (num_threads) |t| {
+        try stdout.print("Number of threads: {}\n", .{t});
+    } else {
+        const cpu_count = std.Thread.getCpuCount() catch 1;
+        try stdout.print("Number of threads: {} (default)\n", .{cpu_count});
+    }
+    try stdout.print("Block size: {}\n", .{block_size});
+    try stdout.flush();
 
     // Dataset configuration constants
     const T = i32; // Element type
     const N: usize = 128; // Vector length
-
-    try stdout.print("Creating dataset with {} {}-D vectors\n", .{ vector_count, N });
-    try stdout.flush();
 
     // Allocate aligned buffer for vectors
     const vectors_buffer = allocator.alignedAlloc(
@@ -100,46 +146,48 @@ pub fn main() !void {
 
     std.debug.assert(dataset.len == vector_count);
 
-    // Do NN-Descent
-    const NNDescent = zagra.index.NNDescent(T, N);
-    const training_config = zagra.index.TrainingConfig.init(
+    // Build config
+    const build_config = zagra.index.BuildConfig.init(
         graph_degree,
+        intermediate_graph_degree,
         vector_count,
-        null,
+        num_threads,
         42,
+        block_size,
     );
 
-    var nn_descent = NNDescent.init(
-        dataset,
-        training_config,
-        allocator,
-    ) catch |e| {
-        std.debug.print("Error initializing NNDescent: {}", .{e});
-        return;
-    };
-    defer nn_descent.deinit(allocator);
+    // Build index
+    const Index = zagra.index.Index(T, N);
 
-    try stdout.print("Start timing NN-Descent training...\n", .{});
+    try stdout.print("\nBuilding index...\n", .{});
     try stdout.flush();
 
     var timer = try std.time.Timer.start();
-    nn_descent.train();
-    const elapsed_time_ns = timer.read();
-    const elapsed_time_s: f64 = @as(f64, @floatFromInt(elapsed_time_ns)) / 1_000_000_000.0;
+    var index = try Index.build(dataset, build_config, allocator);
+    const build_time_ns = timer.read();
+    const build_time_s: f64 = @as(f64, @floatFromInt(build_time_ns)) / 1_000_000_000.0;
 
-    try stdout.print("Training for {} vectors with graph degree of {} took: {}s\n", .{ dataset.len, graph_degree, elapsed_time_s });
+    try stdout.print("\n=== Build Complete ===\n", .{});
+    try stdout.print("Total build time: {:.3}s\n", .{build_time_s});
+    try stdout.print("\n=== Index Info ===\n", .{});
+    try stdout.print("Number of nodes: {}\n", .{index.num_nodes});
+    try stdout.print("Graph degree: {}\n", .{index.num_neighbors_per_node});
+    try stdout.print("Total edges: {}\n", .{index.num_nodes * index.num_neighbors_per_node});
     try stdout.flush();
 
-    // Print neighbors of the first few vector
-    for (0..5) |node_id| {
-        if (node_id >= dataset.len) break;
-        const neighbor_ids: []const usize = nn_descent.neighbors_list.getEntryFieldSlice(node_id, .neighbor_id);
-        const neighbor_distances: []const T = nn_descent.neighbors_list.getEntryFieldSlice(node_id, .distance);
-        try stdout.print("Neighbors of node {}:\n", .{node_id});
-        for (neighbor_ids, 0..) |neighbor_id, i| {
-            const distance = neighbor_distances[i];
-            try stdout.print("Neighbor {}: ID={}, Distance={}\n", .{ i, neighbor_id, distance });
+    // Print neighbors of the first few vectors
+    try stdout.print("\n=== Sample Neighbors ===\n", .{});
+    const sample_count: usize = 3;
+    for (0..sample_count) |node_id| {
+        if (node_id >= index.num_nodes) break;
+        const neighbor_slice = index.graph[node_id * index.num_neighbors_per_node ..][0..index.num_neighbors_per_node];
+        try stdout.print("Node {}: ", .{node_id});
+        for (neighbor_slice) |neighbor_id| {
+            try stdout.print("{} ", .{neighbor_id});
         }
+        try stdout.print("\n", .{});
     }
     try stdout.flush();
+
+    index.deinit(allocator);
 }
