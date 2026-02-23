@@ -1,4 +1,7 @@
 const std = @import("std");
+const builtin = @import("builtin");
+
+const znpy = @import("znpy");
 
 const mod_types = @import("types.zig");
 const mod_dataset = @import("dataset.zig");
@@ -43,9 +46,13 @@ pub const BuildConfig = struct {
 
 pub fn Index(comptime T: type, comptime N: usize) type {
     return struct {
+        /// The dataset of vectors. Owned by this struct.
         dataset: Dataset,
+        /// The k-NN graph. Owned by this struct.
         graph: []const usize,
+        /// Number of nodes (same as `dataset.len`).
         num_nodes: usize,
+        /// Number of neighbors per node (graph degree).
         num_neighbors_per_node: usize,
 
         const Dataset = mod_dataset.Dataset(T, N);
@@ -55,6 +62,89 @@ pub fn Index(comptime T: type, comptime N: usize) type {
 
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             allocator.free(self.graph);
+            self.dataset.deinit(allocator);
+        }
+
+        /// Saves the index to a directory.
+        ///
+        /// Creates two .npy files in the specified directory:
+        ///
+        /// 1. `dataset.npy` - The vector data
+        ///    - Shape: (num_vectors, N) where N is the vector dimensionality
+        ///    - Data type: Same as the original dataset (e.g., i32, f32, etc.)
+        ///    - Endianness: Native (little-endian on most modern systems)
+        ///
+        /// 2. `graph.npy` - The k-NN graph
+        ///    - Shape: (num_nodes, degree) where degree is the graph degree
+        ///    - Data type: u32 (if num_nodes < 2^32) or u64 (otherwise)
+        ///    - Endianness: Native (little-endian on most modern systems)
+        ///
+        /// The graph stores neighbor indices in row-major order:
+        ///   graph[i * degree + j] = j-th neighbor of node i
+        ///
+        /// If the directory doesn't exist, it will be created.
+        pub fn save(
+            self: *const Self,
+            dir_path: []const u8,
+            allocator: std.mem.Allocator,
+        ) !void {
+            // Make sure the directory exists before trying to create the file
+            std.fs.cwd().access(dir_path, .{}) catch |e| switch (e) {
+                error.FileNotFound => try std.fs.cwd().makeDir(dir_path),
+                else => return e,
+            };
+
+            var write_buffer: [4096]u8 = undefined;
+
+            // Create the dataset file and writer
+            const dataset_file_path = try std.fs.path.join(allocator, &[_][]const u8{ dir_path, "dataset.npy" });
+            defer allocator.free(dataset_file_path);
+            const dataset_file = try std.fs.cwd().createFile(dataset_file_path, .{});
+            defer dataset_file.close();
+            var dataset_file_writer = dataset_file.writer(&write_buffer);
+            // Write the dataset to the file
+            try self.dataset.toNpyFile(&dataset_file_writer.interface, allocator);
+            try dataset_file_writer.interface.flush();
+
+            // Create the graph file and writer
+            const graph_file_path = try std.fs.path.join(allocator, &[_][]const u8{ dir_path, "graph.npy" });
+            defer allocator.free(graph_file_path);
+            const graph_file = try std.fs.cwd().createFile(graph_file_path, .{});
+            defer graph_file.close();
+            var graph_file_writer = graph_file.writer(&write_buffer);
+            // Write the graph to the file
+            try self.writeGraph(&graph_file_writer.interface, allocator);
+            try graph_file_writer.interface.flush();
+        }
+
+        /// Writes the graph to a writer in .npy format.
+        ///
+        /// Data type:
+        ///   - If num_nodes <= 2^32-1: uses u32 (UInt32)
+        ///   - If num_nodes > 2^32-1: uses u64 (UInt64)
+        ///
+        /// Endianness: Native (little-endian on most modern systems)
+        ///
+        /// The graph is stored as a 2D array with shape (num_nodes, num_neighbors_per_node).
+        pub fn writeGraph(
+            self: *const Self,
+            writer: *std.io.Writer,
+            allocator: std.mem.Allocator,
+        ) !void {
+            // Determine the appropriate element type based on the number of nodes
+            const element_type = if (self.num_nodes <= std.math.maxInt(u32))
+                znpy.ElementType{ .UInt32 = null }
+            else
+                znpy.ElementType{ .UInt64 = null };
+
+            // Write the graph in .npy format
+            const header = znpy.header.Header{
+                .descr = element_type,
+                .order = znpy.Order.C,
+                .shape = &[_]usize{ self.num_nodes, self.num_neighbors_per_node },
+            };
+            try header.writeAll(writer, allocator);
+            try writer.writeAll(std.mem.sliceAsBytes(self.graph));
         }
 
         pub fn build(dataset: Dataset, config: BuildConfig, allocator: std.mem.Allocator) !Self {

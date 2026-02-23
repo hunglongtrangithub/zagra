@@ -27,6 +27,22 @@ pub fn Dataset(comptime T: type, comptime N: usize) type {
 
         const Self = @This();
 
+        /// Save the dataset to a .npy file writer.
+        /// Order is row-major (C order).
+        pub fn toNpyFile(
+            self: *const Self,
+            writer: *std.io.Writer,
+            allocator: std.mem.Allocator,
+        ) !void {
+            const header = znpy.header.Header{
+                .shape = &[_]usize{ self.len, N },
+                .descr = try znpy.ElementType.fromZigType(T),
+                .order = znpy.Order.C,
+            };
+            try header.writeAll(writer, allocator);
+            try writer.writeAll(std.mem.sliceAsBytes(self.data_buffer));
+        }
+
         /// Load a dataset of fixed-size vectors from a .npy file reader.
         /// The .npy file must contain a 2D array where one dimension is of size N.
         pub fn fromNpyFileReader(

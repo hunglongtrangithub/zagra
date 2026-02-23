@@ -4,7 +4,7 @@ const znpy = @import("znpy");
 const zagra = @import("zagra");
 
 pub const std_options: std.Options = .{
-    .log_level = .info,
+    .log_level = .err,
 };
 
 var stdout_buffer: [1024]u8 = undefined;
@@ -15,10 +15,10 @@ const HELP =
     \\zagra <vector_count> <graph_degree> [intermediate_graph_degree] [options]
     \\- vector_count (required): Number of vectors in the dataset
     \\- graph_degree (required): Graph degree of the final CAGRA graph
-    \\- intermediate_graph_degree (optional - default to 2 * graph_degree): Graph degree during NN-Descent training
     \\Options:
     \\- --threads <n>: Number of threads for NN-Descent and Optimizer (default: CPU core count)
     \\- --block-size <n>: Block size for processing (default: 16384)
+    \\- --save <path> or -o <path>: Save the built index to the specified directory (optional)
 ;
 
 pub fn main() !void {
@@ -55,20 +55,11 @@ pub fn main() !void {
         return;
     };
 
-    var intermediate_graph_degree: usize = graph_degree * 2;
-    if (args.next()) |str| {
-        intermediate_graph_degree = std.fmt.parseInt(usize, str, 10) catch |e| {
-            switch (e) {
-                error.Overflow => std.debug.print("Entered intermediate graph degree is too large for usize\n", .{}),
-                error.InvalidCharacter => std.debug.print("Entered intermediate graph degree is not a valid number\n", .{}),
-            }
-            return;
-        };
-    }
-
     // Default values
+    const intermediate_graph_degree: usize = graph_degree * 2;
     var num_threads: ?usize = null;
     var block_size: usize = 16384;
+    var save_path: ?[]const u8 = null;
 
     // Parse optional flags
     while (args.next()) |arg| {
@@ -94,6 +85,11 @@ pub fn main() !void {
                     error.Overflow => std.debug.print("Entered block size is too large for usize\n", .{}),
                     error.InvalidCharacter => std.debug.print("Entered block size is not a valid number\n", .{}),
                 }
+                return;
+            };
+        } else if (std.mem.eql(u8, arg, "--save") or std.mem.eql(u8, arg, "-o")) {
+            save_path = args.next() orelse {
+                std.debug.print("--save requires a path\n", .{});
                 return;
             };
         } else {
@@ -129,7 +125,6 @@ pub fn main() !void {
         std.debug.print("Dataset size too large. Please try smaller number of vectors.\n", .{});
         return;
     };
-    defer allocator.free(vectors_buffer);
 
     var prng = std.Random.DefaultPrng.init(42);
     const random = prng.random();
@@ -164,6 +159,7 @@ pub fn main() !void {
 
     var timer = try std.time.Timer.start();
     var index = try Index.build(dataset, build_config, allocator);
+    defer index.deinit(allocator);
     const build_time_ns = timer.read();
     const build_time_s: f64 = @as(f64, @floatFromInt(build_time_ns)) / 1_000_000_000.0;
 
@@ -186,8 +182,15 @@ pub fn main() !void {
             try stdout.print("{} ", .{neighbor_id});
         }
         try stdout.print("\n", .{});
+        try stdout.flush();
     }
-    try stdout.flush();
 
-    index.deinit(allocator);
+    // Save the index to disk if path is provided
+    if (save_path) |path| {
+        try stdout.print("Saving index to {s}...\n", .{path});
+        try stdout.flush();
+        try index.save(path, allocator);
+        try stdout.print("Index saved.\n", .{});
+        try stdout.flush();
+    }
 }
