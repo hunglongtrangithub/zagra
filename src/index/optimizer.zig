@@ -187,7 +187,7 @@ pub const Optimizer = struct {
             for (0..pool.threads.len) |thread_id| {
                 const node_id_start = @min(block_start + thread_id * num_block_nodes_per_thread, block_end);
                 const node_id_end = @min(node_id_start + num_block_nodes_per_thread, block_end);
-                // SAFETY: Each thread only touches neighbor data for nodes in the range [node_id_start, node_id_end), so no data races.
+                // SAFETY: Each thread only mutates detour count data for nodes in the range [node_id_start, node_id_end), so no data races.
                 pool.spawnWg(
                     &self.wait_group,
                     countDetoursThread,
@@ -223,15 +223,17 @@ pub const Optimizer = struct {
             for (neighbor_ids, 0..) |neighbor_id, idx| {
                 // We look at middle nodes whose ranks are less than the current neighbor_id's rank.
                 // These nodes are on the right of the current neighbor in the node_id's neighbors list.
-                for (neighbor_ids[idx + 1 ..]) |middle_node_id| {
-                    const middle_neighbor_ids = neighbors_list.getEntryFieldSlice(middle_node_id, .neighbor_id);
+                const hop1_node_ids = neighbor_ids[idx + 1 ..];
+                for (hop1_node_ids) |hop1_node_id| {
+                    const next_neighbor_ids: []const usize = neighbors_list.getEntryFieldSlice(hop1_node_id, .neighbor_id);
+                    // If neighbor_id exists in the hop1_node_id's neighbors list,
+                    // it must have a smaller rank than its rank in the node_id's neighbors list.
+                    // Thus we only look at the right side of the middle_node_id's neighbors list
+                    // right after the neighbor_id's rank in the node_id's neighbors list (idx).
+                    const hop2_node_ids = next_neighbor_ids[idx + 1 ..];
                     if (std.mem.indexOfScalar(
                         usize,
-                        // If neighbor_id exists in the middle_node_id's neighbors list,
-                        // it must have a smaller rank than its rank in the node_id's neighbors list.
-                        // Thus we only look at the right side of the middle_node_id's neighbors list
-                        // right after the neighbor_id's rank in the node_id's neighbors list (idx).
-                        middle_neighbor_ids[idx + 1 ..],
+                        hop2_node_ids,
                         neighbor_id,
                     ) != null) {
                         detour_counts[idx] += 1;
@@ -291,7 +293,8 @@ pub const Optimizer = struct {
     }
 
     /// Prunes neighbors for a range of nodes.
-    /// Output graph must have the same number of nodes as the input graph, but may have fewer neighbors per node.
+    /// Output graph must have the same number of nodes as the input graph,
+    /// but cannot have higher graph degree than the input graph.
     /// For each node in `[node_id_start, node_id_end)`:
     ///   1. Sorts neighbors by `detour_count` in ascending order (in-place)
     ///   2. Copies the first `output_graph.num_neighbors_per_node` neighbors to `output_graph`

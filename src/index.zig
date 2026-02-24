@@ -248,7 +248,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
         ///
         /// 2. `graph.npy` - The k-NN graph
         ///    - Shape: (num_nodes, degree) where degree is the graph degree
-        ///    - Data type: u32 (if num_nodes < 2^32) or u64 (otherwise)
+        ///    - Data type: UInt8 (if usize is 1 byte), UInt16 (2 bytes), UInt32 (4 bytes), or UInt64 (8 bytes)
         ///    - Endianness: Native (little-endian on most modern systems)
         ///
         /// The graph stores neighbor indices in row-major order:
@@ -291,9 +291,8 @@ pub fn Index(comptime T: type, comptime N: usize) type {
 
         /// Writes the graph to a writer in .npy format.
         ///
-        /// Data type:
-        ///   - If num_nodes <= 2^32-1: uses u32 (UInt32)
-        ///   - If num_nodes > 2^32-1: uses u64 (UInt64)
+        /// Data type: UInt8 (if usize is 1 byte), UInt16 (2 bytes), UInt32 (4 bytes), or UInt64 (8 bytes)
+        /// based on the size of usize on the target platform.
         ///
         /// Endianness: Native (little-endian on most modern systems)
         ///
