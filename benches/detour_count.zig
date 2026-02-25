@@ -33,9 +33,17 @@ fn fillRandomNeighbors(
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+
+    const result_name = "detour_count";
+
+    var args = try std.process.argsWithAllocator(allocator);
+    defer args.deinit();
+    _ = args.skip();
+
+    const result_prefix = args.next();
 
     const ns_values = [_]usize{ 1_000_000, 5_000_000, 10_000_000 };
     const ks_values = [_]usize{ 8, 16, 32, 64, 128 };
@@ -79,11 +87,12 @@ pub fn main() !void {
         else => return e,
     };
 
-    const file_name = results_dir ++ "/detour_count.csv";
+    const file_name = if (result_prefix) |prefix|
+        try std.fmt.allocPrint(allocator, "{s}/{s}_{s}.csv", .{ results_dir, prefix, result_name })
+    else
+        try std.fmt.allocPrint(allocator, "{s}/{s}.csv", .{ results_dir, result_name });
     const csv_file = try std.fs.cwd().createFile(file_name, .{});
     defer csv_file.close();
-
-    std.debug.print("Writing results to {s}...\n", .{file_name});
 
     var csv_buffer: [1024]u8 = undefined;
     var csv_writer = csv_file.writer(&csv_buffer);

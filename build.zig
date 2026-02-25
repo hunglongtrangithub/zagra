@@ -42,6 +42,10 @@ pub fn build(b: *std.Build) void {
         const run_cmd = b.addRunArtifact(bench_exe);
         const run_step = b.step("bench_" ++ bench_name, "Run the " ++ bench_name ++ " bench");
         run_step.dependOn(&run_cmd.step);
+
+        if (b.args) |args| {
+            run_cmd.addArgs(args);
+        }
     }
 
     const exe = b.addExecutable(.{

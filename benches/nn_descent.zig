@@ -62,6 +62,15 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    const result_name = "nn_descent_summary";
+    const iterations_name = "nn_descent_iterations";
+
+    var args = try std.process.argsWithAllocator(allocator);
+    defer args.deinit();
+    _ = args.skip();
+
+    const result_prefix = args.next();
+
     const T: type = f32; // Element type
     const N: usize = 128; // Vector length
 
@@ -127,16 +136,24 @@ pub fn main() !void {
         else => return e,
     };
 
-    const summary_file_name = results_dir ++ "/nn_descent_summary.csv";
+    const summary_file_name = if (result_prefix) |prefix|
+        try std.fmt.allocPrint(allocator, "{s}/{s}_{s}.csv", .{ results_dir, prefix, result_name })
+    else
+        try std.fmt.allocPrint(allocator, "{s}/{s}.csv", .{ results_dir, result_name });
     const summary_csv_file = try std.fs.cwd().createFile(summary_file_name, .{});
     defer summary_csv_file.close();
+
     var summary_csv_buffer: [1024]u8 = undefined;
     var summary_csv_writer = summary_csv_file.writer(&summary_csv_buffer);
     const summary_csv = &summary_csv_writer.interface;
 
-    const iterations_file_name = results_dir ++ "/nn_descent_iterations.csv";
+    const iterations_file_name = if (result_prefix) |prefix|
+        try std.fmt.allocPrint(allocator, "{s}/{s}_{s}.csv", .{ results_dir, prefix, iterations_name })
+    else
+        try std.fmt.allocPrint(allocator, "{s}/{s}.csv", .{ results_dir, iterations_name });
     const iterations_csv_file = try std.fs.cwd().createFile(iterations_file_name, .{});
     defer iterations_csv_file.close();
+
     var iterations_csv_buffer: [1024]u8 = undefined;
     var iterations_csv_writer = iterations_csv_file.writer(&iterations_csv_buffer);
     const iterations_csv = &iterations_csv_writer.interface;
@@ -172,5 +189,8 @@ pub fn main() !void {
     try summary_csv.flush();
     try iterations_csv.flush();
 
-    std.debug.print("Benchmarks completed.\nSummary written to {s}\nIteration details written to {s}\n", .{ summary_file_name, iterations_file_name });
+    std.debug.print(
+        "Benchmarks completed.\nSummary written to {s}\nIteration details written to {s}\n",
+        .{ summary_file_name, iterations_file_name },
+    );
 }

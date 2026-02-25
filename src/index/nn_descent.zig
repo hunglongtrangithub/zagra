@@ -315,7 +315,7 @@ pub fn NNDescent(
             ) catch 0;
         }
 
-        pub fn trainWithTiming(self: *Self, allocator: std.mem.Allocator) !TrainingTiming {
+        pub fn trainWithTiming(self: *Self, allocator: std.mem.Allocator) (std.time.Timer.Error || std.mem.Allocator.Error)!TrainingTiming {
             var timing = TrainingTiming{
                 .init_random_ns = 0,
                 .iterations = std.ArrayList(IterationTiming).empty,

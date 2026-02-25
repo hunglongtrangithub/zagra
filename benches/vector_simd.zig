@@ -196,7 +196,17 @@ fn benchmarkComparison(
 }
 
 pub fn main() !void {
-    const allocator = std.heap.page_allocator;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const result_name = "vector_simd";
+
+    var args = try std.process.argsWithAllocator(allocator);
+    defer args.deinit();
+    _ = args.skip();
+
+    const result_prefix = args.next();
 
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
@@ -223,7 +233,10 @@ pub fn main() !void {
         else => return e,
     };
 
-    const csv_file_name = results_dir ++ "/vector_simd.csv";
+    const csv_file_name = if (result_prefix) |prefix|
+        try std.fmt.allocPrint(allocator, "{s}/{s}_{s}.csv", .{ results_dir, prefix, result_name })
+    else
+        try std.fmt.allocPrint(allocator, "{s}/{s}.csv", .{ results_dir, result_name });
     const csv_file = try std.fs.cwd().createFile(csv_file_name, .{});
     defer csv_file.close();
 
