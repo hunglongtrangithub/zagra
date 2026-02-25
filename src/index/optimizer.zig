@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = std.log.scoped(.optimizer);
 
 const mod_types = @import("../types.zig");
 const mod_soa_slice = @import("soa_slice.zig");
@@ -97,42 +98,46 @@ pub const Optimizer = struct {
         graph_degree: usize,
         allocator: std.mem.Allocator,
     ) (Error || std.mem.Allocator.Error)!NeighborsList(false) {
+        const num_nodes = self.neighbors_list.num_nodes;
         const output_degree = @min(graph_degree, self.neighbors_list.num_neighbors_per_node);
 
-        self.countDetours();
+        // Buffer for storing reverse neighbor counts per node. The value of ech element
+        // in this buffer may be larger than the output_degree (which is invalid),
+        // but we will cap the number of reverse neighbors to output_degree in the combine step.
+        const reverse_neighbor_counts = try allocator.alloc(usize, num_nodes);
+        defer allocator.free(reverse_neighbor_counts);
+
+        // Buffer for storing reverse neighbors.
+        // Each node can have at most `output_degree` reverse neighbors.
+        const reverse_neighbor_ids = try allocator.alloc(usize, num_nodes * output_degree);
+        defer allocator.free(reverse_neighbor_ids);
 
         // Output graph that will store the optimized neighbors.
         // Does not store detour counts, only neighbor IDs.
         var output_graph = try NeighborsList(false).init(
-            self.neighbors_list.num_nodes,
+            num_nodes,
             output_degree,
             allocator,
         );
-        errdefer output_graph.deinit(allocator);
 
-        // Each node has an ArrayList since the number of reverse neighbors is not fixed and can be less than output_degree.
-        const reverse_graph = try allocator.alloc(std.ArrayList(usize), self.neighbors_list.num_nodes);
-        defer allocator.free(reverse_graph);
-
-        // Buffer for storing reverse neighbors for all nodes.
-        // Each node can only have at most `output_degree` reverse neighbors.
-        const reverse_neighbors_buffer = try allocator.alloc(usize, self.neighbors_list.num_nodes * output_degree);
-        defer allocator.free(reverse_neighbors_buffer);
-
-        // Assign each node's reverse neighbor list to a portion of the reverse neighbors buffer.
-        for (reverse_graph, 0..) |*list, node_id| {
-            const buffer_start = node_id * output_degree;
-            list.* = std.ArrayList(usize).initBuffer(reverse_neighbors_buffer[buffer_start .. buffer_start + output_degree]);
-        }
-
+        self.countDetours();
         self.prune(&output_graph);
-        self.buildReverseGraph(&output_graph, reverse_graph);
-        self.combine(&output_graph, reverse_graph, &output_graph);
+        self.buildReverseGraph(
+            &output_graph,
+            reverse_neighbor_counts,
+            reverse_neighbor_ids,
+        );
+        self.combine(
+            &output_graph,
+            reverse_neighbor_counts,
+            reverse_neighbor_ids,
+        );
 
         return output_graph;
     }
 
-    /// Number of threads to use for optimization. Returns 1 if thread_pool is null, otherwise returns the number of threads in the pool.
+    /// Number of threads to use for optimization.
+    /// Returns 1 if thread_pool is null, otherwise returns the number of threads in the pool.
     inline fn numThreads(self: *const Self) usize {
         return if (self.thread_pool) |pool| pool.threads.len else 1;
     }
@@ -208,8 +213,7 @@ pub const Optimizer = struct {
         }
     }
 
-    /// Counts detourable routes for a range of nodes.
-    /// For each node, examines each neighbor and counts how many middle nodes create a detour for that node-neighbor pair.
+    /// Counts detours for a range of nodes in the range [node_id_start, node_id_end).
     fn countDetoursThread(
         neighbors_list: *NeighborsList(true),
         node_id_start: usize,
@@ -243,13 +247,14 @@ pub const Optimizer = struct {
         }
     }
 
-    /// Prunes the graph by selecting neighbors with the smallest detour counts.
-    /// For each node, sorts neighbors by `detour_count` (ascending) and copies the first
-    /// `output_graph.num_neighbors_per_node` neighbors to the output graph.
-    fn prune(self: *Self, output_graph: *NeighborsList(false)) void {
+    /// Select neighbors with the smallest detour counts from the struct's neighbors list (input graph)
+    /// and fill the pruned graph with the selected neighbors. The pruned graph
+    /// must have the same number of nodes as the input graph,
+    /// and cannot have higher graph degree than the input graph.
+    fn prune(self: *Self, pruned_graph: *NeighborsList(false)) void {
         const num_blocks = self.numBlocks();
         for (0..num_blocks) |block_id| {
-            self.pruneBlock(block_id, output_graph);
+            self.pruneBlock(block_id, pruned_graph);
         }
     }
 
@@ -258,7 +263,7 @@ pub const Optimizer = struct {
     fn pruneBlock(
         self: *Self,
         block_id: usize,
-        output_graph: *NeighborsList(false),
+        pruned_graph: *NeighborsList(false),
     ) void {
         const block_start = @min(block_id * self.num_nodes_per_block, self.neighbors_list.num_nodes);
         const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
@@ -275,7 +280,7 @@ pub const Optimizer = struct {
                     pruneThread,
                     .{
                         &self.neighbors_list,
-                        output_graph,
+                        pruned_graph,
                         node_id_start,
                         node_id_end,
                     },
@@ -285,7 +290,7 @@ pub const Optimizer = struct {
         } else {
             pruneThread(
                 &self.neighbors_list,
-                output_graph,
+                pruned_graph,
                 block_start,
                 block_end,
             );
@@ -342,15 +347,27 @@ pub const Optimizer = struct {
     }
 
     /// Builds a reverse graph where each node stores which nodes have it as a neighbor.
-    /// For each edge `(u, v)` in `pruned_graph`, adds `u` to `reverse_graph[v]`'s neighbor list.
+    /// Reverse neighbor IDs are stored in row-major order, with dimensions `[num_nodes][degree]`.
+    /// Since some nodes have less than `degree` reverse neighbors, the reverse neighbor counts buffer
+    /// is used to keep track of how many valid reverse neighbors each node has, capped at `degree`.
+    /// For each edge `(u, v)` in `pruned_graph`, adds `u` to `reverse_neighbors[v]`'s list.
     fn buildReverseGraph(
         self: *Self,
         pruned_graph: *NeighborsList(false),
-        reverse_graph: []std.ArrayList(usize),
+        reverse_neighbor_counts: []usize,
+        reverse_neighbor_ids: []usize,
     ) void {
         const num_blocks = self.numBlocks();
+
+        // Reset reverse neighbor counts to 0 before building the reverse graph.
+        @memset(reverse_neighbor_counts, 0);
         for (0..num_blocks) |block_id| {
-            self.buildReverseGraphBlock(block_id, pruned_graph, reverse_graph);
+            self.buildReverseGraphBlock(
+                block_id,
+                pruned_graph,
+                reverse_neighbor_counts,
+                reverse_neighbor_ids,
+            );
         }
     }
 
@@ -360,7 +377,8 @@ pub const Optimizer = struct {
         self: *Self,
         block_id: usize,
         pruned_graph: *NeighborsList(false),
-        reverse_graph: []std.ArrayList(usize),
+        reverse_neighbor_counts: []usize,
+        reverse_neighbor_ids: []usize,
     ) void {
         const block_start = @min(block_id * self.num_nodes_per_block, self.neighbors_list.num_nodes);
         const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
@@ -371,14 +389,15 @@ pub const Optimizer = struct {
             for (0..pool.threads.len) |thread_id| {
                 const node_id_start = @min(block_start + thread_id * num_nodes_per_thread, block_end);
                 const node_id_end = @min(node_id_start + num_nodes_per_thread, block_end);
-                // SAFETY: Multiple threads can write to the same reverse list concurrently, but each uses
-                // an atomic compare-and-swap to claim a slot, so there are no data races
+                // SAFETY: Multiple threads can write to the same reverse count/buffer concurrently,
+                // but atomicRmw ensures no data races
                 pool.spawnWg(
                     &self.wait_group,
                     buildReverseGraphThread,
                     .{
                         pruned_graph,
-                        reverse_graph,
+                        reverse_neighbor_counts,
+                        reverse_neighbor_ids,
                         node_id_start,
                         node_id_end,
                     },
@@ -388,7 +407,8 @@ pub const Optimizer = struct {
         } else {
             buildReverseGraphThread(
                 pruned_graph,
-                reverse_graph,
+                reverse_neighbor_counts,
+                reverse_neighbor_ids,
                 block_start,
                 block_end,
             );
@@ -397,68 +417,56 @@ pub const Optimizer = struct {
 
     /// Builds reverse graph for a range of source nodes.
     /// For each edge `(src_node, dst_node)` in `pruned_graph` where `src_node` is in the range
-    /// `[node_id_start, node_id_end)`, adds `src_node` to `reverse_graph[dst_node]`'s list.
-    /// All lists in `reverse_graph` must have a capacity of at least `pruned_graph.num_neighbors_per_node`.
-    /// All node IDs in `pruned_graph` must be valid.
+    /// `[node_id_start, node_id_end)`, adds `src_node` to `reverse_neighbors[dst_node]`'s list.
+    /// Reverse neighbor IDs are stored in row-major order, with dimensions `[num_nodes][degree]`.
+    /// Reverse neighbor counts buffer should be initialized to 0 before calling this function.
     fn buildReverseGraphThread(
         pruned_graph: *NeighborsList(false),
-        reverse_graph: []std.ArrayList(usize),
+        reverse_neighbor_counts: []usize,
+        reverse_neighbor_ids: []usize,
         node_id_start: usize,
         node_id_end: usize,
     ) void {
-        std.debug.assert(pruned_graph.num_nodes == reverse_graph.len);
-        std.debug.assert(node_id_start <= node_id_end and node_id_end <= pruned_graph.num_nodes);
-
-        const capacity = pruned_graph.num_neighbors_per_node;
+        const num_nodes = pruned_graph.num_nodes;
+        const degree = pruned_graph.num_neighbors_per_node;
+        std.debug.assert(reverse_neighbor_counts.len == num_nodes);
+        std.debug.assert(reverse_neighbor_ids.len == num_nodes * degree);
+        std.debug.assert(node_id_start <= node_id_end and node_id_end <= num_nodes);
 
         // Iterate over source nodes in this thread's range
-        for (node_id_start..node_id_end) |src_node| {
-            const neighbor_ids: []const usize = pruned_graph.getEntryFieldSlice(src_node, .neighbor_id);
-            for (neighbor_ids) |dst_node| {
-                std.debug.assert(dst_node < pruned_graph.num_nodes);
-
-                const list = &reverse_graph[dst_node];
-                std.debug.assert(list.capacity >= capacity);
-
-                // Use CAS (compare-and-swap) loop to atomically claim a slot in the reverse list
-                const list_len_ptr = &list.items.len;
-                while (true) {
-                    const current_len = @atomicLoad(usize, list_len_ptr, .monotonic);
-                    if (current_len >= capacity) break; // List is full, don't add
-
-                    // Try to atomically increment from current_len to current_len + 1
-                    // Returns null on success, old value on failure
-                    const old: ?usize = @cmpxchgWeak(
-                        usize,
-                        list_len_ptr,
-                        current_len,
-                        current_len + 1,
-                        .monotonic,
-                        .monotonic,
-                    );
-
-                    if (old == null) {
-                        // CAS succeeded - we claimed the slot at current_len
-                        list.items.ptr[current_len] = src_node;
-                        break;
-                    }
-                    // CAS failed (value changed), retry
+        for (node_id_start..node_id_end) |node_id_src| {
+            const neighbor_ids: []const usize = pruned_graph.getEntryFieldSlice(node_id_src, .neighbor_id);
+            for (neighbor_ids) |node_id_dst| {
+                std.debug.assert(node_id_dst < num_nodes);
+                // Atomically increment the counter and get the previous value (position to write)
+                const slot = @atomicRmw(usize, &reverse_neighbor_counts[node_id_dst], .Add, 1, .monotonic);
+                // Only write if there's room; silently drop if buffer is full
+                if (slot < degree) {
+                    log.debug("Adding reverse neighbor {d} for node {d} in slot {d}", .{ node_id_src, node_id_dst, slot });
+                    reverse_neighbor_ids[node_id_dst * degree + slot] = node_id_src;
+                } else {
+                    log.debug("Reverse neighbor buffer full for node {d}, cannot add neighbor {d}", .{ node_id_dst, node_id_src });
                 }
             }
         }
     }
 
-    /// Combines the pruned graph and reverse graph into the final output graph.
-    /// Copies pruned neighbors first, then adds reverse neighbors (avoiding duplicates).
+    /// Combines the edges from pruned graph and reverse graph by mutating pruned graph in-place.
+    /// Keep pruned neighbors first, then adds reverse neighbors (avoiding duplicates).
     fn combine(
         self: *Self,
         pruned_graph: *NeighborsList(false),
-        reverse_graph: []std.ArrayList(usize),
-        output_graph: *NeighborsList(false),
+        reverse_neighbor_counts: []const usize,
+        reverse_neighbor_ids: []const usize,
     ) void {
         const num_blocks = self.numBlocks();
         for (0..num_blocks) |block_id| {
-            self.combineBlock(block_id, pruned_graph, reverse_graph, output_graph);
+            self.combineBlock(
+                block_id,
+                pruned_graph,
+                reverse_neighbor_counts,
+                reverse_neighbor_ids,
+            );
         }
     }
 
@@ -468,8 +476,8 @@ pub const Optimizer = struct {
         self: *Self,
         block_id: usize,
         pruned_graph: *NeighborsList(false),
-        reverse_graph: []std.ArrayList(usize),
-        output_graph: *NeighborsList(false),
+        reverse_neighbor_counts: []const usize,
+        reverse_neighbor_ids: []const usize,
     ) void {
         const block_start = @min(block_id * self.num_nodes_per_block, self.neighbors_list.num_nodes);
         const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
@@ -486,8 +494,8 @@ pub const Optimizer = struct {
                     combineThread,
                     .{
                         pruned_graph,
-                        reverse_graph,
-                        output_graph,
+                        reverse_neighbor_counts,
+                        reverse_neighbor_ids,
                         node_id_start,
                         node_id_end,
                     },
@@ -497,79 +505,69 @@ pub const Optimizer = struct {
         } else {
             combineThread(
                 pruned_graph,
-                reverse_graph,
-                output_graph,
+                reverse_neighbor_counts,
+                reverse_neighbor_ids,
                 block_start,
                 block_end,
             );
         }
     }
 
-    /// Combines pruned and reverse graphs for a range of nodes.
+    /// Combines the edges from pruned and reverse graphs for a range of nodes, and store them on the pruned graph.
+    /// Reverse neighbor IDs are stored in row-major order, with dimensions `[num_nodes][degree]`.
+    /// Reverse neighbor counts store the number of reverse neighbors for each node, capped at pruned graph's degree.
     /// For each node:
     ///   1. Protect first half of pruned neighbors (lowest detour counts)
     ///   2. Fill remaining slots with reverse edges, avoiding duplicates
-    ///   3. If there are still empty slots, fill with remaining pruned neighbors (higher detour counts), avoiding duplicates
+    ///   3. If there are still empty slots, the remaining pruned neighbors (higher detour counts) are kept.
     fn combineThread(
         pruned_graph: *NeighborsList(false),
-        reverse_graph: []std.ArrayList(usize),
-        output_graph: *NeighborsList(false),
+        reverse_neighbor_counts: []const usize,
+        reverse_neighbor_ids: []const usize,
         node_id_start: usize,
         node_id_end: usize,
     ) void {
-        std.debug.assert(pruned_graph.num_nodes == reverse_graph.len and reverse_graph.len == output_graph.num_nodes);
-        std.debug.assert(node_id_start <= node_id_end and node_id_end <= pruned_graph.num_nodes);
-
         const num_nodes = pruned_graph.num_nodes;
-        const output_degree = pruned_graph.num_neighbors_per_node;
-        const num_protected_edges = output_degree / 2; // Protect first half
+        const degree = pruned_graph.num_neighbors_per_node;
+        std.debug.assert(reverse_neighbor_counts.len == num_nodes);
+        std.debug.assert(reverse_neighbor_ids.len == num_nodes * degree);
+        std.debug.assert(node_id_start <= node_id_end and node_id_end <= num_nodes);
 
         for (node_id_start..node_id_end) |node_id| {
-            const pruned_neighbor_ids: []const usize = pruned_graph.getEntryFieldSlice(node_id, .neighbor_id);
-            const output_neighbor_ids: []usize = output_graph.getEntryFieldSlice(node_id, .neighbor_id);
+            const pruned_neighbor_ids: []usize = pruned_graph.getEntryFieldSlice(node_id, .neighbor_id);
 
-            // The current index in the output neighbor list where we will write the next neighbor ID.
-            var current_neighbor_idx: usize = 0;
+            // The current index in the pruned graph's neighbor list where we will write the next neighbor ID.
+            // No duplicate check needed: the pruned graph should not have duplicate edges as it's pruned from the neighbors list.
+            var current_neighbor_idx: usize = degree / 2; // Protect first half
+            log.debug(
+                "[Node {}] {} protected neighbors before combine: {any}",
+                .{ node_id, current_neighbor_idx, pruned_neighbor_ids[0..current_neighbor_idx] },
+            );
 
-            // Step 1: Copy protected neighbors from pruned graph (first half)
-            for (pruned_neighbor_ids, 0..) |neighbor_id, neighbor_idx| {
-                if (neighbor_idx >= num_protected_edges) break; // Only first half is protected
-                if (neighbor_id >= num_nodes) continue; // Skip invalid neighbor ID
-                output_neighbor_ids[current_neighbor_idx] = neighbor_id;
-                current_neighbor_idx += 1;
-            }
+            // Fill non-protected region with reverse edges.
+            // Duplicate check needed: reverse edges can duplicate protected edges
+            // when there are bidirectional connections.
+            const num_reverse_neighbors = @min(reverse_neighbor_counts[node_id], degree);
+            for (0..num_reverse_neighbors) |neighbor_idx| {
+                if (current_neighbor_idx >= degree) break;
+                const neighbor_id = reverse_neighbor_ids[node_id * degree + neighbor_idx];
+                std.debug.assert(neighbor_id < num_nodes);
 
-            // Step 2: Fill non-protected region with reverse edges
-            for (reverse_graph[node_id].items) |neighbor_id| {
-                if (current_neighbor_idx < output_degree) break;
-                if (neighbor_id >= num_nodes) continue;
-
-                // Check if already in output (including protected region)
                 // Only add if it's not a duplicate
                 if (std.mem.indexOfScalar(
                     usize,
-                    output_neighbor_ids[0..current_neighbor_idx],
+                    pruned_neighbor_ids,
                     neighbor_id,
                 ) == null) {
-                    output_neighbor_ids[current_neighbor_idx] = neighbor_id;
+                    pruned_neighbor_ids[current_neighbor_idx] = neighbor_id;
                     current_neighbor_idx += 1;
+                    log.debug("Added reverse neighbor {d} for node {d}", .{ neighbor_id, node_id });
+                } else {
+                    log.debug("Skipping duplicate neighbor {d} for node {d}", .{ neighbor_id, node_id });
                 }
             }
 
-            // Step 3: If we still have space, fill with remaining pruned neighbors
-            for (pruned_neighbor_ids[num_protected_edges..]) |neighbor_id| {
-                if (current_neighbor_idx >= output_degree) break;
-                if (neighbor_id >= num_nodes) continue;
-
-                if (std.mem.indexOfScalar(
-                    usize,
-                    output_neighbor_ids[0..current_neighbor_idx],
-                    neighbor_id,
-                ) == null) {
-                    output_neighbor_ids[current_neighbor_idx] = neighbor_id;
-                    current_neighbor_idx += 1;
-                }
-            }
+            log.debug("[Node {}] {} reverse neighbors added: {any}", .{ node_id, current_neighbor_idx - degree / 2, pruned_neighbor_ids[degree / 2 .. current_neighbor_idx] });
         }
     }
 };

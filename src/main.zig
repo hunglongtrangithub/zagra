@@ -4,7 +4,7 @@ const znpy = @import("znpy");
 const zagra = @import("zagra");
 
 pub const std_options: std.Options = .{
-    .log_level = .err,
+    .log_level = .warn,
 };
 
 var stdout_buffer: [1024]u8 = undefined;
@@ -125,6 +125,7 @@ pub fn main() !void {
         std.debug.print("Dataset size too large. Please try smaller number of vectors.\n", .{});
         return;
     };
+    errdefer allocator.free(vectors_buffer);
 
     var prng = std.Random.DefaultPrng.init(42);
     const random = prng.random();

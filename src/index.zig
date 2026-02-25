@@ -16,6 +16,61 @@ pub const TrainingTiming = mod_nn_descent.TrainingTiming;
 pub const SoaSlice = mod_soa_slice.SoaSlice;
 pub const Optimizer = mod_optimizer.Optimizer;
 
+/// Check that the graph is valid:
+/// - The length of neighbor_ids must equal number of nodes * number of neighbors per node
+/// - All neighbor IDs must be in the range [0, num_nodes)
+/// - No node can have itself as a neighbor
+/// - No duplicate neighbor IDs for the same node
+pub fn isValidGraph(
+    neighbor_ids: []const usize,
+    num_nodes: usize,
+    num_neighbors_per_node: usize,
+) bool {
+    if (neighbor_ids.len != num_nodes * num_neighbors_per_node) {
+        log.err(
+            "Graph length {} does not match expected size {}",
+            .{ neighbor_ids.len, num_nodes * num_neighbors_per_node },
+        );
+        return false;
+    }
+
+    for (0..num_nodes) |node_id| {
+        const start = node_id * num_neighbors_per_node;
+        const end = start + num_neighbors_per_node;
+        const slice = neighbor_ids[start..end];
+
+        for (slice, 0..) |neighbor_id, neighbor_idx| {
+            if (neighbor_id >= num_nodes) {
+                log.err(
+                    "Invalid neighbor ID {} found for node {} in neighbor IDs {any}",
+                    .{ neighbor_id, node_id, slice },
+                );
+                return false;
+            }
+
+            if (neighbor_id == node_id) {
+                log.err(
+                    "Node {} has itself as a neighbor in neighbor IDs {any}",
+                    .{ node_id, slice },
+                );
+                return false;
+            }
+
+            for (slice[0..neighbor_idx]) |prev_neighbor_id| {
+                if (neighbor_id == prev_neighbor_id) {
+                    log.err(
+                        "Duplicate neighbor ID {} found for node {} in neighbor IDs {any}",
+                        .{ neighbor_id, node_id, slice },
+                    );
+                    return false;
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
 pub const BuildConfig = struct {
     graph_degree: usize,
     nn_descent_config: mod_nn_descent.TrainingConfig,
@@ -396,28 +451,6 @@ pub fn Index(comptime T: type, comptime N: usize) type {
                 .num_nodes = num_nodes,
                 .num_neighbors_per_node = config.graph_degree,
             };
-        }
-
-        fn isValidGraph(neighbor_ids: []const usize, num_nodes: usize, num_neighbors_per_node: usize) bool {
-            if (neighbor_ids.len != num_nodes * num_neighbors_per_node) {
-                log.err("Graph length {} does not match expected size {}", .{ neighbor_ids.len, num_nodes * num_neighbors_per_node });
-                return false;
-            }
-            for (0..num_nodes) |node_id| {
-                const start = node_id * num_neighbors_per_node;
-                const end = start + num_neighbors_per_node;
-                for (neighbor_ids[start..end]) |neighbor_id| {
-                    if (neighbor_id >= num_nodes) {
-                        log.err("Invalid neighbor ID {} found for node {} in neighbor IDs {any}", .{ neighbor_id, node_id, neighbor_ids[start..end] });
-                        return false;
-                    }
-                    if (neighbor_id == node_id) {
-                        log.err("Node {} has itself as a neighbor in neighbor IDs {any}", .{ node_id, neighbor_ids[start..end] });
-                        return false;
-                    }
-                }
-            }
-            return true;
         }
     };
 }
