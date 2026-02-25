@@ -10,6 +10,15 @@ pub const Optimizer = struct {
         /// The number of edges (num_nodes * num_neighbors_per_node) is too large to fit in memory.
         NumberOfEdgesTooLarge,
     };
+
+    pub const OptimizationTiming = struct {
+        count_detours_ns: u64,
+        prune_ns: u64,
+        build_reverse_graph_ns: u64,
+        combine_ns: u64,
+        total_optimization_ns: u64,
+    };
+
     /// Generic neighbors list container.
     /// - `store_detour_count`:
     ///   if `true`, detour_count field is a `usize` (for input graph)
@@ -134,6 +143,69 @@ pub const Optimizer = struct {
         );
 
         return output_graph;
+    }
+
+    /// Optimizes the graph with timing information for each phase.
+    /// Returns both the optimized graph and timing information.
+    pub fn optimizeWithTiming(
+        self: *Self,
+        graph_degree: usize,
+        allocator: std.mem.Allocator,
+    ) (Error || std.mem.Allocator.Error || std.time.Timer.Error)!struct { graph: NeighborsList(false), timing: OptimizationTiming } {
+        var total_timer = try std.time.Timer.start();
+        var timer = try std.time.Timer.start();
+
+        const num_nodes = self.neighbors_list.num_nodes;
+        const output_degree = @min(graph_degree, self.neighbors_list.num_neighbors_per_node);
+
+        const reverse_neighbor_counts = try allocator.alloc(usize, num_nodes);
+        defer allocator.free(reverse_neighbor_counts);
+
+        const reverse_neighbor_ids = try allocator.alloc(usize, num_nodes * output_degree);
+        defer allocator.free(reverse_neighbor_ids);
+
+        var output_graph = try NeighborsList(false).init(
+            num_nodes,
+            output_degree,
+            allocator,
+        );
+
+        timer.reset();
+        self.countDetours();
+        const count_detours_ns = timer.read();
+
+        timer.reset();
+        self.prune(&output_graph);
+        const prune_ns = timer.read();
+
+        timer.reset();
+        self.buildReverseGraph(
+            &output_graph,
+            reverse_neighbor_counts,
+            reverse_neighbor_ids,
+        );
+        const build_reverse_graph_ns = timer.read();
+
+        timer.reset();
+        self.combine(
+            &output_graph,
+            reverse_neighbor_counts,
+            reverse_neighbor_ids,
+        );
+        const combine_ns = timer.read();
+
+        const total_optimization_ns = total_timer.read();
+
+        return .{
+            .graph = output_graph,
+            .timing = .{
+                .count_detours_ns = count_detours_ns,
+                .prune_ns = prune_ns,
+                .build_reverse_graph_ns = build_reverse_graph_ns,
+                .combine_ns = combine_ns,
+                .total_optimization_ns = total_optimization_ns,
+            },
+        };
     }
 
     /// Number of threads to use for optimization.

@@ -4,6 +4,7 @@ const benches = [_][]const u8{
     "vector_simd",
     "nn_descent",
     "detour_count",
+    "optimizer",
 };
 
 pub fn build(b: *std.Build) void {
