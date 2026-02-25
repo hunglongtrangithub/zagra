@@ -7,6 +7,8 @@ pub const types = @import("types.zig");
 pub const index = @import("index.zig");
 
 pub const Vector = vector.Vector;
+pub const Dataset = dataset.Dataset;
+pub const Index = index.Index;
 
 test {
     _ = vector;

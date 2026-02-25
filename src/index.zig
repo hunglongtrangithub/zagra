@@ -348,14 +348,20 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             allocator.free(nn_descent.graph_update_counts_buffer);
             allocator.free(nn_descent.node_ids_random);
 
+            const num_nodes = nn_descent.neighbors_list.num_nodes;
+            const num_neighbors_per_node = nn_descent.neighbors_list.num_neighbors_per_node;
+
             // We need to keep the neighbor IDs and the thread pool alive for the optimizer, so defer their cleanup
             const neighbor_ids: []usize = neighbor_entries.items(.neighbor_id);
+            std.debug.assert(isValidGraph(neighbor_ids, num_nodes, num_neighbors_per_node));
             defer allocator.free(neighbor_ids);
+
             const thread_pool = nn_descent.thread_pool;
             defer if (thread_pool) |pool| {
                 pool.deinit();
                 allocator.destroy(pool);
             };
+
             const detour_counts: []usize = try allocator.alloc(usize, neighbor_entries.len);
             defer allocator.free(detour_counts);
 
@@ -372,8 +378,8 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             var optimizer = mod_optimizer.Optimizer.init(
                 NeighborsList(true){
                     .entries = optimizer_entries,
-                    .num_neighbors_per_node = nn_descent.neighbors_list.num_neighbors_per_node,
-                    .num_nodes = nn_descent.neighbors_list.num_nodes,
+                    .num_neighbors_per_node = num_neighbors_per_node,
+                    .num_nodes = num_nodes,
                 },
                 thread_pool,
                 nn_descent.num_nodes_per_block,
@@ -381,13 +387,37 @@ pub fn Index(comptime T: type, comptime N: usize) type {
 
             log.info("Optimizing graph with degree {d}...", .{config.graph_degree});
             const optimized_graph = try optimizer.optimize(config.graph_degree, allocator);
+            const graph_data: []const usize = optimized_graph.entries.items(.neighbor_id);
+            std.debug.assert(isValidGraph(graph_data, num_nodes, config.graph_degree));
 
             return Self{
                 .dataset = dataset,
-                .graph = optimized_graph.entries.items(.neighbor_id),
-                .num_nodes = nn_descent.neighbors_list.num_nodes,
+                .graph = graph_data,
+                .num_nodes = num_nodes,
                 .num_neighbors_per_node = config.graph_degree,
             };
+        }
+
+        fn isValidGraph(neighbor_ids: []const usize, num_nodes: usize, num_neighbors_per_node: usize) bool {
+            if (neighbor_ids.len != num_nodes * num_neighbors_per_node) {
+                log.err("Graph length {} does not match expected size {}", .{ neighbor_ids.len, num_nodes * num_neighbors_per_node });
+                return false;
+            }
+            for (0..num_nodes) |node_id| {
+                const start = node_id * num_neighbors_per_node;
+                const end = start + num_neighbors_per_node;
+                for (neighbor_ids[start..end]) |neighbor_id| {
+                    if (neighbor_id >= num_nodes) {
+                        log.err("Invalid neighbor ID {} found for node {} in neighbor IDs {any}", .{ neighbor_id, node_id, neighbor_ids[start..end] });
+                        return false;
+                    }
+                    if (neighbor_id == node_id) {
+                        log.err("Node {} has itself as a neighbor in neighbor IDs {any}", .{ node_id, neighbor_ids[start..end] });
+                        return false;
+                    }
+                }
+            }
+            return true;
         }
     };
 }

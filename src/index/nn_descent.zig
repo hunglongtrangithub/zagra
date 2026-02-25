@@ -421,10 +421,10 @@ pub fn NNDescent(
             // Step 1: Populate initial random neighbors
             self.populateRandomNeighbors();
 
-            const convergence_threshold = @as(usize, @intFromFloat(self.training_config.delta * @as(f32, @floatFromInt(self.neighbors_list.entries.len))));
+            const convergence_threshold = @as(usize, @intFromFloat(
+                self.training_config.delta * @as(f32, @floatFromInt(self.neighbors_list.entries.len)),
+            ));
             log.info("Convergence threshold: {}", .{convergence_threshold});
-
-            const num_blocks = self.numBlocks();
 
             // Step 2: Iteratively refine the neighbor lists
             for (0..self.training_config.max_iterations) |iteration| {
@@ -443,6 +443,7 @@ pub fn NNDescent(
                 // 3. check for convergence based on delta
 
                 var updates_count: usize = 0;
+                const num_blocks = self.numBlocks();
                 for (0..num_blocks) |block_id| {
                     defer {
                         for (self.block_graph_updates_lists) |*list| {
@@ -541,6 +542,7 @@ pub fn NNDescent(
                     const neighbor = dataset.getUnchecked(neighbor_id);
                     const distance = node.sqdist(neighbor);
 
+                    log.debug("Populating random neighbor for node_id: {} - neighbor_id: {} - distance: {}", .{ node_id, neighbor_id, distance });
                     const added = neighbors_list.tryAddNeighbor(
                         node_id,
                         NeighborsList.Entry{
@@ -711,9 +713,7 @@ pub fn NNDescent(
 
                 for (0..neighbors_list.num_neighbors_per_node) |neighbor_idx| {
                     const neighbor_id = neighbor_id_slice[neighbor_idx];
-
-                    // Check if the neighbor ID is valid
-                    if (neighbor_id >= neighbors_list.num_nodes) continue;
+                    std.debug.assert(neighbor_id < neighbors_list.num_nodes);
 
                     if (std.mem.indexOfScalar(
                         usize,
@@ -785,9 +785,10 @@ pub fn NNDescent(
             local_join_id_start: usize,
             local_join_id_end: usize,
         ) void {
+            const num_nodes = neighbors_list.num_nodes;
+            std.debug.assert(dataset.len == num_nodes);
             // NOTE: When local_join_id_start == local_join_id_end, the loop below never executes
-            std.debug.assert(local_join_id_start <= local_join_id_end and local_join_id_end <= neighbors_list.num_nodes);
-            std.debug.assert(neighbors_list.num_nodes == dataset.len);
+            std.debug.assert(local_join_id_start <= local_join_id_end and local_join_id_end <= num_nodes);
 
             // Go through all local joins in the given range
             for (local_join_id_start..local_join_id_end) |local_join_id| {
@@ -795,14 +796,15 @@ pub fn NNDescent(
                 const old_candidate_ids: []const usize = neighbor_candidates_old.getEntryFieldSlice(local_join_id, .neighbor_id);
 
                 for (new_candidate_ids, 0..) |cand1_id, i| {
-                    if (cand1_id >= neighbors_list.num_nodes) continue;
+                    if (cand1_id >= num_nodes) continue;
                     const cand1_vector = dataset.getUnchecked(cand1_id);
                     // Take current max distance in neighbor heap as threshold
                     const cand1_distance_threshold: T = neighbors_list.getMaxDistance(cand1_id);
 
                     // New-New candidate pairs
                     for (new_candidate_ids[i + 1 ..]) |cand2_id| {
-                        if (cand2_id >= neighbors_list.num_nodes) continue;
+                        // Reject invalid candidate pairs: out of range or self-loop
+                        if (cand2_id >= num_nodes or cand2_id == cand1_id) continue;
                         const cand2_vector = dataset.getUnchecked(cand2_id);
                         const cand2_distance_threshold: T = neighbors_list.getMaxDistance(cand2_id);
 
@@ -820,7 +822,8 @@ pub fn NNDescent(
 
                     // New-Old candidate pairs
                     for (old_candidate_ids) |cand2_id| {
-                        if (cand2_id >= neighbors_list.num_nodes) continue;
+                        // Reject invalid candidate pairs: out of range or self-loop
+                        if (cand2_id >= num_nodes or cand2_id == cand1_id) continue;
                         const cand2_vector = dataset.getUnchecked(cand2_id);
                         // Take current max distance in neighbor heap as threshold
                         const cand2_distance_threshold: T = neighbors_list.getMaxDistance(cand2_id);
@@ -892,6 +895,7 @@ pub fn NNDescent(
 
         /// Apply graph updates from the given `graph_updates_list` to the `neighbors_list`,
         /// only for nodes whose IDs are in the range `[node_id_start, node_id_end)`.
+        /// Graph updates with self-loops or out-of-range node IDs are ignored.
         /// Count the number of successful updates applied and store in `graph_updates_count_ptr`.
         fn applyGraphUpdatesProposalsThread(
             neighbors_list: *NeighborsList,
@@ -909,6 +913,8 @@ pub fn NNDescent(
             for (graph_updates_list.items) |graph_update| {
                 const node1_id = graph_update.node1_id;
                 const node2_id = graph_update.node2_id;
+                if (node1_id == node2_id) continue; // Skip self-loops
+
                 const distance = graph_update.distance;
 
                 var updates_count_local: usize = 0;
@@ -1440,10 +1446,15 @@ fn NeighborHeapList(
         }
 
         /// Resets all neighbor entries to their initial state
+        /// (with invalid neighbor IDs, max distances, and is_new = true).
         pub fn reset(self: *Self) void {
             memsetBuffers(&self.entries, self.num_nodes);
         }
 
+        /// Fill all entries with default values:
+        /// neighbor_id = num_nodes (invalid)
+        /// distance = max value
+        /// is_new = true (if store_flags)
         fn memsetBuffers(entries: *mod_soa_slice.SoaSlice(Entry), num_nodes: usize) void {
             const max_dist = switch (elem_type) {
                 .Int32 => std.math.maxInt(T),
