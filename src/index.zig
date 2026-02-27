@@ -387,8 +387,11 @@ pub fn Index(comptime T: type, comptime N: usize) type {
                 config.nn_descent_config,
                 allocator,
             );
+            var timer = try std.time.Timer.start();
             nn_descent.train();
             nn_descent.sortNeighbors();
+            const training_time = timer.read();
+            std.debug.print("NN Descent training time: {}ms\n", .{training_time / std.time.ns_per_ms});
 
             const neighbor_entries = nn_descent.neighbors_list.entries;
 
@@ -441,7 +444,11 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             );
 
             log.info("Optimizing graph with degree {d}...", .{config.graph_degree});
+            timer.reset();
             const optimized_graph = try optimizer.optimize(config.graph_degree, allocator);
+            const optimization_time = timer.read();
+            std.debug.print("Optimization time: {}ms\n", .{optimization_time / std.time.ns_per_ms});
+
             const graph_data: []const usize = optimized_graph.entries.items(.neighbor_id);
             std.debug.assert(isValidGraph(graph_data, num_nodes, config.graph_degree));
 

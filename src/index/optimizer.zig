@@ -129,13 +129,17 @@ pub const Optimizer = struct {
             allocator,
         );
 
+        log.info("Couting detours in the input graph...", .{});
         self.countDetours();
+        log.info("Pruning edges from the graph...", .{});
         self.prune(&output_graph);
+        log.info("Building reverse graph from pruned graph...", .{});
         self.buildReverseGraph(
             &output_graph,
             reverse_neighbor_counts,
             reverse_neighbor_ids,
         );
+        log.info("Combining edges from pruned graph and reverse graph...", .{});
         self.combine(
             &output_graph,
             reverse_neighbor_counts,
