@@ -9,8 +9,8 @@ const types = @import("types.zig");
 pub fn Vector(comptime T: type, comptime N: usize) type {
     const elem_type = types.ElemType.fromZigType(T) orelse @compileError("Unsupported element type: " ++ @typeName(T));
     const dim_type = types.DimType.fromDim(N) orelse @compileError("Unsupported vector dimension");
+    const max_val = types.maxAbsValue(elem_type, dim_type);
 
-    _ = dim_type;
     return struct {
         /// Aligned storage for the vector elements.
         /// 64 bytes alignment for SIMD performance.
@@ -19,14 +19,16 @@ pub fn Vector(comptime T: type, comptime N: usize) type {
 
         const Self = @This();
 
-        /// Fill all elements of the vector with random values
-        pub fn initRandom(rng: *std.Random) Self {
+        /// Fill all elements of the vector with random values.
+        /// The range of random values is chosen to avoid overflow in distance calculations.
+        /// Formula: max_val = sqrt(T::MAX) / sqrt(N * 4) -> range: [-max_val, max_val]
+        pub fn initRandom(random: std.Random) Self {
             var vec: Self = undefined;
             for (0..N) |i| {
                 vec.data[i] = switch (elem_type) {
-                    .Int32 => rng.int(T),
-                    .Float => rng.float(T) * 100,
-                    .Half => rng.float(T) * 100,
+                    .Int32 => random.intRangeAtMost(T, -max_val, max_val),
+                    .Float => random.float(T) * (max_val * 2.0) - max_val,
+                    .Half => @as(f16, @floatCast(random.float(f32) * (max_val * 2.0) - max_val)),
                 };
             }
             return vec;
@@ -77,4 +79,39 @@ pub fn Vector(comptime T: type, comptime N: usize) type {
             return final_acc;
         }
     };
+}
+
+test "sqdist max distance has no overflow for all supported types and dims" {
+    const ElemType = types.ElemType;
+    const DimType = types.DimType;
+
+    inline for (std.meta.fields(ElemType)) |elem_tag| {
+        const elem = @field(ElemType, elem_tag.name);
+        const T = elem.toZigType();
+
+        inline for (std.meta.fields(DimType)) |dim_tag| {
+            const dim = @field(DimType, dim_tag.name);
+            const N = comptime switch (dim) {
+                .D128 => 128,
+                .D256 => 256,
+                .D512 => 512,
+            };
+
+            const V = Vector(T, N);
+            var a: V = undefined;
+            var b: V = undefined;
+
+            const max_elem: T = types.maxAbsValue(elem, dim);
+
+            for (0..N) |i| {
+                a.data[i] = max_elem;
+                b.data[i] = -max_elem;
+            }
+
+            const d_naive = V.sqdistNaive(&a, &b);
+            const d_simd = V.sqdist(&a, &b);
+
+            try std.testing.expectEqual(d_naive, d_simd);
+        }
+    }
 }

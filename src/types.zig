@@ -1,3 +1,5 @@
+const std = @import("std");
+
 pub const ElemType = enum {
     // Int8,
     // UInt8,
@@ -55,3 +57,31 @@ pub const DimType = enum {
         };
     }
 };
+
+/// Computes the maximum absolute value for vector elements to ensure that the squared distance between two vectors does not overflow.
+/// Formula: max_val = sqrt(T::MAX) / sqrt(N * 4) -> range: [-max_val, max_val]
+pub fn maxAbsValue(comptime elem: ElemType, comptime dim: DimType) switch (elem) {
+    .Int32 => i32,
+    .Float => f32,
+    .Half => f16,
+} {
+    const N = dim.toDim();
+    return switch (elem) {
+        .Int32 => blk: {
+            const max_int = std.math.maxInt(i32);
+            const denom = @as(f64, @floatFromInt(N)) * 4.0;
+            const val_f64 = @sqrt(@as(f64, @floatFromInt(max_int)) / denom);
+            break :blk @as(i32, @intFromFloat(@floor(val_f64)));
+        },
+        .Float => blk: {
+            const max_float = std.math.floatMax(f32);
+            const denom = @as(f32, @floatFromInt(N)) * 4.0;
+            break :blk @sqrt(max_float / denom);
+        },
+        .Half => blk: {
+            const max_float = std.math.floatMax(f16);
+            const denom = @as(f16, @floatFromInt(N)) * 4.0;
+            break :blk @sqrt(max_float / denom);
+        },
+    };
+}
