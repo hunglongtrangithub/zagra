@@ -27,6 +27,27 @@ pub fn Dataset(comptime T: type, comptime N: usize) type {
 
         const Self = @This();
 
+        /// Create a new dataset with the specified number of random vectors.
+        pub fn initRandom(
+            num_vectors: usize,
+            random: std.Random,
+            allocator: std.mem.Allocator,
+        ) error{ NumVectorsTooLarge, OutOfMemory }!Self {
+            const data_buffer = try allocator.alignedAlloc(
+                T,
+                std.mem.Alignment.@"64",
+                std.math.mul(usize, num_vectors, N) catch return error.NumVectorsTooLarge,
+            );
+            for (0..num_vectors) |i| {
+                const vec = Vec.initRandom(random);
+                data_buffer[i * N ..][0..N].* = vec.data;
+            }
+            return Self{
+                .data_buffer = data_buffer,
+                .len = num_vectors,
+            };
+        }
+
         /// Save the dataset to a .npy file writer.
         /// Order is row-major (C order).
         pub fn toNpyFile(

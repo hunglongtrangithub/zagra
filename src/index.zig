@@ -11,8 +11,8 @@ const mod_optimizer = @import("index/optimizer.zig");
 const mod_nn_descent = @import("index/nn_descent.zig");
 
 pub const NNDescent = mod_nn_descent.NNDescent;
-pub const TrainingConfig = mod_nn_descent.TrainingConfig;
-pub const TrainingTiming = mod_nn_descent.TrainingTiming;
+pub const NNDTrainingConfig = mod_nn_descent.TrainingConfig;
+pub const NNDTrainingTiming = mod_nn_descent.TrainingTiming;
 pub const SoaSlice = mod_soa_slice.SoaSlice;
 pub const Optimizer = mod_optimizer.Optimizer;
 
@@ -71,6 +71,8 @@ pub fn isValidGraph(
     return true;
 }
 
+/// Configuration for building the index.
+/// This includes parameters for both the initial graph construction and the subsequent optimization step.
 pub const BuildConfig = struct {
     graph_degree: usize,
     nn_descent_config: mod_nn_descent.TrainingConfig,
@@ -85,7 +87,7 @@ pub const BuildConfig = struct {
         seed: ?u64,
         block_size: usize,
     ) Self {
-        const nn_descent_config = TrainingConfig.init(
+        const nn_descent_config = NNDTrainingConfig.init(
             intermediate_graph_degree,
             num_vectors,
             num_threads,
@@ -98,6 +100,19 @@ pub const BuildConfig = struct {
         config.nn_descent_config.block_size = block_size;
         return config;
     }
+};
+
+/// Configuration for search in the index.
+/// Reference: https://docs.rapids.ai/api/cuvs/stable/cpp_api/neighbors_cagra/#_CPPv4N4cuvs9neighbors5cagra13search_paramsE
+pub const SearchConfig = struct {
+    /// Maximum number of queries to process at a time.
+    /// This controls the batch size for search and can affect performance and memory usage.
+    max_queries: usize,
+    /// Number of intermediate search results retained during the search.
+    itopk_size: usize,
+    max_iterations: usize,
+    min_iterations: usize,
+    search_width: usize,
 };
 
 pub fn Index(comptime T: type, comptime N: usize) type {
@@ -113,7 +128,13 @@ pub fn Index(comptime T: type, comptime N: usize) type {
 
         const Dataset = mod_dataset.Dataset(T, N);
         const NeighborsList = mod_optimizer.Optimizer.NeighborsList;
+        const Distance2DArray = znpy.array.static.StaticArray(T, 2);
+        const Neighbor2DArray = znpy.array.static.StaticArray(usize, 2);
 
+        pub const SearchResult = struct {
+            neighbors: Neighbor2DArray,
+            distances: Distance2DArray,
+        };
         pub const DATASET_FILENAME = "dataset.npy";
         pub const GRAPH_FILENAME = "graph.npy";
 
@@ -391,7 +412,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             nn_descent.train();
             nn_descent.sortNeighbors();
             const training_time = timer.read();
-            std.debug.print("NN Descent training time: {}ms\n", .{training_time / std.time.ns_per_ms});
+            log.info("NN Descent training time: {}ms\n", .{training_time / std.time.ns_per_ms});
 
             const neighbor_entries = nn_descent.neighbors_list.entries;
 
@@ -447,7 +468,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             timer.reset();
             const optimized_graph = try optimizer.optimize(config.graph_degree, allocator);
             const optimization_time = timer.read();
-            std.debug.print("Optimization time: {}ms\n", .{optimization_time / std.time.ns_per_ms});
+            log.info("Optimization time: {}ms\n", .{optimization_time / std.time.ns_per_ms});
 
             const graph_data: []const usize = optimized_graph.entries.items(.neighbor_id);
             std.debug.assert(isValidGraph(graph_data, num_nodes, config.graph_degree));
@@ -459,6 +480,18 @@ pub fn Index(comptime T: type, comptime N: usize) type {
                 .num_neighbors_per_node = config.graph_degree,
             };
         }
+
+        pub fn search(self: *const Self, queries: Distance2DArray, k: usize, allocator: std.mem.Allocator) !SearchResult {
+            const num_queries = queries.shape.dims[1];
+            const query_vector_length = queries.shape.dims[0];
+            if (query_vector_length != N) return error.InvalidQueryDimension;
+
+            const neighbors = try Neighbor2DArray.init([_]usize{ num_queries, k }, allocator);
+            const distances = try Distance2DArray.init([_]usize{ num_queries, k }, allocator);
+            _ = neighbors;
+            _ = distances;
+            _ = self;
+        }
     };
 }
 
@@ -469,6 +502,78 @@ test {
     _ = mod_soa_slice;
 }
 
-test "index" {
-    _ = Index(f32, 128);
+// Integration test: build an index from a generated dataset, save it to disk, load it back,
+// and assert the loaded index matches the original exactly.
+fn testIndexRoundTrip(comptime T: type, comptime N: usize) !void {
+    const Dataset = mod_dataset.Dataset(T, N);
+    const IDX = Index(T, N);
+
+    const num_vectors: usize = 50;
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    // Create a small random dataset
+    const dataset = try Dataset.initRandom(
+        num_vectors,
+        random,
+        std.testing.allocator,
+    );
+
+    const graph_degree: usize = 4;
+    const intermediate_degree: usize = 8; // must be >= graph_degree
+    const block_size: usize = 16;
+    const config = BuildConfig.init(
+        graph_degree,
+        intermediate_degree,
+        num_vectors,
+        1,
+        42,
+        block_size,
+    );
+
+    // Build the index (this consumes `dataset` into the returned index)
+    var idx = try IDX.build(dataset, config, std.testing.allocator);
+    defer idx.deinit(std.testing.allocator);
+
+    // Directory to write the index to. save() will create it if necessary.
+    const dir_path: []const u8 = "test_index_roundtrip";
+    try idx.save(dir_path, std.testing.allocator);
+
+    // Load the index back from disk
+    var loaded = try IDX.load(dir_path, std.testing.allocator);
+    defer loaded.deinit(std.testing.allocator);
+
+    // Compare metadata
+    try std.testing.expectEqual(idx.num_nodes, loaded.num_nodes);
+    try std.testing.expectEqual(idx.num_neighbors_per_node, loaded.num_neighbors_per_node);
+    try std.testing.expectEqual(idx.dataset.len, loaded.dataset.len);
+
+    // Compare dataset contents and graph data exactly
+    try std.testing.expectEqualSlices(T, idx.dataset.data_buffer, loaded.dataset.data_buffer);
+    try std.testing.expectEqualSlices(usize, idx.graph, loaded.graph);
+
+    // Cleanup files and directory created by the test to avoid leaving artifacts.
+    // Remove dataset.npy and graph.npy then remove directory.
+    const dataset_file_path = try std.fs.path.join(std.testing.allocator, &[_][]const u8{ dir_path, IDX.DATASET_FILENAME });
+    defer std.testing.allocator.free(dataset_file_path);
+    try std.fs.cwd().deleteFile(dataset_file_path);
+
+    const graph_file_path = try std.fs.path.join(std.testing.allocator, &[_][]const u8{ dir_path, IDX.GRAPH_FILENAME });
+    defer std.testing.allocator.free(graph_file_path);
+    try std.fs.cwd().deleteFile(graph_file_path);
+
+    // Remove the now-empty directory
+    try std.fs.cwd().deleteDir(dir_path);
+}
+
+test "index round-trip" {
+    try testIndexRoundTrip(i32, 128);
+    try testIndexRoundTrip(i32, 256);
+    try testIndexRoundTrip(i32, 512);
+    try testIndexRoundTrip(f32, 128);
+    try testIndexRoundTrip(f32, 256);
+    try testIndexRoundTrip(f32, 512);
+    try testIndexRoundTrip(f16, 128);
+    try testIndexRoundTrip(f16, 256);
+    try testIndexRoundTrip(f16, 512);
 }

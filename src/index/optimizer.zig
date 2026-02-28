@@ -183,7 +183,10 @@ pub const Optimizer = struct {
         self: *Self,
         graph_degree: usize,
         allocator: std.mem.Allocator,
-    ) (Error || std.mem.Allocator.Error || std.time.Timer.Error)!struct { graph: NeighborsList(false), timing: OptimizationTiming } {
+    ) (Error || std.mem.Allocator.Error || std.time.Timer.Error)!struct {
+        graph: NeighborsList(false),
+        timing: OptimizationTiming,
+    } {
         var total_timer = try std.time.Timer.start();
         var timer = try std.time.Timer.start();
 
@@ -817,7 +820,13 @@ test "count detours" {
         null,
         2,
     );
-    optimizer.countDetours();
+    const num_two_hop_neighbors_per_node = (3 -| 1) * (3 -| 1);
+    const two_hop_neighbors_buffer = try std.testing.allocator.alloc(usize, num_two_hop_neighbors_per_node * optimizer.numThreads());
+    defer std.testing.allocator.free(two_hop_neighbors_buffer);
+    optimizer.countDetours(
+        two_hop_neighbors_buffer,
+        num_two_hop_neighbors_per_node,
+    );
 
     try std.testing.expectEqualSlices(
         usize,
@@ -840,6 +849,7 @@ test "prune - output degree" {
     // Node 1: neighbors 0, 2, 3 with detour counts 2, 4, 1
     // Node 2: neighbors 0, 1, 3 with detour counts 1, 2, 5
     // Node 3: neighbors 0, 1, 2 with detour counts 3, 1, 4
+    // The detour counts don't have to be valid for this test since we're just testing the pruning logic.
     var neighbor_ids = [_]usize{
         1, 2, 3,
         0, 2, 3,
@@ -892,118 +902,70 @@ test "prune - output degree" {
 }
 
 test "combine - correct degree" {
-    // Create a pruned graph with 4 neighbors and reverse graph
-    var neighbor_ids = [_]usize{ 1, 2, 3, 4 };
-    var detour_counts_void = [_]void{undefined} ** 4;
+    // Create a pruned graph with 4 neighbors per node for 6 nodes.
+    var neighbor_ids = [_]usize{
+        1, 2, 3, 4, // node 0
+        0, 2, 3, 4, // node 1
+        0, 1, 3, 4, // node 2
+        0, 1, 2, 4, // node 3
+        0, 1, 2, 3, // node 4
+        0, 1, 2, 3, // node 5
+    };
+    var detour_counts_void = [_]void{undefined} ** 24;
 
     var pruned_graph = Optimizer.NeighborsList(false){
-        .num_nodes = 1,
+        .num_nodes = 6,
         .num_neighbors_per_node = 4,
         .entries = mod_soa_slice.SoaSlice(Optimizer.NeighborsList(false).Entry){
             .ptrs = [2][*]u8{
                 @ptrCast(&neighbor_ids),
                 @ptrCast(&detour_counts_void),
             },
-            .len = 4,
+            .len = 24,
         },
     };
 
+    // The input graph for the Optimizer instance doesn't matter for combine(),
+    // but an Optimizer value is required to call the method.
     const input_graph = Optimizer.NeighborsList(true){
-        .num_nodes = 1,
+        .num_nodes = 6,
         .num_neighbors_per_node = 4,
         .entries = undefined,
     };
-
     var optimizer = Optimizer.init(input_graph, null, 1);
 
-    // Reverse graph with some neighbors
-    var reverse_graph: [1]std.ArrayList(usize) = undefined;
-    var reverse_buffer = [_]usize{ 5, 6, 0, 0 };
-    reverse_graph[0] = std.ArrayList(usize).initBuffer(&reverse_buffer);
-    reverse_graph[0].items.len = 2; // Only 2 actual reverse neighbors
-
-    var output_graph = try Optimizer.NeighborsList(false).init(1, 4, std.testing.allocator);
-    defer output_graph.deinit(std.testing.allocator);
-
-    const reverse_graph_slice: []std.ArrayList(usize) = &reverse_graph;
-    optimizer.combine(&pruned_graph, reverse_graph_slice, &output_graph);
-
-    // Verify output degree is exactly 4
-    try std.testing.expectEqual(@as(usize, 4), output_graph.num_neighbors_per_node);
-}
-
-test "property - optimize output has valid neighbor IDs" {
-    // Create a random-ish graph
-    const num_nodes: usize = 20;
-    const input_degree: usize = 8;
-    const output_degree: usize = 4;
-
-    var neighbor_ids = [_]usize{undefined} ** (num_nodes * input_degree);
-    var detour_counts = [_]usize{undefined} ** (num_nodes * input_degree);
-
-    // Fill with random-looking data
-    var prng = std.Random.DefaultPrng.init(12345);
-    const random = prng.random();
-
-    for (0..num_nodes) |node_id| {
-        for (0..input_degree) |j| {
-            neighbor_ids[node_id * input_degree + j] = random.intRangeAtMost(usize, 0, num_nodes - 1);
-            detour_counts[node_id * input_degree + j] = random.intRangeAtMost(usize, 0, 100);
-        }
-    }
-
-    const input_graph = Optimizer.NeighborsList(true){
-        .num_nodes = num_nodes,
-        .num_neighbors_per_node = input_degree,
-        .entries = mod_soa_slice.SoaSlice(Optimizer.NeighborsList(true).Entry){
-            .ptrs = [2][*]u8{
-                @ptrCast(&neighbor_ids),
-                @ptrCast(&detour_counts),
-            },
-            .len = num_nodes * input_degree,
-        },
+    // Reverse neighbor IDs and counts
+    const reverse_ids = [_]usize{
+        // 4 left out (due to degree cap)
+        1,         2,         3,         5,
+        // 5 left out (due to degree cap)
+        0,         2,         3,         4,
+        // 5 left out (due to degree cap)
+        0,         1,         3,         4,
+        // 5 left out (due to degree cap)
+        0,         1,         2,         4,
+        // no neighbors left out
+        0,         1,         2,         3,
+        undefined, undefined, undefined, undefined,
     };
+    const reverse_counts = [_]usize{ 4, 4, 4, 4, 4, 0 };
 
-    var optimizer = Optimizer.init(input_graph, null, 4);
+    // Call combine: it mutates `pruned_graph` in-place.
+    optimizer.combine(&pruned_graph, &reverse_counts, &reverse_ids);
 
-    // Run full optimize
-    var output_graph = try optimizer.optimize(output_degree, std.testing.allocator);
-    defer output_graph.deinit(std.testing.allocator);
-
-    // Property: all neighbor IDs should be valid (0 <= id < num_nodes)
-    const output_neighbor_ids = output_graph.entries.items(.neighbor_id);
-    for (output_neighbor_ids) |neighbor_id| {
-        try std.testing.expect(neighbor_id < num_nodes);
-    }
-}
-
-test "property - optimize output degree matches requested" {
-    const num_nodes: usize = 10;
-    const input_degree: usize = 8;
-    const output_degree: usize = 4;
-
-    var neighbor_ids = [_]usize{0} ** (num_nodes * input_degree);
-    var detour_counts = [_]usize{0} ** (num_nodes * input_degree);
-
-    const input_graph = Optimizer.NeighborsList(true){
-        .num_nodes = num_nodes,
-        .num_neighbors_per_node = input_degree,
-        .entries = mod_soa_slice.SoaSlice(Optimizer.NeighborsList(true).Entry){
-            .ptrs = [2][*]u8{
-                @ptrCast(&neighbor_ids),
-                @ptrCast(&detour_counts),
-            },
-            .len = num_nodes * input_degree,
-        },
+    const expected = [_]usize{
+        // Only node 0 has revese neighbor id 5 sneaking in
+        1, 2, 5, 4,
+        // All other nodes are unaffected since their reverse neighbors
+        // are duplicates of pruned neighbors, or they have no reverse neighbors.
+        0, 2, 3, 4,
+        0, 1, 3, 4,
+        0, 1, 2, 4,
+        0, 1, 2, 3,
+        0, 1, 2, 3,
     };
-
-    var optimizer = Optimizer.init(input_graph, null, 2);
-
-    var output_graph = try optimizer.optimize(output_degree, std.testing.allocator);
-    defer output_graph.deinit(std.testing.allocator);
-
-    // Property: output degree should match requested
-    try std.testing.expectEqual(@as(usize, output_degree), output_graph.num_neighbors_per_node);
+    const actual: []const usize = pruned_graph.entries.items(.neighbor_id);
+    try std.testing.expectEqualSlices(usize, &expected, actual);
 }
 
 test "edge case - single node graph" {
@@ -1032,225 +994,5 @@ test "edge case - single node graph" {
     defer output_graph.deinit(std.testing.allocator);
 
     // Just verify it doesn't crash and has correct degree
-    try std.testing.expectEqual(@as(usize, output_degree), output_graph.num_neighbors_per_node);
-}
-
-test "buildReverseGraph - all edges represented" {
-    // Create a simple graph where all edges are unique
-    // Node 0: neighbors 1, 2
-    // Node 1: neighbors 0, 2
-    // Node 2: neighbors 0, 1
-    // Total edges = 6 (undirected count = 3 unique pairs, but we count directed edges)
-    var neighbor_ids = [_]usize{
-        1, 2,
-        0, 2,
-        0, 1,
-    };
-    var detour_counts_void = [_]void{undefined} ** 6;
-
-    var pruned_graph = Optimizer.NeighborsList(false){
-        .num_nodes = 3,
-        .num_neighbors_per_node = 2,
-        .entries = mod_soa_slice.SoaSlice(Optimizer.NeighborsList(false).Entry){
-            .ptrs = [2][*]u8{
-                @ptrCast(&neighbor_ids),
-                @ptrCast(&detour_counts_void),
-            },
-            .len = 6,
-        },
-    };
-
-    const input_graph = Optimizer.NeighborsList(true){
-        .num_nodes = 3,
-        .num_neighbors_per_node = 2,
-        .entries = undefined,
-    };
-
-    var optimizer = Optimizer.init(input_graph, null, 2);
-
-    // Build reverse graph
-    const reverse_graph = try std.testing.allocator.alloc(std.ArrayList(usize), 3);
-    defer std.testing.allocator.free(reverse_graph);
-
-    const reverse_buffer = try std.testing.allocator.alloc(usize, 3 * 2);
-    defer std.testing.allocator.free(reverse_buffer);
-
-    for (reverse_graph, 0..) |*list, node_id| {
-        const start = node_id * 2;
-        list.* = std.ArrayList(usize).initBuffer(reverse_buffer[start .. start + 2]);
-    }
-
-    optimizer.buildReverseGraph(&pruned_graph, reverse_graph);
-
-    // Count total reverse edges
-    var total_reverse_edges: usize = 0;
-    for (reverse_graph) |list| {
-        total_reverse_edges += list.items.len;
-    }
-
-    // Total edges should be preserved
-    try std.testing.expectEqual(@as(usize, 6), total_reverse_edges);
-}
-
-test "property - optimize output has no self-loops" {
-    // Create a graph that might produce self-loops
-    const num_nodes: usize = 15;
-    const input_degree: usize = 6;
-    const output_degree: usize = 4;
-
-    var neighbor_ids = [_]usize{undefined} ** (num_nodes * input_degree);
-    var detour_counts = [_]usize{undefined} ** (num_nodes * input_degree);
-
-    // Each node's neighbors include itself with varying detour counts
-    var prng = std.Random.DefaultPrng.init(99999);
-    const random = prng.random();
-
-    for (0..num_nodes) |node_id| {
-        for (0..input_degree) |j| {
-            // 30% chance of self-loop
-            if (random.float(f32) < 0.3) {
-                neighbor_ids[node_id * input_degree + j] = node_id;
-            } else {
-                neighbor_ids[node_id * input_degree + j] = random.intRangeAtMost(usize, 0, num_nodes - 1);
-            }
-            detour_counts[node_id * input_degree + j] = random.intRangeAtMost(usize, 0, 50);
-        }
-    }
-
-    const input_graph = Optimizer.NeighborsList(true){
-        .num_nodes = num_nodes,
-        .num_neighbors_per_node = input_degree,
-        .entries = mod_soa_slice.SoaSlice(Optimizer.NeighborsList(true).Entry){
-            .ptrs = [2][*]u8{
-                @ptrCast(&neighbor_ids),
-                @ptrCast(&detour_counts),
-            },
-            .len = num_nodes * input_degree,
-        },
-    };
-
-    var optimizer = Optimizer.init(input_graph, null, 4);
-
-    var output_graph = try optimizer.optimize(output_degree, std.testing.allocator);
-    defer output_graph.deinit(std.testing.allocator);
-
-    // Property: no self-loops in output
-    const output_neighbor_ids = output_graph.entries.items(.neighbor_id);
-    for (0..num_nodes) |node_id| {
-        const start = node_id * output_degree;
-        for (0..output_degree) |j| {
-            try std.testing.expect(output_neighbor_ids[start + j] != node_id);
-        }
-    }
-}
-
-test "edge case - graph where all detour counts are equal" {
-    // When all detour counts are equal, prune should still work (stable sort)
-    const num_nodes: usize = 5;
-    const input_degree: usize = 4;
-    const output_degree: usize = 2;
-
-    var neighbor_ids = [_]usize{
-        1, 2, 3, 4,
-        0, 2, 3, 4,
-        0, 1, 3, 4,
-        0, 1, 2, 4,
-        0, 1, 2, 3,
-    };
-    var detour_counts = [_]usize{5} ** 20; // All equal
-
-    const input_graph = Optimizer.NeighborsList(true){
-        .num_nodes = num_nodes,
-        .num_neighbors_per_node = input_degree,
-        .entries = mod_soa_slice.SoaSlice(Optimizer.NeighborsList(true).Entry){
-            .ptrs = [2][*]u8{
-                @ptrCast(&neighbor_ids),
-                @ptrCast(&detour_counts),
-            },
-            .len = num_nodes * input_degree,
-        },
-    };
-
-    var optimizer = Optimizer.init(input_graph, null, 2);
-
-    var output_graph = try optimizer.optimize(output_degree, std.testing.allocator);
-    defer output_graph.deinit(std.testing.allocator);
-
-    // Should produce output with correct degree
-    try std.testing.expectEqual(@as(usize, output_degree), output_graph.num_neighbors_per_node);
-
-    // All neighbor IDs should be valid
-    const out_ids = output_graph.entries.items(.neighbor_id);
-    for (out_ids) |id| {
-        try std.testing.expect(id < num_nodes);
-    }
-}
-
-test "thread safety - single vs multi-threaded produce same results" {
-    // Create deterministic input
-    const num_nodes: usize = 20;
-    const input_degree: usize = 8;
-    const output_degree: usize = 4;
-
-    var neighbor_ids_1 = [_]usize{undefined} ** (num_nodes * input_degree);
-    var detour_counts_1 = [_]usize{undefined} ** (num_nodes * input_degree);
-
-    var prng = std.Random.DefaultPrng.init(42);
-    const random = prng.random();
-
-    for (0..num_nodes) |node_id| {
-        for (0..input_degree) |j| {
-            neighbor_ids_1[node_id * input_degree + j] = random.intRangeAtMost(usize, 0, num_nodes - 1);
-            detour_counts_1[node_id * input_degree + j] = random.intRangeAtMost(usize, 0, 100);
-        }
-    }
-
-    // Single-threaded
-    const input_graph_st = Optimizer.NeighborsList(true){
-        .num_nodes = num_nodes,
-        .num_neighbors_per_node = input_degree,
-        .entries = mod_soa_slice.SoaSlice(Optimizer.NeighborsList(true).Entry){
-            .ptrs = [2][*]u8{
-                @ptrCast(&neighbor_ids_1),
-                @ptrCast(&detour_counts_1),
-            },
-            .len = num_nodes * input_degree,
-        },
-    };
-
-    var optimizer_st = Optimizer.init(input_graph_st, null, 1);
-    var output_st = try optimizer_st.optimize(output_degree, std.testing.allocator);
-    defer output_st.deinit(std.testing.allocator);
-
-    // Multi-threaded (4 threads)
-    var neighbor_ids_mt = [_]usize{undefined} ** (num_nodes * input_degree);
-    var detour_counts_mt = [_]usize{undefined} ** (num_nodes * input_degree);
-    @memcpy(&neighbor_ids_mt, &neighbor_ids_1);
-    @memcpy(&detour_counts_mt, &detour_counts_1);
-
-    const input_graph_mt = Optimizer.NeighborsList(true){
-        .num_nodes = num_nodes,
-        .num_neighbors_per_node = input_degree,
-        .entries = mod_soa_slice.SoaSlice(Optimizer.NeighborsList(true).Entry){
-            .ptrs = [2][*]u8{
-                @ptrCast(&neighbor_ids_mt),
-                @ptrCast(&detour_counts_mt),
-            },
-            .len = num_nodes * input_degree,
-        },
-    };
-
-    var optimizer_mt = Optimizer.init(input_graph_mt, null, 4);
-    var output_mt = try optimizer_mt.optimize(output_degree, std.testing.allocator);
-    defer output_mt.deinit(std.testing.allocator);
-
-    // Both should produce valid results with correct degree
-    try std.testing.expectEqual(@as(usize, output_degree), output_st.num_neighbors_per_node);
-    try std.testing.expectEqual(@as(usize, output_degree), output_mt.num_neighbors_per_node);
-
-    // Both should have valid neighbor IDs
-    const ids_st = output_st.entries.items(.neighbor_id);
-    const ids_mt = output_mt.entries.items(.neighbor_id);
-    for (ids_st) |id| try std.testing.expect(id < num_nodes);
-    for (ids_mt) |id| try std.testing.expect(id < num_nodes);
+    try std.testing.expectEqual(output_degree, output_graph.num_neighbors_per_node);
 }

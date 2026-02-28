@@ -40,7 +40,7 @@ fn runBenchmark(
     const intermediate_degree = output_degree * config.intermediate_degree_multiplier;
 
     const NNDescent = zagra.index.NNDescent(T, N);
-    var training_config = zagra.index.TrainingConfig.init(
+    var training_config = zagra.index.NNDTrainingConfig.init(
         intermediate_degree,
         dataset.len,
         null,

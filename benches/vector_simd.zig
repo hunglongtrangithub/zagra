@@ -109,7 +109,7 @@ fn benchmarkComparison(
 
     // Initialize test vectors
     var prng = std.Random.DefaultPrng.init(42);
-    var random = prng.random();
+    const random = prng.random();
 
     const v1 = VecType.initRandom(&random);
     const v2 = VecType.initRandom(&random);

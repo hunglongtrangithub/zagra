@@ -336,7 +336,9 @@ pub fn NNDescent(
             self.populateRandomNeighbors();
             timing.init_random_ns = timer.read();
 
-            const convergence_threshold = @as(usize, @intFromFloat(self.training_config.delta * @as(f32, @floatFromInt(self.neighbors_list.entries.len))));
+            const convergence_threshold = @as(usize, @intFromFloat(
+                self.training_config.delta * @as(f32, @floatFromInt(self.neighbors_list.entries.len)),
+            ));
             log.info("Convergence threshold: {}", .{convergence_threshold});
 
             // Step 2: Iteratively refine the neighbor lists
@@ -542,7 +544,10 @@ pub fn NNDescent(
                     const neighbor = dataset.getUnchecked(neighbor_id);
                     const distance = node.sqdist(neighbor);
 
-                    log.debug("Populating random neighbor for node_id: {} - neighbor_id: {} - distance: {}", .{ node_id, neighbor_id, distance });
+                    log.debug(
+                        "Populating random neighbor for node_id: {} - neighbor_id: {} - distance: {}",
+                        .{ node_id, neighbor_id, distance },
+                    );
                     const added = neighbors_list.tryAddNeighbor(
                         node_id,
                         NeighborsList.Entry{
@@ -551,6 +556,22 @@ pub fn NNDescent(
                             .is_new = true,
                         },
                     );
+                    if (!added) {
+                        std.debug.print(
+                            \\Failed to add random neighbor for node_id: {} - neighbor_id: {} - distance: {}.
+                            \\num_nodes: {} node's neighbors: {any}
+                            \\node's distances: {any}
+                        ,
+                            .{
+                                node_id,
+                                neighbor_id,
+                                distance,
+                                neighbors_list.num_nodes,
+                                neighbors_list.getEntryFieldSlice(node_id, .neighbor_id),
+                                neighbors_list.getEntryFieldSlice(node_id, .distance),
+                            },
+                        );
+                    }
                     // Neighbor must have been added successfully since
                     // the neighbors do not have duplicates and the initial
                     // distances in the neighbor heap are set to infinity.
@@ -1109,24 +1130,14 @@ test "NNDescent - graph_updates_lists have separate buffers (no overlap)" {
 
     // Create a small dataset
     const num_vectors = 100;
-    const data_buffer = try std.testing.allocator.alignedAlloc(
-        T,
-        std.mem.Alignment.@"64",
-        num_vectors * N,
-    );
-    defer std.testing.allocator.free(data_buffer);
-
-    // Initialize with random data
     var prng = std.Random.DefaultPrng.init(42);
     const random = prng.random();
-    for (data_buffer) |*elem| {
-        elem.* = random.float(T);
-    }
-
-    const dataset = Dataset{
-        .data_buffer = data_buffer,
-        .len = num_vectors,
-    };
+    const dataset = try Dataset.initRandom(
+        num_vectors,
+        random,
+        std.testing.allocator,
+    );
+    defer dataset.deinit(std.testing.allocator);
 
     // Create config with multiple threads
     const num_threads = 4;
@@ -1203,27 +1214,16 @@ test "NNDescent - max distance decreases each iteration" {
     const Dataset = mod_dataset.Dataset(T, N);
     const NND = NNDescent(T, N);
 
-    // Create a small dataset with known structure
+    // Create a small dataset
     const num_vectors = 50;
-    const data_buffer = try std.testing.allocator.alignedAlloc(
-        T,
-        std.mem.Alignment.@"64",
-        num_vectors * N,
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+    const dataset = try Dataset.initRandom(
+        num_vectors,
+        random,
+        std.testing.allocator,
     );
-    defer std.testing.allocator.free(data_buffer);
-
-    // Initialize with structured data (each vector is [i, i+1, i+2, i+3])
-    // This creates a clear distance structure
-    for (0..num_vectors) |i| {
-        for (0..N) |d| {
-            data_buffer[i * N + d] = @floatFromInt(i);
-        }
-    }
-
-    const dataset = Dataset{
-        .data_buffer = data_buffer,
-        .len = num_vectors,
-    };
+    defer dataset.deinit(std.testing.allocator);
 
     const config = TrainingConfig.init(
         5,
@@ -1306,24 +1306,14 @@ test "NNDescent - single-threaded and multi-threaded produce similar results" {
     const NND = NNDescent(T, N);
 
     const num_vectors = 100;
-    const data_buffer = try std.testing.allocator.alignedAlloc(
-        T,
-        std.mem.Alignment.@"64",
-        num_vectors * N,
-    );
-    defer std.testing.allocator.free(data_buffer);
-
-    // Fixed data for reproducibility
     var prng = std.Random.DefaultPrng.init(42);
     const random = prng.random();
-    for (data_buffer) |*elem| {
-        elem.* = random.float(T);
-    }
-
-    const dataset = Dataset{
-        .data_buffer = data_buffer,
-        .len = num_vectors,
-    };
+    const dataset = try Dataset.initRandom(
+        num_vectors,
+        random,
+        std.testing.allocator,
+    );
+    defer dataset.deinit(std.testing.allocator);
 
     // Single-threaded run
     const config_single = TrainingConfig.init(10, dataset.len, 1, 42);

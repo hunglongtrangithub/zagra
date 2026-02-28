@@ -19,7 +19,7 @@ const BenchmarkConfig = struct {
 const BenchmarkResult = struct {
     vector_count: usize,
     graph_degree: usize,
-    timing: zagra.index.TrainingTiming,
+    timing: zagra.index.NNDTrainingTiming,
 
     fn deinit(self: *BenchmarkResult, allocator: std.mem.Allocator) void {
         self.timing.deinit(allocator);
