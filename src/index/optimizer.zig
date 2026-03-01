@@ -5,6 +5,12 @@ const mod_types = @import("../types.zig");
 const mod_soa_slice = @import("soa_slice.zig");
 const mod_nn_descent = @import("nn_descent.zig");
 
+/// Number of threads from an optional thread pool.
+/// Returns 1 if thread pool is null, otherwise returns the number of threads in the pool.
+fn numThreads(thread_pool: ?*std.Thread.Pool) usize {
+    return if (thread_pool) |pool| pool.threads.len else 1;
+}
+
 pub const Optimizer = struct {
     pub const Error = error{
         /// The number of edges is too large to fit in memory.
@@ -136,7 +142,7 @@ pub const Optimizer = struct {
         const two_hop_neighbors_buffer_size =
             std.math.mul(
                 usize,
-                self.numThreads(),
+                numThreads(self.thread_pool),
                 num_two_hop_neighbors_per_node,
             ) catch return Error.NumNeighborsPerNodeTooLarge;
         const two_hop_neighbors_buffer = try allocator.alloc(usize, two_hop_neighbors_buffer_size);
@@ -210,7 +216,7 @@ pub const Optimizer = struct {
         const two_hop_neighbors_buffer_size =
             std.math.mul(
                 usize,
-                self.numThreads(),
+                numThreads(self.thread_pool),
                 num_two_hop_neighbors_per_node,
             ) catch return Error.NumNeighborsPerNodeTooLarge;
         const two_hop_neighbors_buffer = try allocator.alloc(usize, two_hop_neighbors_buffer_size);
@@ -263,12 +269,6 @@ pub const Optimizer = struct {
         };
     }
 
-    /// Number of threads to use for optimization.
-    /// Returns 1 if thread_pool is null, otherwise returns the number of threads in the pool.
-    inline fn numThreads(self: *const Self) usize {
-        return if (self.thread_pool) |pool| pool.threads.len else 1;
-    }
-
     /// Number of blocks for training.
     /// Equal to 0 when `self.num_nodes_per_block` or number of nodes is 0.
     fn numBlocks(self: *const Self) usize {
@@ -285,7 +285,7 @@ pub const Optimizer = struct {
         return std.math.divCeil(
             usize,
             self.num_nodes_per_block,
-            self.numThreads(),
+            numThreads(self.thread_pool),
         ) catch 0;
     }
 
@@ -323,7 +323,7 @@ pub const Optimizer = struct {
         two_hop_neighbors_buffer: []usize,
         num_two_hop_neighbors_per_node: usize,
     ) void {
-        std.debug.assert(two_hop_neighbors_buffer.len == self.numThreads() * num_two_hop_neighbors_per_node);
+        std.debug.assert(two_hop_neighbors_buffer.len == numThreads(self.thread_pool) * num_two_hop_neighbors_per_node);
         const block_start = @min(block_id * self.num_nodes_per_block, self.neighbors_list.num_nodes);
         const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
 
@@ -821,7 +821,10 @@ test "count detours" {
         2,
     );
     const num_two_hop_neighbors_per_node = (3 -| 1) * (3 -| 1);
-    const two_hop_neighbors_buffer = try std.testing.allocator.alloc(usize, num_two_hop_neighbors_per_node * optimizer.numThreads());
+    const two_hop_neighbors_buffer = try std.testing.allocator.alloc(
+        usize,
+        num_two_hop_neighbors_per_node * numThreads(optimizer.thread_pool),
+    );
     defer std.testing.allocator.free(two_hop_neighbors_buffer);
     optimizer.countDetours(
         two_hop_neighbors_buffer,

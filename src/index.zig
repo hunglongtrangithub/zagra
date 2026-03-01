@@ -9,12 +9,14 @@ const mod_dataset = @import("dataset.zig");
 const mod_soa_slice = @import("index/soa_slice.zig");
 const mod_optimizer = @import("index/optimizer.zig");
 const mod_nn_descent = @import("index/nn_descent.zig");
+const mod_searcher = @import("index/searcher.zig");
 
 pub const NNDescent = mod_nn_descent.NNDescent;
 pub const NNDTrainingConfig = mod_nn_descent.TrainingConfig;
 pub const NNDTrainingTiming = mod_nn_descent.TrainingTiming;
 pub const SoaSlice = mod_soa_slice.SoaSlice;
 pub const Optimizer = mod_optimizer.Optimizer;
+pub const SearchConfig = mod_searcher.SearchConfig;
 
 /// Check that the graph is valid:
 /// - The length of neighbor_ids must equal number of nodes * number of neighbors per node
@@ -102,19 +104,6 @@ pub const BuildConfig = struct {
     }
 };
 
-/// Configuration for search in the index.
-/// Reference: https://docs.rapids.ai/api/cuvs/stable/cpp_api/neighbors_cagra/#_CPPv4N4cuvs9neighbors5cagra13search_paramsE
-pub const SearchConfig = struct {
-    /// Maximum number of queries to process at a time.
-    /// This controls the batch size for search and can affect performance and memory usage.
-    max_queries: usize,
-    /// Number of intermediate search results retained during the search.
-    itopk_size: usize,
-    max_iterations: usize,
-    min_iterations: usize,
-    search_width: usize,
-};
-
 pub fn Index(comptime T: type, comptime N: usize) type {
     return struct {
         /// The dataset of vectors. Owned by this struct.
@@ -126,15 +115,10 @@ pub fn Index(comptime T: type, comptime N: usize) type {
         /// Number of neighbors per node (graph degree).
         num_neighbors_per_node: usize,
 
-        const Dataset = mod_dataset.Dataset(T, N);
         const NeighborsList = mod_optimizer.Optimizer.NeighborsList;
-        const Distance2DArray = znpy.array.static.StaticArray(T, 2);
-        const Neighbor2DArray = znpy.array.static.StaticArray(usize, 2);
 
-        pub const SearchResult = struct {
-            neighbors: Neighbor2DArray,
-            distances: Distance2DArray,
-        };
+        pub const Dataset = mod_dataset.Dataset(T, N);
+        pub const Searcher = mod_searcher.Searcher(T, N);
         pub const DATASET_FILENAME = "dataset.npy";
         pub const GRAPH_FILENAME = "graph.npy";
 
@@ -481,16 +465,19 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             };
         }
 
-        pub fn search(self: *const Self, queries: Distance2DArray, k: usize, allocator: std.mem.Allocator) !SearchResult {
-            const num_queries = queries.shape.dims[1];
-            const query_vector_length = queries.shape.dims[0];
-            if (query_vector_length != N) return error.InvalidQueryDimension;
-
-            const neighbors = try Neighbor2DArray.init([_]usize{ num_queries, k }, allocator);
-            const distances = try Distance2DArray.init([_]usize{ num_queries, k }, allocator);
-            _ = neighbors;
-            _ = distances;
-            _ = self;
+        pub fn search(
+            self: *const Self,
+            queries: znpy.array.static.StaticArray(T, 2),
+            config: mod_searcher.SearchConfig,
+            allocator: std.mem.Allocator,
+        ) !Searcher.SearchResult {
+            const searcher = Searcher{
+                .graph = self.graph,
+                .dataset = self.dataset,
+                .num_nodes = self.num_nodes,
+                .num_neighbors_per_node = self.num_neighbors_per_node,
+            };
+            return searcher.search(&queries, &config, allocator);
         }
     };
 }
@@ -500,6 +487,7 @@ test {
     _ = mod_optimizer;
     _ = mod_dataset;
     _ = mod_soa_slice;
+    _ = mod_searcher;
 }
 
 // Integration test: build an index from a generated dataset, save it to disk, load it back,

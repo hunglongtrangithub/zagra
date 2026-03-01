@@ -256,6 +256,7 @@ pub fn NNDescent(
 
             const thread_pool = if (training_config.num_threads != 1) blk: {
                 const pool = try allocator.create(std.Thread.Pool);
+                errdefer allocator.destroy(pool);
                 pool.init(.{
                     .n_jobs = training_config.num_threads,
                     .allocator = allocator,

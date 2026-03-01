@@ -12,6 +12,9 @@ pub fn Vector(comptime T: type, comptime N: usize) type {
     const max_val = types.maxAbsValue(elem_type, dim_type);
 
     return struct {
+        comptime {
+            if (N % 64 != 0) @compileError("Vector dimension must be a multiple of 64 for optimal SIMD performance");
+        }
         /// Aligned storage for the vector elements.
         /// 64 bytes alignment for SIMD performance.
         // Alignment of 64 bytes satisfies all natural alignments of types we support.
