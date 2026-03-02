@@ -102,7 +102,7 @@ pub fn NNDescent(
 
     return struct {
         /// The dataset of vectors to build the k-NN graph for. Owned by caller.
-        dataset: Dataset,
+        dataset: *const Dataset,
         /// Configuration parameters for training.
         training_config: TrainingConfig,
         /// Holds the current neighbor lists for all nodes.
@@ -166,7 +166,7 @@ pub fn NNDescent(
 
         /// Initialize NN-Descent with the given dataset and training configuration.
         pub fn init(
-            dataset: Dataset,
+            dataset: *const Dataset,
             training_config: TrainingConfig,
             allocator: std.mem.Allocator,
         ) (InitError || std.mem.Allocator.Error)!Self {
@@ -485,7 +485,7 @@ pub fn NNDescent(
                         &self.wait_group,
                         populateRandomNeighborsThread,
                         .{
-                            &self.dataset,
+                            self.dataset,
                             &self.neighbors_list,
                             node_id_start,
                             node_id_end,
@@ -496,7 +496,7 @@ pub fn NNDescent(
                 pool.waitAndWork(&self.wait_group);
             } else {
                 populateRandomNeighborsThread(
-                    &self.dataset,
+                    self.dataset,
                     &self.neighbors_list,
                     0,
                     self.dataset.len,
@@ -769,7 +769,7 @@ pub fn NNDescent(
                         &self.wait_group,
                         generateGraphUpdateProposalsThread,
                         .{
-                            &self.dataset,
+                            self.dataset,
                             &self.neighbors_list,
                             &self.block_graph_updates_lists[thread_id],
                             &self.neighbor_candidates_new,
@@ -783,7 +783,7 @@ pub fn NNDescent(
             } else {
                 std.debug.assert(self.training_config.num_threads == 1);
                 generateGraphUpdateProposalsThread(
-                    &self.dataset,
+                    self.dataset,
                     &self.neighbors_list,
                     &self.block_graph_updates_lists[0],
                     &self.neighbor_candidates_new,
@@ -1077,7 +1077,7 @@ test "NNDescent - no panic on empty dataset & zero graph degree & zero threads" 
         42,
     );
     const result = NNDescent(T, N).init(
-        dataset,
+        &dataset,
         config,
         std.testing.allocator,
     );
@@ -1088,7 +1088,7 @@ test "NNDescent - no panic on empty dataset & zero graph degree & zero threads" 
     dataset.len = 1;
     config.num_neighbors_per_node = 0;
     var nn_descent = try NNDescent(T, N).init(
-        dataset,
+        &dataset,
         config,
         std.testing.allocator,
     );
@@ -1099,7 +1099,7 @@ test "NNDescent - no panic on empty dataset & zero graph degree & zero threads" 
     config.num_neighbors_per_node = 0;
     config.num_threads = 0;
     nn_descent = try NNDescent(T, N).init(
-        dataset,
+        &dataset,
         config,
         std.testing.allocator,
     );
@@ -1149,7 +1149,7 @@ test "NNDescent - graph_updates_lists have separate buffers (no overlap)" {
         42,
     );
 
-    var nn_descent = try NND.init(dataset, config, std.testing.allocator);
+    var nn_descent = try NND.init(&dataset, config, std.testing.allocator);
     defer nn_descent.deinit(std.testing.allocator);
 
     // Verify we actually have multiple threads
@@ -1233,7 +1233,7 @@ test "NNDescent - max distance decreases each iteration" {
         42,
     );
 
-    var nn_descent = try NND.init(dataset, config, std.testing.allocator);
+    var nn_descent = try NND.init(&dataset, config, std.testing.allocator);
     defer nn_descent.deinit(std.testing.allocator);
 
     // 1 initial + 5 training iterations
@@ -1318,7 +1318,7 @@ test "NNDescent - single-threaded and multi-threaded produce similar results" {
 
     // Single-threaded run
     const config_single = TrainingConfig.init(10, dataset.len, 1, 42);
-    var nn_single = try NND.init(dataset, config_single, std.testing.allocator);
+    var nn_single = try NND.init(&dataset, config_single, std.testing.allocator);
     defer nn_single.deinit(std.testing.allocator);
     nn_single.train();
 
@@ -1330,7 +1330,7 @@ test "NNDescent - single-threaded and multi-threaded produce similar results" {
 
     // Multi-threaded run
     const config_multi = TrainingConfig.init(10, dataset.len, 4, 42);
-    var nn_multi = try NND.init(dataset, config_multi, std.testing.allocator);
+    var nn_multi = try NND.init(&dataset, config_multi, std.testing.allocator);
     defer nn_multi.deinit(std.testing.allocator);
     nn_multi.train();
 

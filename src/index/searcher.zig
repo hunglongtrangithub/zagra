@@ -27,7 +27,7 @@ inline fn numThreads(thread_pool: ?*std.Thread.Pool) usize {
 pub fn Searcher(comptime T: type, comptime N: usize) type {
     return struct {
         graph: []const usize,
-        dataset: Dataset,
+        dataset: *const Dataset,
         num_nodes: usize,
         num_neighbors_per_node: usize,
 

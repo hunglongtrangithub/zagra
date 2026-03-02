@@ -79,7 +79,7 @@ pub const Optimizer = struct {
         };
     }
 
-    /// Entries for all neighbors of all nodes, stored in row-major order.
+    /// Entries for all neighbors of all nodes, stored in row-major order. Owned by caller.
     /// Neighbor slots for every node are all valid (non-empty) and there are no self-loops (a node cannot be its own neighbor).
     /// Neighbors for a node are arranged in descending order of distance, thus descending order of rank (this is guaranteed by the caller).
     neighbors_list: NeighborsList(true),

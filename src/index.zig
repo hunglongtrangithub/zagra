@@ -388,7 +388,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
 
             log.info("Training initial graph with degree {d} using NN-Descent...", .{config.nn_descent_config.num_neighbors_per_node});
             var nn_descent = try NNDescent(T, N).init(
-                dataset,
+                &dataset,
                 config.nn_descent_config,
                 allocator,
             );
@@ -428,19 +428,17 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             const detour_counts: []usize = try allocator.alloc(usize, neighbor_entries.len);
             defer allocator.free(detour_counts);
 
-            // Craft the optimizer entries by borrowing the neighbor IDs and detourable counts
-            const optimizer_entries = mod_soa_slice.SoaSlice(NeighborsList(true).Entry){
-                .ptrs = [_][*]u8{
-                    @ptrCast(neighbor_ids.ptr),
-                    @ptrCast(detour_counts.ptr),
-                },
-                .len = neighbor_entries.len,
-            };
-
             // We let the optimizer borrow the entries and thread pool
             var optimizer = mod_optimizer.Optimizer.init(
+                // Craft the optimizer entries by borrowing the neighbor IDs and detourable counts
                 NeighborsList(true){
-                    .entries = optimizer_entries,
+                    .entries = mod_soa_slice.SoaSlice(NeighborsList(true).Entry){
+                        .ptrs = [_][*]u8{
+                            @ptrCast(neighbor_ids.ptr),
+                            @ptrCast(detour_counts.ptr),
+                        },
+                        .len = neighbor_entries.len,
+                    },
                     .num_neighbors_per_node = num_neighbors_per_node,
                     .num_nodes = num_nodes,
                 },
