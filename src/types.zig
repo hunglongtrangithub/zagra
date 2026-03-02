@@ -1,5 +1,13 @@
 const std = @import("std");
 
+pub const NodeIdType = switch (@sizeOf(usize)) {
+    1 => u8,
+    2 => u16,
+    4 => u32,
+    8 => u64,
+    else => @compileError("Unsupported usize size"),
+};
+
 pub const ElemType = enum {
     // Int8,
     // UInt8,

@@ -5,6 +5,7 @@ const log = std.log.scoped(.index);
 const znpy = @import("znpy");
 
 const mod_types = @import("types.zig");
+pub const NodeIdType = mod_types.NodeIdType;
 const mod_dataset = @import("dataset.zig");
 const mod_soa_slice = @import("index/soa_slice.zig");
 const mod_optimizer = @import("index/optimizer.zig");
@@ -362,13 +363,8 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             writer: *std.io.Writer,
             allocator: std.mem.Allocator,
         ) !void {
-            // Determine the appropriate element type based on usize size
-            const element_type: znpy.ElementType = switch (@sizeOf(usize)) {
-                1 => znpy.ElementType.UInt8,
-                2 => znpy.ElementType{ .UInt16 = null },
-                4 => znpy.ElementType{ .UInt32 = null },
-                8 => znpy.ElementType{ .UInt64 = null },
-                else => return error.UnsupportedUsizeSize,
+            const element_type = znpy.ElementType.fromZigType(NodeIdType) catch {
+                return error.UnsupportedUsizeSize;
             };
 
             // Write the graph in .npy format
@@ -465,17 +461,23 @@ pub fn Index(comptime T: type, comptime N: usize) type {
 
         pub fn search(
             self: *const Self,
-            queries: znpy.array.static.StaticArray(T, 2),
+            queries: znpy.array.static.ConstStaticArray(T, 2),
             config: mod_searcher.SearchConfig,
+            seed: ?u64,
             allocator: std.mem.Allocator,
         ) !Searcher.SearchResult {
             const searcher = Searcher{
                 .graph = self.graph,
-                .dataset = self.dataset,
+                .dataset = &self.dataset,
                 .num_nodes = self.num_nodes,
                 .num_neighbors_per_node = self.num_neighbors_per_node,
             };
-            return searcher.search(&queries, &config, allocator);
+            return searcher.search(
+                &queries,
+                &config,
+                if (seed) |s| s else std.crypto.random.int(u64),
+                allocator,
+            );
         }
     };
 }

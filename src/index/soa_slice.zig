@@ -71,7 +71,7 @@ pub fn SoaSlice(comptime T: type) type {
 
         /// Set the element at the specified index to the given value.
         /// Index has to be less than the length of the slice.
-        pub fn set(self: *Self, index: usize, elem: T) void {
+        pub fn set(self: *const Self, index: usize, elem: T) void {
             std.debug.assert(index < self.len);
             inline for (fields, 0..) |field, i| {
                 self.items(@as(Field, @enumFromInt(i)))[index] = @field(elem, field.name);

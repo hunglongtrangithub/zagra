@@ -18,6 +18,8 @@ const HELP =
     \\Options:
     \\- --threads <n>: Number of threads for NN-Descent and Optimizer (default: CPU core count)
     \\- --block-size <n>: Block size for processing (default: 16384)
+    \\- --k <n>: Number of nearest neighbors to search for (default: 4)
+    \\- --queries <n>: Number of queries to search for (default: 1)
     \\- --save <path> or -o <path>: Save the built index to the specified directory (optional)
 ;
 
@@ -59,6 +61,8 @@ pub fn main() !void {
     const intermediate_graph_degree: usize = graph_degree * 2;
     var num_threads: ?usize = null;
     var block_size: usize = 16384;
+    var k: usize = 4;
+    var num_queries: usize = 1;
     var save_path: ?[]const u8 = null;
 
     // Parse optional flags
@@ -90,6 +94,30 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, arg, "--save") or std.mem.eql(u8, arg, "-o")) {
             save_path = args.next() orelse {
                 std.debug.print("--save requires a path\n", .{});
+                return;
+            };
+        } else if (std.mem.eql(u8, arg, "--k")) {
+            const k_str = args.next() orelse {
+                std.debug.print("--k requires a value\n", .{});
+                return;
+            };
+            k = std.fmt.parseInt(usize, k_str, 10) catch |e| {
+                switch (e) {
+                    error.Overflow => std.debug.print("Entered k is too large for usize\n", .{}),
+                    error.InvalidCharacter => std.debug.print("Entered k is not a valid number\n", .{}),
+                }
+                return;
+            };
+        } else if (std.mem.eql(u8, arg, "--queries")) {
+            const q_str = args.next() orelse {
+                std.debug.print("--queries requires a value\n", .{});
+                return;
+            };
+            num_queries = std.fmt.parseInt(usize, q_str, 10) catch |e| {
+                switch (e) {
+                    error.Overflow => std.debug.print("Entered number of queries is too large for usize\n", .{}),
+                    error.InvalidCharacter => std.debug.print("Entered number of queries is not a valid number\n", .{}),
+                }
                 return;
             };
         } else {
@@ -211,4 +239,65 @@ pub fn main() !void {
         }
         try stdout.flush();
     }
+
+    // ====== SEARCH SECTION ======
+    const query_vectors = try allocator.alignedAlloc(T, std.mem.Alignment.@"64", num_queries * N);
+
+    for (0..num_queries * N) |i| {
+        query_vectors[i] = @rem(random.int(T), 2);
+    }
+
+    var queries_array = try znpy.array.static.StaticArray(T, 2).init(
+        [_]usize{ num_queries, N },
+        .C,
+        allocator,
+    );
+    defer queries_array.deinit(allocator);
+    @memcpy(queries_array.data_buffer, query_vectors);
+    allocator.free(query_vectors);
+
+    const search_config = zagra.index.SearchConfig{
+        .k = k,
+        .internal_k = 64,
+        .max_iterations = 20,
+        .search_width = 4,
+        .num_threads = 1,
+    };
+
+    try stdout.print("\n=== Search ===\n", .{});
+    try stdout.print("Number of queries: {}\n", .{num_queries});
+    try stdout.print("k (nearest neighbors): {}\n", .{k});
+    try stdout.flush();
+
+    const search_result = index.search(
+        queries_array.asConst(),
+        search_config,
+        123,
+        allocator,
+    ) catch |e| {
+        switch (e) {
+            error.InvalidSearchConfig => {
+                std.debug.print("Invalid search config: internal_k must be >= k and >= search_width\n", .{});
+                return;
+            },
+            error.InvalidQueriesArray => {
+                std.debug.print("Invalid queries array: must be 64-byte aligned and have correct shape\n", .{});
+                return;
+            },
+            else => return e,
+        }
+    };
+    defer search_result.neighbors.deinit(allocator);
+    defer search_result.distances.deinit(allocator);
+
+    try stdout.print("\n=== Search Results ===\n", .{});
+    for (0..num_queries) |q| {
+        try stdout.print("Query {}:\n", .{q});
+        for (0..k) |i| {
+            const neighbor_id = search_result.neighbors.data_buffer[q * k + i];
+            const distance = search_result.distances.data_buffer[q * k + i];
+            try stdout.print("  {}: id={}, dist={}\n", .{ i, neighbor_id, distance });
+        }
+    }
+    try stdout.flush();
 }
