@@ -142,7 +142,7 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
                 .C,
                 allocator,
             ) catch |e| return switch (e) {
-                StaticArray(usize, 2).InitError.ShapeSizeOverflow => error.KTooLarge,
+                znpy.array.static.InitError.ShapeSizeOverflow => error.KTooLarge,
                 else => e,
             };
             errdefer neighbors.deinit();
@@ -152,7 +152,7 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
                 .C,
                 allocator,
             ) catch |e| return switch (e) {
-                StaticArray(T, 2).InitError.ShapeSizeOverflow => error.KTooLarge,
+                znpy.array.static.InitError.ShapeSizeOverflow => error.KTooLarge,
                 else => e,
             };
             errdefer distances.deinit();
@@ -261,6 +261,7 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
             }
         }
 
+        // Search for one query.
         pub fn searchThread(
             self: *const Self,
             query: *const [N]T,
