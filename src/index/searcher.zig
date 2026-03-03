@@ -299,6 +299,130 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
             }
         }
 
+        /// Initializes the search buffer for a new query search.
+        ///
+        /// The buffer is divided into two sections:
+        /// - First `internal_k` entries: initialized with invalid node IDs (num_nodes) and maximum distances
+        /// - Remaining entries: filled with random nodes from the dataset and their distances to the query
+        fn initializeSearchBuffer(
+            self: *const Self,
+            query_vector: *const Vector,
+            node_ids_random: []const usize,
+            seed: u64,
+            search_buffer: SearchBuffer,
+            internal_k: usize,
+        ) void {
+            const num_nodes = self.num_nodes;
+            std.debug.assert(search_buffer.len >= internal_k);
+
+            for (0..internal_k) |top_k_idx| {
+                search_buffer.set(top_k_idx, .{
+                    .node_id = num_nodes,
+                    .distance = switch (elem_type) {
+                        .Int32 => std.math.maxInt(T),
+                        .Float, .Half => std.math.floatMax(T),
+                    },
+                });
+            }
+
+            for (0..search_buffer.len - internal_k) |candidate_idx| {
+                const node_id = node_ids_random[(seed + candidate_idx) % self.num_nodes];
+                const vector = self.dataset.getUnchecked(node_id);
+                const distance = query_vector.sqdist(vector);
+                search_buffer.set(internal_k + candidate_idx, .{
+                    .node_id = node_id,
+                    .distance = distance,
+                });
+            }
+        }
+
+        /// Sorts the search buffer to find the top `internal_k` entries with smallest distances.
+        ///
+        /// Uses selection sort to place the `internal_k` closest nodes at the beginning of the buffer.
+        /// Skips duplicate node IDs - if a node ID already exists in the sorted portion, it will
+        /// not be added again, ensuring unique results.
+        fn sortTopK(search_buffer: SearchBuffer, internal_k: usize) void {
+            const node_ids: []const usize = search_buffer.items(.node_id);
+            for (0..internal_k) |top_k_idx| {
+                const top_k_entry = search_buffer.get(top_k_idx);
+                var min_entry_idx = top_k_idx;
+                var min_entry = top_k_entry;
+
+                const existing_node_ids = node_ids[0..top_k_idx];
+                for (top_k_idx + 1..search_buffer.len) |entry_idx| {
+                    const entry = search_buffer.get(entry_idx);
+
+                    // Prevent duplicate node IDs in the top k entries
+                    if (std.mem.indexOfScalar(
+                        usize,
+                        existing_node_ids,
+                        entry.node_id,
+                    ) != null) continue;
+
+                    if (entry.distance < min_entry.distance) {
+                        min_entry_idx = entry_idx;
+                        min_entry = entry;
+                    }
+                }
+                if (min_entry_idx != top_k_idx) {
+                    search_buffer.set(top_k_idx, min_entry);
+                    search_buffer.set(min_entry_idx, top_k_entry);
+                }
+            }
+        }
+
+        /// Expands parent nodes to get new candidate neighbors for the next iteration.
+        ///
+        /// For each of the top `search_width` nodes in the internal top-k list that hasn't been
+        /// expanded before, retrieves its neighbors from the graph and adds them to the candidate
+        /// list portion of the search buffer.
+        ///
+        /// Uses `first_time_parent_flags` to track which nodes have been expanded as parents.
+        /// Uses `first_time_candidate_flags` to track which nodes have been added as candidates.
+        ///
+        /// Returns the number of new candidates added in this iteration.
+        fn updateSearchCandidates(
+            self: *const Self,
+            query_vector: *const Vector,
+            search_buffer: SearchBuffer,
+            first_time_parent_flags: []bool,
+            first_time_candidate_flags: []bool,
+            internal_k: usize,
+            search_width: usize,
+        ) usize {
+            const num_nodes = self.num_nodes;
+            std.debug.assert(first_time_parent_flags.len == num_nodes);
+            std.debug.assert(first_time_candidate_flags.len == num_nodes);
+            const graph_degree = self.num_neighbors_per_node;
+            std.debug.assert(search_buffer.len >= internal_k + search_width * graph_degree);
+
+            const search_node_ids: []usize = search_buffer.items(.node_id);
+            const search_distances: []T = search_buffer.items(.distance);
+
+            var new_candidate_count: usize = 0;
+            for (0..search_width) |candidate_idx| {
+                const node_id: usize = search_node_ids[candidate_idx];
+                if (node_id >= num_nodes) continue;
+                if (first_time_parent_flags[node_id]) continue;
+                first_time_parent_flags[node_id] = true;
+
+                const candidate_neighbors = self.graph[node_id * graph_degree ..][0..graph_degree];
+                for (candidate_neighbors, 0..) |neighbor_id, neighbor_idx| {
+                    if (first_time_candidate_flags[neighbor_id]) continue;
+                    first_time_candidate_flags[neighbor_id] = true;
+
+                    // TODO: Use first_time_candidate_flags to skip distance calculation.
+                    const vector = self.dataset.getUnchecked(neighbor_id);
+                    const distance = query_vector.sqdist(vector);
+                    const idx = internal_k + new_candidate_count * graph_degree + neighbor_idx;
+                    search_node_ids[idx] = neighbor_id;
+                    search_distances[idx] = distance;
+                }
+                new_candidate_count += 1;
+            }
+            return new_candidate_count;
+        }
+
         // Search for one query.
         pub fn searchThread(
             self: *const Self,
@@ -330,88 +454,39 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
             const query_vector: *const Vector = @ptrCast(@alignCast(query_vector_data));
 
             const internal_k = config.internal_k;
-            // Fill the first internal_k entries of the search buffer with invalid nodes and infinite distances
-            for (0..internal_k) |top_k_idx| {
-                search_buffer.set(top_k_idx, .{
-                    .node_id = num_nodes, // invalid node ID;
-                    .distance = switch (elem_type) {
-                        .Int32 => std.math.maxInt(T),
-                        .Float, .Half => std.math.floatMax(T),
-                    }, // Infinity distance
-                });
-            }
-
-            // Fill the rest of the search buffer with random nodes and their distances to the query vector.
-            for (0..search_buffer.len - internal_k) |candidate_idx| {
-                const node_id = node_ids_random[(seed + candidate_idx) % self.num_nodes];
-                const vector = self.dataset.getUnchecked(node_id);
-                const distance = query_vector.sqdist(vector);
-                search_buffer.set(internal_k + candidate_idx, .{
-                    .node_id = node_id,
-                    .distance = distance,
-                });
-            }
+            self.initializeSearchBuffer(
+                query_vector,
+                node_ids_random,
+                seed,
+                search_buffer,
+                internal_k,
+            );
 
             const search_node_ids: []usize = search_buffer.items(.node_id);
             const search_distances: []T = search_buffer.items(.distance);
-            const graph_degree = self.num_neighbors_per_node;
             var candidate_count = config.search_width;
             for (0..config.max_iterations) |iteration| {
                 log.info("Iteration {d}, candidate_count: {d}", .{ iteration, candidate_count });
-                const search_buffer_len = internal_k + candidate_count * graph_degree;
 
-                // Fill the first internal_k entries with closest nodes in the search buffer.
-                for (0..internal_k) |top_k_idx| {
-                    const top_k_entry = search_buffer.get(top_k_idx);
-                    // Find the entry with the smallest distance in the search buffer from top_k_idx to the end
-                    var min_entry_idx = top_k_idx;
-                    var min_entry = top_k_entry;
-                    for (top_k_idx + 1..search_buffer_len) |entry_idx| {
-                        const entry = search_buffer.get(entry_idx);
-                        if (entry.distance < min_entry.distance) {
-                            min_entry_idx = entry_idx;
-                            min_entry = entry;
-                        }
-                    }
-                    // Swap the entry with the smallest distance to index top_k_idx.
-                    if (min_entry_idx != top_k_idx) {
-                        search_buffer.set(top_k_idx, min_entry);
-                        search_buffer.set(min_entry_idx, top_k_entry);
-                    }
-                }
-                log.debug(
-                    "Updated internal top k entries:\nNode IDs: {any}\nDistances: {any}",
-                    .{ search_node_ids[0..internal_k], search_distances[0..internal_k] },
+                sortTopK(search_buffer.subslice(
+                    0,
+                    internal_k + candidate_count * self.num_neighbors_per_node,
+                ), internal_k);
+
+                const new_candidate_count = self.updateSearchCandidates(
+                    query_vector,
+                    search_buffer,
+                    first_time_parent_flags,
+                    first_time_candidate_flags,
+                    internal_k,
+                    candidate_count,
                 );
-
-                // Get search_width nodes from the top internal_k nodes that haven't been selected as parents before.
-                // Skip ones that have alrady been parents.
-                var new_candidate_count: usize = 0;
-                for (0..config.search_width) |candidate_idx| {
-                    const node_id: usize = search_node_ids[candidate_idx];
-                    if (node_id == num_nodes) continue;
-                    std.debug.assert(node_id < num_nodes);
-
-                    if (first_time_parent_flags[node_id]) continue;
-                    first_time_parent_flags[node_id] = true;
-
-                    // Populate the search buffer with the neighbors of the selected node and their distances to the query vector.
-                    const candidate_neighbors = self.graph[node_id * graph_degree ..][0..graph_degree];
-                    for (candidate_neighbors, 0..) |neighbor_id, neighbor_idx| {
-                        // TODO: Skip distance calculation with first_time_candidate_flags?
-                        const vector = self.dataset.getUnchecked(neighbor_id);
-                        const distance = query_vector.sqdist(vector);
-                        const idx = internal_k + new_candidate_count * graph_degree + neighbor_idx;
-                        search_node_ids[idx] = neighbor_id;
-                        search_distances[idx] = distance;
-                    }
-                    new_candidate_count += 1;
-                }
+                std.debug.assert(new_candidate_count <= candidate_count);
                 log.debug("New candidate count: {}", .{new_candidate_count});
 
                 if (new_candidate_count == 0) {
                     log.debug("No more new candidate counts found, stop searching.", .{});
-                    break; // No new candidates, stop the search.
+                    break;
                 }
                 candidate_count = new_candidate_count;
             } else {
@@ -421,6 +496,261 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
             // Fill the neighbors and distances arrays with the top k nodes in the search buffer.
             @memcpy(neighbors, search_node_ids[0..k]);
             @memcpy(distances, search_distances[0..k]);
+        }
+
+        test "sortTopK sorts first internal_k entries" {
+            var buffer = try SearchBuffer.init(10, std.testing.allocator);
+            defer buffer.deinit(std.testing.allocator);
+
+            buffer.set(0, .{ .node_id = 5, .distance = 5.0 });
+            buffer.set(1, .{ .node_id = 3, .distance = 1.0 });
+            buffer.set(2, .{ .node_id = 8, .distance = 8.0 });
+            buffer.set(3, .{ .node_id = 1, .distance = 3.0 });
+            buffer.set(4, .{ .node_id = 2, .distance = 2.0 });
+            buffer.set(5, .{ .node_id = 9, .distance = 9.0 });
+            buffer.set(6, .{ .node_id = 6, .distance = 6.0 });
+            buffer.set(7, .{ .node_id = 4, .distance = 4.0 });
+            buffer.set(8, .{ .node_id = 7, .distance = 7.0 });
+            buffer.set(9, .{ .node_id = 0, .distance = 0.0 });
+
+            const internal_k = 4;
+            sortTopK(buffer, internal_k);
+
+            const distances: []const f32 = buffer.items(.distance);
+            const node_ids: []const usize = buffer.items(.node_id);
+
+            try std.testing.expectEqual(0.0, distances[0]);
+            try std.testing.expectEqual(1.0, distances[1]);
+            try std.testing.expectEqual(2.0, distances[2]);
+            try std.testing.expectEqual(3.0, distances[3]);
+
+            try std.testing.expectEqual(0, node_ids[0]);
+            try std.testing.expectEqual(3, node_ids[1]);
+            try std.testing.expectEqual(2, node_ids[2]);
+            try std.testing.expectEqual(1, node_ids[3]);
+
+            for (0..internal_k) |i| {
+                for (internal_k..buffer.len) |j| {
+                    try std.testing.expect(distances[i] <= distances[j]);
+                }
+            }
+        }
+
+        test "sortTopK handles already sorted buffer" {
+            var buffer = try SearchBuffer.init(5, std.testing.allocator);
+            defer buffer.deinit(std.testing.allocator);
+
+            buffer.set(0, .{ .node_id = 0, .distance = 1.0 });
+            buffer.set(1, .{ .node_id = 1, .distance = 2.0 });
+            buffer.set(2, .{ .node_id = 2, .distance = 3.0 });
+            buffer.set(3, .{ .node_id = 3, .distance = 4.0 });
+            buffer.set(4, .{ .node_id = 4, .distance = 5.0 });
+
+            const internal_k = 3;
+            sortTopK(buffer, internal_k);
+
+            const distances = buffer.items(.distance);
+            try std.testing.expectEqual(1.0, distances[0]);
+            try std.testing.expectEqual(2.0, distances[1]);
+            try std.testing.expectEqual(3.0, distances[2]);
+        }
+
+        test "sortTopK handles reverse sorted buffer" {
+            var buffer = try SearchBuffer.init(5, std.testing.allocator);
+            defer buffer.deinit(std.testing.allocator);
+
+            buffer.set(0, .{ .node_id = 4, .distance = 5.0 });
+            buffer.set(1, .{ .node_id = 3, .distance = 4.0 });
+            buffer.set(2, .{ .node_id = 2, .distance = 3.0 });
+            buffer.set(3, .{ .node_id = 1, .distance = 2.0 });
+            buffer.set(4, .{ .node_id = 0, .distance = 1.0 });
+
+            const internal_k = 3;
+            sortTopK(buffer, internal_k);
+
+            const distances = buffer.items(.distance);
+            try std.testing.expectEqual(1.0, distances[0]);
+            try std.testing.expectEqual(2.0, distances[1]);
+            try std.testing.expectEqual(3.0, distances[2]);
+        }
+
+        test "sortTopK with internal_k equals buffer length" {
+            var buffer = try SearchBuffer.init(4, std.testing.allocator);
+            defer buffer.deinit(std.testing.allocator);
+
+            buffer.set(0, .{ .node_id = 3, .distance = 9.0 });
+            buffer.set(1, .{ .node_id = 1, .distance = 3.0 });
+            buffer.set(2, .{ .node_id = 2, .distance = 5.0 });
+            buffer.set(3, .{ .node_id = 0, .distance = 1.0 });
+
+            const internal_k = 4;
+            sortTopK(buffer, internal_k);
+
+            const distances = buffer.items(.distance);
+            try std.testing.expectEqual(1.0, distances[0]);
+            try std.testing.expectEqual(3.0, distances[1]);
+            try std.testing.expectEqual(5.0, distances[2]);
+            try std.testing.expectEqual(9.0, distances[3]);
+        }
+
+        test "sortTopK prevents duplicate node IDs in top k" {
+            var buffer = try SearchBuffer.init(8, std.testing.allocator);
+            defer buffer.deinit(std.testing.allocator);
+
+            buffer.set(0, .{ .node_id = 10, .distance = 5.0 });
+            buffer.set(1, .{ .node_id = 20, .distance = 1.0 });
+            buffer.set(2, .{ .node_id = 30, .distance = 3.0 });
+            buffer.set(3, .{ .node_id = 10, .distance = 2.0 });
+            buffer.set(4, .{ .node_id = 40, .distance = 4.0 });
+            buffer.set(5, .{ .node_id = 50, .distance = 6.0 });
+            buffer.set(6, .{ .node_id = 20, .distance = 7.0 });
+            buffer.set(7, .{ .node_id = 60, .distance = 8.0 });
+
+            const internal_k = 4;
+            sortTopK(buffer, internal_k);
+
+            const node_ids = buffer.items(.node_id);
+
+            try std.testing.expectEqual(20, node_ids[0]);
+            try std.testing.expectEqual(10, node_ids[1]);
+            try std.testing.expectEqual(30, node_ids[2]);
+            try std.testing.expectEqual(40, node_ids[3]);
+
+            var seen = std.AutoArrayHashMap(usize, void).init(std.testing.allocator);
+            defer seen.deinit();
+
+            for (0..internal_k) |i| {
+                try std.testing.expect(!seen.contains(node_ids[i]));
+                try seen.put(node_ids[i], {});
+            }
+        }
+
+        test "initializeSearchBuffer fills buffer correctly" {
+            const TestN: usize = 128;
+            const TestDataset = mod_dataset.Dataset(f32, TestN);
+
+            const num_nodes: usize = 10;
+            const graph_degree: usize = 2;
+            const internal_k: usize = 4;
+            const search_width: usize = 2;
+            const search_buffer_size = internal_k + search_width * graph_degree;
+
+            var prng = std.Random.DefaultPrng.init(42);
+            const random = prng.random();
+            var dataset = try TestDataset.initRandom(num_nodes, random, std.testing.allocator);
+            defer dataset.deinit(std.testing.allocator);
+
+            const graph = try std.testing.allocator.alloc(usize, num_nodes * graph_degree);
+            defer std.testing.allocator.free(graph);
+            for (0..num_nodes) |i| {
+                graph[i * graph_degree] = (i + 1) % num_nodes;
+                graph[i * graph_degree + 1] = (i + 2) % num_nodes;
+            }
+
+            const searcher = Self{
+                .graph = graph,
+                .dataset = &dataset,
+                .num_nodes = num_nodes,
+                .num_neighbors_per_node = graph_degree,
+            };
+
+            var buffer = try SearchBuffer.init(search_buffer_size, std.testing.allocator);
+            defer buffer.deinit(std.testing.allocator);
+
+            const node_ids_random = [_]usize{ 3, 7, 1, 9, 4, 2, 8, 0, 5, 6 };
+            const seed: u64 = 42;
+
+            const query_vector = dataset.getUnchecked(0);
+
+            searcher.initializeSearchBuffer(
+                query_vector,
+                &node_ids_random,
+                seed,
+                buffer,
+                internal_k,
+            );
+
+            const distances: []const f32 = buffer.items(.distance);
+            const node_ids: []const usize = buffer.items(.node_id);
+
+            for (0..internal_k) |i| {
+                try std.testing.expectEqual(num_nodes, node_ids[i]);
+                try std.testing.expectEqual(std.math.floatMax(f32), distances[i]);
+            }
+
+            for (internal_k..search_buffer_size) |i| {
+                try std.testing.expect(node_ids[i] < num_nodes);
+                try std.testing.expect(distances[i] >= 0.0);
+            }
+        }
+
+        test "updateSearchCandidates expands parent nodes to neighbors" {
+            const TestN: usize = 128;
+            const TestDataset = mod_dataset.Dataset(f32, TestN);
+
+            const num_nodes: usize = 4;
+            const graph_degree: usize = 2;
+            const internal_k: usize = 2;
+            const search_width: usize = 2;
+
+            var prng = std.Random.DefaultPrng.init(42);
+            const random = prng.random();
+            const dataset = try TestDataset.initRandom(num_nodes, random, std.testing.allocator);
+            defer dataset.deinit(std.testing.allocator);
+
+            const graph = [_]usize{
+                1, 2, // neighbors of node 0
+                0, 3, // neighbors of node 1
+                0, 3, // neighbors of node 2
+                1, 2, // neighbors of node 3
+            };
+
+            const searcher = Self{
+                .graph = &graph,
+                .dataset = &dataset,
+                .num_nodes = num_nodes,
+                .num_neighbors_per_node = graph_degree,
+            };
+
+            const search_buffer_size = internal_k + search_width * graph_degree;
+            var search_buffer = try SearchBuffer.init(search_buffer_size, std.testing.allocator);
+            defer search_buffer.deinit(std.testing.allocator);
+
+            search_buffer.set(0, .{ .node_id = 0, .distance = 0.0 });
+            search_buffer.set(1, .{ .node_id = 1, .distance = 1.0 });
+
+            const first_time_parent_flags = try std.testing.allocator.alloc(bool, num_nodes);
+            defer std.testing.allocator.free(first_time_parent_flags);
+            @memset(first_time_parent_flags, false);
+
+            const first_time_candidate_flags = try std.testing.allocator.alloc(bool, num_nodes);
+            defer std.testing.allocator.free(first_time_candidate_flags);
+            @memset(first_time_candidate_flags, false);
+
+            const query_vector = dataset.getUnchecked(0);
+
+            const new_count = searcher.updateSearchCandidates(
+                query_vector,
+                search_buffer,
+                first_time_parent_flags,
+                first_time_candidate_flags,
+                internal_k,
+                search_width,
+            );
+
+            try std.testing.expectEqual(2, new_count);
+
+            const distances: []const f32 = search_buffer.items(.distance);
+            const node_ids: []const usize = search_buffer.items(.node_id);
+
+            try std.testing.expectEqual(1, node_ids[internal_k]);
+            try std.testing.expectEqual(2, node_ids[internal_k + 1]);
+            try std.testing.expectEqual(0, node_ids[internal_k + 2]);
+            try std.testing.expectEqual(3, node_ids[internal_k + 3]);
+
+            for (internal_k..internal_k + new_count * graph_degree) |i| {
+                try std.testing.expect(distances[i] >= 0.0);
+            }
         }
     };
 }

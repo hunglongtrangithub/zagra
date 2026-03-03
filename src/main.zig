@@ -258,9 +258,9 @@ pub fn main() !void {
 
     const search_config = zagra.index.SearchConfig{
         .k = k,
-        .internal_k = 64,
+        .internal_k = k * 2,
         .max_iterations = 20,
-        .search_width = 4,
+        .search_width = k,
         .num_threads = 1,
     };
 
