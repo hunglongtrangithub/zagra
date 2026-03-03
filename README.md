@@ -28,16 +28,17 @@ To achieve this, I chose Zig to leverages Zig's unique capabilities, such as **c
 - [x] Lock-free, multi-threaded graph operations
 - [x] Unit tests for correctness verification
 
-### Phase 3: Graph Optimization (Ongoing)
+### Phase 3: Graph Optimization (Finished)
 - [x] Implement graph optimization techniques from CAGRA paper
   - [x] Rank-based edge reordering
   - [x] Reversed graph construction
   - [x] Reordered graph and reversed graph combination
 - [x] Graph serialization and de-serialization for persistence
-- [ ] Unit tests for graph optimization correctness
+- [x] Unit tests for graph optimization correctness
 
-### Phase 4: Search Algorithm (Planned)
-- [ ] Implement search algorithm as described in CAGRA paper
+### Phase 4: Search Algorithm (Ongoing)
+- [x] Implement basic search algorithm
+- [ ] Optimize search for CPU
 
 ### Phase 5: Benchmarking & Evaluation (Planned)
 - [ ] Benchmark against HNSW
