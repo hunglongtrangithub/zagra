@@ -239,12 +239,11 @@ pub fn Index(comptime T: type, comptime N: usize) type {
                 else => unreachable,
             }
 
-            // Validate all neighbor IDs are in range
-            for (graph_data) |neighbor_id| {
-                if (neighbor_id >= expected_num_nodes) {
-                    return error.InvalidNeighborId;
-                }
-            }
+            if (!isValidGraph(
+                graph_data,
+                num_nodes,
+                degree,
+            )) return error.InvalidGraph;
 
             return .{ graph_data, degree };
         }
