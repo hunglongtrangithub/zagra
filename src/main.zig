@@ -149,8 +149,8 @@ pub fn main() !void {
         T,
         std.mem.Alignment.@"64",
         vector_count * N,
-    ) catch {
-        std.debug.print("Dataset size too large. Please try smaller number of vectors.\n", .{});
+    ) catch |e| {
+        std.debug.print("Dataset size too large ({}). Please try smaller number of vectors.\n", .{e});
         return;
     };
     errdefer allocator.free(vectors_buffer);
@@ -269,6 +269,7 @@ pub fn main() !void {
     try stdout.print("k (nearest neighbors): {}\n", .{k});
     try stdout.flush();
 
+    timer.reset();
     const search_result = index.search(
         queries_array.asConst(),
         search_config,
@@ -287,6 +288,8 @@ pub fn main() !void {
             else => return e,
         }
     };
+    const search_time = timer.read();
+    std.debug.print("Search time: {}ms\n", .{search_time / std.time.ns_per_ms});
     defer search_result.neighbors.deinit(allocator);
     defer search_result.distances.deinit(allocator);
 
