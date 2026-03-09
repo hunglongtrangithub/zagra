@@ -49,7 +49,11 @@ fn runBenchmark(
     training_config.max_iterations = config.nn_descent_max_iterations;
     training_config.delta = config.nn_descent_delta;
 
-    var nn_descent = try NNDescent.init(dataset, training_config, allocator);
+    var nn_descent = try NNDescent.init(
+        &dataset,
+        training_config,
+        allocator,
+    );
     defer nn_descent.deinit(allocator);
 
     nn_descent.train();
