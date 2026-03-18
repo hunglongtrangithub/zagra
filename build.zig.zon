@@ -6,7 +6,7 @@
     .dependencies = .{
         .znpy = .{
             .url = "https://github.com/hunglongtrangithub/znpy/archive/refs/heads/main.tar.gz",
-            .hash = "znpy-0.0.0-QOH-rJ85BAA5P_ZukBSkAwQB1mhb8N0znNnnGxprafQe",
+            .hash = "znpy-0.0.0-QOH-rEA7BAAyVR8toL642dZljVYNWZEe0CmE41Y_fL80",
         },
     },
     .paths = .{

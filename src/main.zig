@@ -34,7 +34,7 @@ pub fn main() !void {
     _ = args.skip();
 
     const vector_count_str = args.next() orelse {
-        std.debug.print("vector count needed.\n{s}", .{HELP});
+        std.debug.print("vector count needed.\n{s}\n", .{HELP});
         return;
     };
     const vector_count = std.fmt.parseInt(usize, vector_count_str, 10) catch |e| {
@@ -46,7 +46,7 @@ pub fn main() !void {
     };
 
     const graph_degree_str = args.next() orelse {
-        std.debug.print("graph degree needed.\n{s}", .{HELP});
+        std.debug.print("graph degree needed.\n{s}\n", .{HELP});
         return;
     };
     const graph_degree = std.fmt.parseInt(usize, graph_degree_str, 10) catch |e| {
@@ -121,7 +121,7 @@ pub fn main() !void {
                 return;
             };
         } else {
-            std.debug.print("Unknown argument: {s}\n{s}", .{ arg, HELP });
+            std.debug.print("Unknown argument: {s}\n{s}\n", .{ arg, HELP });
             return;
         }
     }
@@ -260,7 +260,7 @@ pub fn main() !void {
         .k = k,
         .internal_k = k * 2,
         .max_iterations = 20,
-        .search_width = k,
+        .search_width = 1,
         .num_threads = 1,
     };
 
