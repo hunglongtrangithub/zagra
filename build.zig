@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const benches = [_][]const u8{
+const benchmarks = [_][]const u8{
     "vector_simd",
     "nn_descent",
     "detour_count",
@@ -26,7 +26,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    inline for (benches) |bench_name| {
+    inline for (benchmarks) |bench_name| {
         const bench_exe = b.addExecutable(.{
             .name = bench_name,
             .root_module = b.createModule(.{
@@ -40,14 +40,21 @@ pub fn build(b: *std.Build) void {
             }),
         });
 
-        const run_cmd = b.addRunArtifact(bench_exe);
-        const run_step = b.step("bench_" ++ bench_name, "Run the " ++ bench_name ++ " bench");
-        run_step.dependOn(&run_cmd.step);
+        const bench_cmd = b.addRunArtifact(bench_exe);
+        if (b.args) |args| bench_cmd.addArgs(args);
 
-        if (b.args) |args| {
-            run_cmd.addArgs(args);
-        }
+        const bench_step = b.step("bench_" ++ bench_name, "Run the " ++ bench_name ++ " bench");
+        bench_step.dependOn(&bench_cmd.step);
     }
+    const list_benchmarks_step = b.step("bench", "List all benchmarks");
+    list_benchmarks_step.makeFn = struct {
+        fn make(_: *std.Build.Step, _: std.Build.Step.MakeOptions) anyerror!void {
+            std.debug.print("Available benchmarks:\n", .{});
+            inline for (benchmarks) |bench_name| {
+                std.debug.print("- {s}\n", .{bench_name});
+            }
+        }
+    }.make;
 
     const exe = b.addExecutable(.{
         .name = "zagra",

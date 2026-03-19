@@ -1,5 +1,7 @@
 const std = @import("std");
 
+pub const csv_results_dir = "benches/results";
+
 pub fn writeCsv(
     writer: *std.io.Writer,
     headers: []const []const u8,

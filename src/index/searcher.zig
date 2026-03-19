@@ -104,8 +104,11 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
 
             const num_queries = verifyQueriesArray(queries) orelse return Error.InvalidQueriesArray;
             // Will seed each query with a different seed: from seed to seed + num_queries - 1. Guard against overflow of seed.
-            if (num_queries > std.math.maxInt(u64)) return Error.NumQueriesTooLarge;
-            _ = std.math.add(u64, seed, @intCast(num_queries -| 1)) catch return Error.NumQueriesTooLarge;
+            _ = std.math.add(
+                u64,
+                seed,
+                std.math.cast(u64, num_queries -| 1) orelse return Error.NumQueriesTooLarge,
+            ) catch return Error.NumQueriesTooLarge;
 
             // Number of queries per block. 0 when number of queries or threads is 0.
             const num_queries_per_block = @min(config.num_threads, num_queries);
@@ -490,7 +493,7 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
                 }
                 candidate_count = new_candidate_count;
             } else {
-                log.debug("Search want through max {} iterations.", .{config.max_iterations});
+                log.debug("Search went through max {} iterations.", .{config.max_iterations});
             }
 
             // Fill the neighbors and distances arrays with the top k nodes in the search buffer.

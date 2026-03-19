@@ -111,8 +111,8 @@ fn benchmarkComparison(
     var prng = std.Random.DefaultPrng.init(42);
     const random = prng.random();
 
-    const v1 = VecType.initRandom(&random);
-    const v2 = VecType.initRandom(&random);
+    const v1 = VecType.initRandom(random);
+    const v2 = VecType.initRandom(random);
 
     try writer.print("\n" ++ "=" ** 80 ++ "\n", .{});
     try writer.print("Benchmarking Vector({}, {d})\n", .{ T, N });
@@ -227,7 +227,7 @@ pub fn main() !void {
 
     try stdout.flush();
 
-    const results_dir = "benches/results";
+    const results_dir = csv.csv_results_dir;
     std.fs.cwd().access(results_dir, .{}) catch |e| switch (e) {
         error.FileNotFound => try std.fs.cwd().makeDir(results_dir),
         else => return e,

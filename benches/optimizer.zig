@@ -165,7 +165,7 @@ pub fn main() !void {
         }
     }
 
-    const results_dir = "benches/results";
+    const results_dir = csv.csv_results_dir;
     std.fs.cwd().access(results_dir, .{}) catch |e| switch (e) {
         error.FileNotFound => try std.fs.cwd().makeDir(results_dir),
         else => return e,
