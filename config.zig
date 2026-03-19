@@ -1,1 +1,1 @@
-pub const BENCH_DIR = "benches";
+pub const BENCH_DIR = "bench";
