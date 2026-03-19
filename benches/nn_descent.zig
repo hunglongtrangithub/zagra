@@ -35,7 +35,7 @@ fn runBenchmark(
     allocator: std.mem.Allocator,
 ) !BenchmarkResult {
     const NNDescent = zagra.index.NNDescent(T, N);
-    var training_config = zagra.index.TrainingConfig.init(
+    var training_config = zagra.index.NNDTrainingConfig.init(
         config.num_threads,
         dataset.len,
         null,
@@ -45,7 +45,7 @@ fn runBenchmark(
     training_config.max_iterations = config.max_iterations;
     training_config.delta = config.delta;
 
-    var nn_descent = try NNDescent.init(dataset, training_config, allocator);
+    var nn_descent = try NNDescent.init(&dataset, training_config, allocator);
     defer nn_descent.deinit(allocator);
 
     const timing = try nn_descent.trainWithTiming(allocator);
@@ -130,7 +130,7 @@ pub fn main() !void {
     }
 
     // Write results to CSV files
-    const results_dir = csv.csv_results_dir;
+    const results_dir = csv.CSV_RESULTS_DIR;
     std.fs.cwd().access(results_dir, .{}) catch |e| switch (e) {
         error.FileNotFound => try std.fs.cwd().makeDir(results_dir),
         else => return e,

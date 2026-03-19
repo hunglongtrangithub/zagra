@@ -117,12 +117,14 @@ fn benchmarkComparison(
     try writer.print("\n" ++ "=" ** 80 ++ "\n", .{});
     try writer.print("Benchmarking Vector({}, {d})\n", .{ T, N });
     try writer.print("\n" ++ "=" ** 80 ++ "\n", .{});
+    try writer.flush();
 
     // Benchmark naive implementation
     const naive_config = BenchmarkConfig{
         .name = "Naive Implementation",
     };
     try writer.print("Bench Config: warmup_iterations={d}, measurement_iterations={d}\n", .{ naive_config.warmup_iterations, naive_config.measurement_iterations });
+    try writer.flush();
     const naive_result = try runBenchmark(
         T,
         VecType,
@@ -132,11 +134,13 @@ fn benchmarkComparison(
         allocator,
     );
     try naive_result.print(writer, "Naive Implementation");
+    try writer.flush();
 
     try writer.print("\n", .{});
 
     // Benchmark SIMD implementation
     try writer.print("Bench Config: warmup_iterations={d}, measurement_iterations={d}\n", .{ naive_config.warmup_iterations, naive_config.measurement_iterations });
+    try writer.flush();
     const simd_config = BenchmarkConfig{
         .name = "SIMD Implementation",
     };
@@ -149,6 +153,7 @@ fn benchmarkComparison(
         allocator,
     );
     try simd_result.print(writer, "SIMD Implementation");
+    try writer.flush();
 
     // Calculate speedup
     const speedup = @as(f64, @floatFromInt(naive_result.mean_ns)) /
@@ -227,7 +232,7 @@ pub fn main() !void {
 
     try stdout.flush();
 
-    const results_dir = csv.csv_results_dir;
+    const results_dir = csv.CSV_RESULTS_DIR;
     std.fs.cwd().access(results_dir, .{}) catch |e| switch (e) {
         error.FileNotFound => try std.fs.cwd().makeDir(results_dir),
         else => return e,

@@ -1,9 +1,9 @@
 const std = @import("std");
+const config = @import("config.zig");
 
 const benchmarks = [_][]const u8{
     "vector_simd",
     "nn_descent",
-    "detour_count",
     "optimizer",
 };
 
@@ -11,13 +11,14 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Create znpy dependency
     const znpy_dep = b.dependency("znpy", .{
         .target = target,
         .optimize = optimize,
     });
-
     const znpy_mod = znpy_dep.module("znpy");
 
+    // Create zagra module
     const zagra_mod = b.addModule("zagra", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -26,37 +27,8 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    inline for (benchmarks) |bench_name| {
-        const bench_exe = b.addExecutable(.{
-            .name = bench_name,
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("benches/" ++ bench_name ++ ".zig"),
-                .target = target,
-                // Always compile to ReleaseFast
-                .optimize = std.builtin.OptimizeMode.ReleaseFast,
-                .imports = &.{
-                    .{ .name = "zagra", .module = zagra_mod },
-                },
-            }),
-        });
-
-        const bench_cmd = b.addRunArtifact(bench_exe);
-        if (b.args) |args| bench_cmd.addArgs(args);
-
-        const bench_step = b.step("bench_" ++ bench_name, "Run the " ++ bench_name ++ " bench");
-        bench_step.dependOn(&bench_cmd.step);
-    }
-    const list_benchmarks_step = b.step("bench", "List all benchmarks");
-    list_benchmarks_step.makeFn = struct {
-        fn make(_: *std.Build.Step, _: std.Build.Step.MakeOptions) anyerror!void {
-            std.debug.print("Available benchmarks:\n", .{});
-            inline for (benchmarks) |bench_name| {
-                std.debug.print("- {s}\n", .{bench_name});
-            }
-        }
-    }.make;
-
-    const exe = b.addExecutable(.{
+    // Create zagra executable
+    const zagra_exe = b.addExecutable(.{
         .name = "zagra",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
@@ -68,32 +40,72 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    b.installArtifact(zagra_exe);
 
-    b.installArtifact(exe);
-
-    const run_step = b.step("run", "Run the app");
-
-    const run_cmd = b.addRunArtifact(exe);
-    run_step.dependOn(&run_cmd.step);
-
+    // Create run step for the main executable
+    // Binary is installed first before running
+    const run_cmd = b.addRunArtifact(zagra_exe);
+    if (b.args) |args| run_cmd.addArgs(args);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    const run_step = b.step("run", "Run the app");
+    run_step.dependOn(&run_cmd.step);
 
+    // Create config module
+    // Shared configuration for benchmarks
+    const config_mod = b.addModule("config", .{
+        .root_source_file = b.path("config.zig"),
+        .target = target,
+    });
+
+    // Create benchmark executables and run steps
+    // Binary is installed first before running
+    inline for (benchmarks) |bench_name| {
+        const bench_exe_name = "bench_" ++ bench_name;
+        const bench_exe = b.addExecutable(.{
+            .name = bench_exe_name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(config.BENCH_DIR ++ "/" ++ bench_name ++ ".zig"),
+                .target = target,
+                // Always compile to ReleaseFast
+                .optimize = std.builtin.OptimizeMode.ReleaseFast,
+                .imports = &.{
+                    .{ .name = "zagra", .module = zagra_mod },
+                    .{ .name = "config", .module = config_mod },
+                },
+            }),
+        });
+        const install_step = b.addInstallArtifact(bench_exe, .{
+            .dest_dir = .default,
+        });
+
+        const bench_cmd = b.addRunArtifact(bench_exe);
+        if (b.args) |args| bench_cmd.addArgs(args);
+
+        const bench_step = b.step(bench_exe_name, "Run the " ++ bench_name ++ " bench");
+        bench_step.dependOn(&bench_cmd.step);
+        bench_step.dependOn(&install_step.step);
+    }
+    // Add a step to list all benchmarks
+    const list_benchmarks_step = b.step("bench", "List all benchmarks");
+    list_benchmarks_step.makeFn = struct {
+        fn make(_: *std.Build.Step, _: std.Build.Step.MakeOptions) anyerror!void {
+            std.debug.print("Available benchmarks:\n", .{});
+            inline for (benchmarks) |bench_name| {
+                std.debug.print("- {s}\n", .{bench_name});
+            }
+        }
+    }.make;
+
+    // Add test steps for both the module and the executable
     const mod_tests = b.addTest(.{
         .root_module = zagra_mod,
     });
-
     const run_mod_tests = b.addRunArtifact(mod_tests);
-
     const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
+        .root_module = zagra_exe.root_module,
     });
-
     const run_exe_tests = b.addRunArtifact(exe_tests);
-
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);

@@ -1,6 +1,7 @@
 const std = @import("std");
+const config = @import("config");
 
-pub const csv_results_dir = "benches/results";
+pub const CSV_RESULTS_DIR = config.BENCH_DIR ++ "/results";
 
 pub fn writeCsv(
     writer: *std.io.Writer,
