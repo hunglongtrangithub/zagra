@@ -1,10 +1,11 @@
 const std = @import("std");
 const config = @import("config.zig");
 
+/// List of benchmarks in the bench directory
 const benchmarks = [_][]const u8{
-    "vector_simd",
-    "nn_descent",
-    "optimizer",
+    "bench_vector_simd",
+    "bench_nn_descent",
+    "bench_optimizer",
 };
 
 pub fn build(b: *std.Build) void {
@@ -61,9 +62,8 @@ pub fn build(b: *std.Build) void {
     // Create benchmark executables and run steps
     // Binary is installed first before running
     inline for (benchmarks) |bench_name| {
-        const bench_exe_name = "bench_" ++ bench_name;
         const bench_exe = b.addExecutable(.{
-            .name = bench_exe_name,
+            .name = bench_name,
             .root_module = b.createModule(.{
                 .root_source_file = b.path(config.BENCH_DIR ++ "/" ++ bench_name ++ ".zig"),
                 .target = target,
@@ -82,7 +82,7 @@ pub fn build(b: *std.Build) void {
         const bench_cmd = b.addRunArtifact(bench_exe);
         if (b.args) |args| bench_cmd.addArgs(args);
 
-        const bench_step = b.step(bench_exe_name, "Run the " ++ bench_name ++ " bench");
+        const bench_step = b.step(bench_name, "Run the " ++ bench_name ++ " bench");
         bench_step.dependOn(&bench_cmd.step);
         bench_step.dependOn(&install_step.step);
     }
