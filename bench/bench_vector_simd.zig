@@ -212,12 +212,12 @@ pub fn main() !void {
     defer args.deinit();
     const exe_path = args.next() orelse @src().file;
 
-    const result_prefix = args.next();
-    help.checkHelp(result_prefix, exe_path);
-
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
+
+    const result_prefix = args.next();
+    help.checkHelp(stdout, result_prefix, exe_path);
 
     try stdout.print("\n", .{});
     try stdout.print("SIMD Vector Distance Benchmark Suite\n", .{});
@@ -296,5 +296,7 @@ pub fn main() !void {
         );
     }
     try file.flush();
-    std.debug.print("Results written to {s}\n", .{csv_file_name});
+
+    try stdout.print("Results written to {s}\n", .{csv_file_name});
+    try stdout.flush();
 }

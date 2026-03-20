@@ -558,7 +558,7 @@ pub fn NNDescent(
                         },
                     );
                     if (!added) {
-                        std.debug.print(
+                        log.err(
                             \\Failed to add random neighbor for node_id: {} - neighbor_id: {} - distance: {}.
                             \\num_nodes: {} node's neighbors: {any}
                             \\node's distances: {any}

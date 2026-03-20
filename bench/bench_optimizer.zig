@@ -104,14 +104,16 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const result_name = "optimizer_summary";
-
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
     const exe_path = args.next() orelse @src().file;
 
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
     const result_prefix = args.next();
-    help.checkHelp(result_prefix, exe_path);
+    help.checkHelp(stdout, result_prefix, exe_path);
 
     const T: type = f32;
     const N: usize = 128;
@@ -123,7 +125,8 @@ pub fn main() !void {
     };
 
     const max_dataset_size = bench_config.vector_counts[bench_config.vector_counts.len - 1];
-    std.debug.print("Allocating maximum dataset of {} vectors...\n", .{max_dataset_size});
+    try stdout.print("Allocating maximum dataset of {} vectors...\n", .{max_dataset_size});
+    try stdout.flush();
     const vectors_buffer = try allocator.alignedAlloc(
         T,
         std.mem.Alignment.@"64",
@@ -136,7 +139,9 @@ pub fn main() !void {
     for (0..vectors_buffer.len) |i| {
         vectors_buffer[i] = random.float(T) * 100;
     }
-    std.debug.print("Running benchmarks...\n\n", .{});
+
+    try stdout.print("Running benchmarks...\n\n", .{});
+    try stdout.flush();
 
     var all_results = std.ArrayList(BenchmarkResult).empty;
     defer {
@@ -148,8 +153,8 @@ pub fn main() !void {
 
     for (bench_config.vector_counts) |vector_count| {
         for (bench_config.output_graph_degrees) |output_degree| {
-            std.debug.print("Benchmarking: {} vectors, output degree {}...\n", .{ vector_count, output_degree });
-
+            try stdout.print("Benchmarking: {} vectors, output degree {}...\n", .{ vector_count, output_degree });
+            try stdout.flush();
             const sliced_dataset = zagra.dataset.Dataset(T, N){
                 .data_buffer = vectors_buffer[0 .. vector_count * N],
                 .len = vector_count,
@@ -173,6 +178,7 @@ pub fn main() !void {
         else => return e,
     };
 
+    const result_name = "optimizer_summary";
     const summary_file_name = if (result_prefix) |prefix|
         try std.fmt.allocPrint(allocator, "{s}/{s}_{s}.csv", .{ results_dir, prefix, result_name })
     else
@@ -213,5 +219,6 @@ pub fn main() !void {
     }
     try summary_csv.flush();
 
-    std.debug.print("Benchmarks completed.\nSummary written to {s}\n", .{summary_file_name});
+    try stdout.print("Benchmarks completed.\nSummary written to {s}\n", .{summary_file_name});
+    try stdout.flush();
 }

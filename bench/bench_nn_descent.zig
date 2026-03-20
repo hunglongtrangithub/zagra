@@ -63,15 +63,16 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const result_name = "nn_descent_summary";
-    const iterations_name = "nn_descent_iterations";
-
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
     const exe_path = args.next() orelse @src().file;
 
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
     const result_prefix = args.next();
-    help.checkHelp(result_prefix, exe_path);
+    help.checkHelp(stdout, result_prefix, exe_path);
 
     const T: type = f32; // Element type
     const N: usize = 128; // Vector length
@@ -85,20 +86,24 @@ pub fn main() !void {
 
     // Allocate the largest vector buffer upfront
     const max_dataset_size = bench_config.vector_counts[bench_config.vector_counts.len - 1];
-    std.debug.print("Allocating maximum dataset of {} vectors...\n", .{max_dataset_size});
+    try stdout.print("Allocating maximum dataset of {} vectors...\n", .{max_dataset_size});
+    try stdout.flush();
     const vectors_buffer = try allocator.alignedAlloc(
         T,
         std.mem.Alignment.@"64",
         max_dataset_size * N,
     );
     defer allocator.free(vectors_buffer);
+
     // Fill with synthetic data
     var prng = std.Random.DefaultPrng.init(bench_config.seed);
     const random = prng.random();
     for (0..vectors_buffer.len) |i| {
         vectors_buffer[i] = random.float(T) * 100;
     }
-    std.debug.print("Running benchmarks...\n\n", .{});
+
+    try stdout.print("Running benchmarks...\n\n", .{});
+    try stdout.flush();
 
     var all_results = std.ArrayList(BenchmarkResult).empty;
     defer {
@@ -111,7 +116,8 @@ pub fn main() !void {
     // Run benchmarks
     for (bench_config.vector_counts) |vector_count| {
         for (bench_config.graph_degrees) |graph_degree| {
-            std.debug.print("Benchmarking: {} vectors, degree {}...\n", .{ vector_count, graph_degree });
+            try stdout.print("Benchmarking: {} vectors, degree {}...\n", .{ vector_count, graph_degree });
+            try stdout.flush();
 
             // Create a slice of the dataset
             const sliced_dataset = zagra.dataset.Dataset(T, N){
@@ -139,10 +145,11 @@ pub fn main() !void {
     };
 
     // Run summary
+    const summary_name = "nn_descent_summary";
     const summary_file_name = if (result_prefix) |prefix|
-        try std.fmt.allocPrint(allocator, "{s}/{s}_{s}.csv", .{ results_dir, prefix, result_name })
+        try std.fmt.allocPrint(allocator, "{s}/{s}_{s}.csv", .{ results_dir, prefix, summary_name })
     else
-        try std.fmt.allocPrint(allocator, "{s}/{s}.csv", .{ results_dir, result_name });
+        try std.fmt.allocPrint(allocator, "{s}/{s}.csv", .{ results_dir, summary_name });
     const summary_csv_file = try std.fs.cwd().createFile(summary_file_name, .{});
     defer summary_csv_file.close();
 
@@ -161,6 +168,7 @@ pub fn main() !void {
     try csv.writeHeaders(summary_csv, summary_headers);
 
     // Iteration details
+    const iterations_name = "nn_descent_iterations";
     const iterations_file_name = if (result_prefix) |prefix|
         try std.fmt.allocPrint(allocator, "{s}/{s}_{s}.csv", .{ results_dir, prefix, iterations_name })
     else
@@ -219,8 +227,9 @@ pub fn main() !void {
     try summary_csv.flush();
     try iterations_csv.flush();
 
-    std.debug.print(
+    try stdout.print(
         "Benchmarks completed.\nSummary written to {s}\nIteration details written to {s}\n",
         .{ summary_file_name, iterations_file_name },
     );
+    try stdout.flush();
 }
