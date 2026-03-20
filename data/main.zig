@@ -138,7 +138,7 @@ const VectorSet = enum {
             try checkExecutable(exe, allocator);
         }
 
-        const dataset_dir_str = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ config.DATASET_DIR, @tagName(self) });
+        const dataset_dir_str = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ config.DATA_DIR, @tagName(self) });
         defer allocator.free(dataset_dir_str);
         const dataset_dir = try makeDatasetDir(dataset_dir_str);
 

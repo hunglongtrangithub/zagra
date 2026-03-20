@@ -112,7 +112,7 @@ pub fn build(b: *std.Build) void {
     const downloader_exe = b.addExecutable(.{
         .name = "textmexsteal",
         .root_module = b.createModule(.{
-            .root_source_file = b.path(config.DATASET_DIR ++ "/main.zig"),
+            .root_source_file = b.path(config.DATA_DIR ++ "/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
