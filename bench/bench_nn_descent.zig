@@ -136,6 +136,7 @@ pub fn main() !void {
         else => return e,
     };
 
+    // Run summary
     const summary_file_name = if (result_prefix) |prefix|
         try std.fmt.allocPrint(allocator, "{s}/{s}_{s}.csv", .{ results_dir, prefix, result_name })
     else
@@ -147,6 +148,17 @@ pub fn main() !void {
     var summary_csv_writer = summary_csv_file.writer(&summary_csv_buffer);
     const summary_csv = &summary_csv_writer.interface;
 
+    const summary_headers = &[_][]const u8{
+        "vector_count",
+        "graph_degree",
+        "total_training_s",
+        "init_random_s",
+        "num_iterations_completed",
+        "converged",
+    };
+    try csv.writeHeaders(summary_csv, summary_headers);
+
+    // Iteration details
     const iterations_file_name = if (result_prefix) |prefix|
         try std.fmt.allocPrint(allocator, "{s}/{s}_{s}.csv", .{ results_dir, prefix, iterations_name })
     else
@@ -158,32 +170,48 @@ pub fn main() !void {
     var iterations_csv_writer = iterations_csv_file.writer(&iterations_csv_buffer);
     const iterations_csv = &iterations_csv_writer.interface;
 
-    try csv.writeHeaders(iterations_csv, &[_][]const u8{
-        "vector_count", "graph_degree", "iteration", "sample_s", "gen_s", "apply_s", "total_s", "updates",
-    });
+    const iterations_headers = &[_][]const u8{
+        "vector_count",
+        "graph_degree",
+        "iteration",
+        "sample_s",
+        "gen_s",
+        "apply_s",
+        "total_s",
+        "updates",
+    };
+    try csv.writeHeaders(iterations_csv, iterations_headers);
 
     for (all_results.items) |result| {
         const train_timing = result.timing;
-        try csv.writeRow(summary_csv, .{
-            result.vector_count,
-            result.graph_degree,
-            @as(f64, @floatFromInt(train_timing.total_training_ns)) / 1_000_000_000.0,
-            @as(f64, @floatFromInt(train_timing.init_random_ns)) / 1_000_000_000.0,
-            train_timing.num_iterations_completed,
-            if (train_timing.converged) "true" else "false",
-        });
-
-        for (train_timing.iterations.items) |iter_timing| {
-            try csv.writeRow(iterations_csv, .{
+        try csv.writeRow(
+            summary_csv,
+            .{
                 result.vector_count,
                 result.graph_degree,
-                iter_timing.iteration,
-                @as(f64, @floatFromInt(iter_timing.sample_candidates_ns)) / 1_000_000_000.0,
-                @as(f64, @floatFromInt(iter_timing.generate_proposals_ns)) / 1_000_000_000.0,
-                @as(f64, @floatFromInt(iter_timing.apply_updates_ns)) / 1_000_000_000.0,
-                @as(f64, @floatFromInt(iter_timing.total_iteration_ns)) / 1_000_000_000.0,
-                iter_timing.updates_count,
-            });
+                @as(f64, @floatFromInt(train_timing.total_training_ns)) / std.time.ns_per_s,
+                @as(f64, @floatFromInt(train_timing.init_random_ns)) / std.time.ns_per_s,
+                train_timing.num_iterations_completed,
+                if (train_timing.converged) "true" else "false",
+            },
+            summary_headers.len,
+        );
+
+        for (train_timing.iterations.items) |iter_timing| {
+            try csv.writeRow(
+                iterations_csv,
+                .{
+                    result.vector_count,
+                    result.graph_degree,
+                    iter_timing.iteration,
+                    @as(f64, @floatFromInt(iter_timing.sample_candidates_ns)) / std.time.ns_per_s,
+                    @as(f64, @floatFromInt(iter_timing.generate_proposals_ns)) / std.time.ns_per_s,
+                    @as(f64, @floatFromInt(iter_timing.apply_updates_ns)) / std.time.ns_per_s,
+                    @as(f64, @floatFromInt(iter_timing.total_iteration_ns)) / std.time.ns_per_s,
+                    iter_timing.updates_count,
+                },
+                iterations_headers.len,
+            );
         }
     }
     try summary_csv.flush();

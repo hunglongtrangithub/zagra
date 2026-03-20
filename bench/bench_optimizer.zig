@@ -181,21 +181,33 @@ pub fn main() !void {
     var summary_csv_writer = summary_csv_file.writer(&summary_csv_buffer);
     const summary_csv = &summary_csv_writer.interface;
 
-    try csv.writeHeaders(summary_csv, &[_][]const u8{
-        "vector_count", "output_degree", "intermediate_degree", "total_s", "detour_count_s", "prune_s", "reverse_graph_s", "combine_s",
-    });
+    const headers = &[_][]const u8{
+        "vector_count",
+        "output_degree",
+        "intermediate_degree",
+        "total_s",
+        "detour_count_s",
+        "prune_s",
+        "reverse_graph_s",
+        "combine_s",
+    };
+    try csv.writeHeaders(summary_csv, headers);
 
     for (all_results.items) |result| {
-        try csv.writeRow(summary_csv, .{
-            result.vector_count,
-            result.output_degree,
-            result.intermediate_degree,
-            @as(f64, @floatFromInt(result.timing.total_optimization_ns)) / 1_000_000_000.0,
-            @as(f64, @floatFromInt(result.timing.count_detours_ns)) / 1_000_000_000.0,
-            @as(f64, @floatFromInt(result.timing.prune_ns)) / 1_000_000_000.0,
-            @as(f64, @floatFromInt(result.timing.build_reverse_graph_ns)) / 1_000_000_000.0,
-            @as(f64, @floatFromInt(result.timing.combine_ns)) / 1_000_000_000.0,
-        });
+        try csv.writeRow(
+            summary_csv,
+            .{
+                result.vector_count,
+                result.output_degree,
+                result.intermediate_degree,
+                @as(f64, @floatFromInt(result.timing.total_optimization_ns)) / std.time.ns_per_s,
+                @as(f64, @floatFromInt(result.timing.count_detours_ns)) / std.time.ns_per_s,
+                @as(f64, @floatFromInt(result.timing.prune_ns)) / std.time.ns_per_s,
+                @as(f64, @floatFromInt(result.timing.build_reverse_graph_ns)) / std.time.ns_per_s,
+                @as(f64, @floatFromInt(result.timing.combine_ns)) / std.time.ns_per_s,
+            },
+            headers.len,
+        );
     }
     try summary_csv.flush();
 

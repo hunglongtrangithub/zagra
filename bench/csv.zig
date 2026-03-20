@@ -1,23 +1,34 @@
 const std = @import("std");
 const config = @import("config");
 
-pub const CSV_RESULTS_DIR = config.BENCH_DIR ++ "/results";
+/// Directory to store csv files from running benchmarks
+pub const CSV_RESULTS_DIR: []const u8 = config.BENCH_DIR ++ "/results";
+
+const Error = error{RowLengthMismatch} || std.io.Writer.Error;
 
 pub fn writeCsv(
     writer: *std.io.Writer,
     headers: []const []const u8,
     rows: anytype,
-) std.io.Writer.Error!void {
+) Error!void {
     try writeHeaders(writer, headers);
     for (rows) |row| {
-        try writeRow(writer, row);
+        try writeRow(writer, row, headers.len);
     }
 }
 
-pub fn writeHeaders(writer: *std.io.Writer, values: []const []const u8) std.io.Writer.Error!void {
-    if (values.len > 0) {
-        try writeEscaped(writer, values[0]);
-        for (values[1..]) |value| {
+pub fn writeRow(writer: *std.io.Writer, row: anytype, expected_count: usize) Error!void {
+    try writeRowValues(writer, row, expected_count);
+    try writer.writeAll("\n");
+}
+
+pub fn writeHeaders(
+    writer: *std.io.Writer,
+    headers: []const []const u8,
+) std.io.Writer.Error!void {
+    if (headers.len > 0) {
+        try writeEscaped(writer, headers[0]);
+        for (headers[1..]) |value| {
             try writer.writeAll(",");
             try writeEscaped(writer, value);
         }
@@ -25,15 +36,15 @@ pub fn writeHeaders(writer: *std.io.Writer, values: []const []const u8) std.io.W
     try writer.writeAll("\n");
 }
 
-pub fn writeRow(writer: *std.io.Writer, row: anytype) !void {
-    try writeRowValues(writer, row);
-    try writer.writeAll("\n");
-}
-
-fn writeRowValues(writer: *std.io.Writer, row: anytype) std.io.Writer.Error!void {
+fn writeRowValues(
+    writer: *std.io.Writer,
+    row: anytype,
+    expected_count: usize,
+) Error!void {
     const T = @TypeOf(row);
     switch (@typeInfo(T)) {
         .array => {
+            if (row.len != expected_count) return error.RowLengthMismatch;
             if (row.len > 0) {
                 try writeCsvValue(writer, row[0]);
                 for (row[1..]) |value| {
@@ -44,6 +55,7 @@ fn writeRowValues(writer: *std.io.Writer, row: anytype) std.io.Writer.Error!void
         },
         .@"struct" => {
             const fields = std.meta.fields(T);
+            if (fields.len != expected_count) return error.RowLengthMismatch;
             if (fields.len > 0) {
                 try writeCsvValue(writer, @field(row, fields[0].name));
                 inline for (fields[1..]) |field| {
@@ -54,6 +66,7 @@ fn writeRowValues(writer: *std.io.Writer, row: anytype) std.io.Writer.Error!void
         },
         .pointer => |ptr| switch (ptr.size) {
             .slice => {
+                if (row.len != expected_count) return error.RowLengthMismatch;
                 if (row.len > 0) {
                     try writeCsvValue(writer, row[0]);
                     for (row[1..]) |value| {
@@ -62,7 +75,10 @@ fn writeRowValues(writer: *std.io.Writer, row: anytype) std.io.Writer.Error!void
                     }
                 }
             },
-            .one => try writeRowValues(writer, row.*),
+            .one => {
+                if (expected_count != 1) return error.RowLengthMismatch;
+                try writeRowValues(writer, row.*, 1);
+            },
             else => @compileError("unsupported pointer size: " ++ @typeName(T)),
         },
         else => @compileError("unsupported row type: " ++ @typeName(T)),
@@ -114,49 +130,49 @@ fn writeEscaped(writer: *std.io.Writer, value: []const u8) std.io.Writer.Error!v
 test "writeRow empty" {
     var buf: [128]u8 = undefined;
     var writer = std.io.Writer.fixed(&buf);
-    try writeRow(&writer, &[_][]const u8{});
+    try writeRow(&writer, &[_][]const u8{}, 0);
     try std.testing.expectEqualStrings("\n", writer.buffered());
 }
 
 test "writeRow single value" {
     var buf: [128]u8 = undefined;
     var writer = std.io.Writer.fixed(&buf);
-    try writeRow(&writer, &[_][]const u8{"hello"});
+    try writeRow(&writer, &[_][]const u8{"hello"}, 1);
     try std.testing.expectEqualStrings("hello\n", writer.buffered());
 }
 
 test "writeRow multiple values" {
     var buf: [128]u8 = undefined;
     var writer = std.io.Writer.fixed(&buf);
-    try writeRow(&writer, &[_][]const u8{ "hello", "world", "foo" });
+    try writeRow(&writer, &[_][]const u8{ "hello", "world", "foo" }, 3);
     try std.testing.expectEqualStrings("hello,world,foo\n", writer.buffered());
 }
 
 test "writeEscaped comma" {
     var buf: [128]u8 = undefined;
     var writer = std.io.Writer.fixed(&buf);
-    try writeRow(&writer, &[_][]const u8{"hello,world"});
+    try writeRow(&writer, &[_][]const u8{"hello,world"}, 1);
     try std.testing.expectEqualStrings("\"hello,world\"\n", writer.buffered());
 }
 
 test "writeEscaped quote" {
     var buf: [128]u8 = undefined;
     var writer = std.io.Writer.fixed(&buf);
-    try writeRow(&writer, &[_][]const u8{"hello\"world"});
+    try writeRow(&writer, &[_][]const u8{"hello\"world"}, 1);
     try std.testing.expectEqualStrings("\"hello\"\"world\"\n", writer.buffered());
 }
 
 test "writeEscaped newline" {
     var buf: [128]u8 = undefined;
     var writer = std.io.Writer.fixed(&buf);
-    try writeRow(&writer, &[_][]const u8{"hello\nworld"});
+    try writeRow(&writer, &[_][]const u8{"hello\nworld"}, 1);
     try std.testing.expectEqualStrings("\"hello\nworld\"\n", writer.buffered());
 }
 
 test "writeEscaped no escaping needed" {
     var buf: [128]u8 = undefined;
     var writer = std.io.Writer.fixed(&buf);
-    try writeRow(&writer, &[_][]const u8{"hello world"});
+    try writeRow(&writer, &[_][]const u8{"hello world"}, 1);
     try std.testing.expectEqualStrings("hello world\n", writer.buffered());
 }
 
@@ -209,4 +225,11 @@ test "writeCsv optionals" {
         "name,nickname\nAlice,Ali\nBob,\n",
         writer.buffered(),
     );
+}
+
+test "writeRow length mismatch" {
+    var buf: [128]u8 = undefined;
+    var writer = std.io.Writer.fixed(&buf);
+    // Provide 2 values but expected_count is 1 -> should return RowLengthMismatch
+    try std.testing.expectError(Error.RowLengthMismatch, writeRow(&writer, &[_][]const u8{ "a", "b" }, 1));
 }

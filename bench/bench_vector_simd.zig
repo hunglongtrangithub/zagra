@@ -248,32 +248,50 @@ pub fn main() !void {
     var file_buffer: [1024]u8 = undefined;
     var file_writer = csv_file.writer(&file_buffer);
     const file = &file_writer.interface;
-    try csv.writeHeaders(file, &[_][]const u8{
-        "vector_type", "element_type", "vector_length", "min_ns", "max_ns", "mean_ns", "median_ns", "stddev_ns", "speedup",
-    });
+
+    const headers = &[_][]const u8{
+        "vector_type",
+        "element_type",
+        "vector_length",
+        "min_ns",
+        "max_ns",
+        "mean_ns",
+        "median_ns",
+        "stddev_ns",
+        "speedup",
+    };
+    try csv.writeHeaders(file, headers);
     for (results) |result| {
-        try csv.writeRow(file, .{
-            "naive",
-            result.element_type,
-            result.vector_length,
-            result.naive.min_ns,
-            result.naive.max_ns,
-            result.naive.mean_ns,
-            result.naive.median_ns,
-            result.naive.stddev_ns,
-            result.speedup,
-        });
-        try csv.writeRow(file, .{
-            "simd",
-            result.element_type,
-            result.vector_length,
-            result.simd.min_ns,
-            result.simd.max_ns,
-            result.simd.mean_ns,
-            result.simd.median_ns,
-            result.simd.stddev_ns,
-            result.speedup,
-        });
+        try csv.writeRow(
+            file,
+            .{
+                "naive",
+                result.element_type,
+                result.vector_length,
+                result.naive.min_ns,
+                result.naive.max_ns,
+                result.naive.mean_ns,
+                result.naive.median_ns,
+                result.naive.stddev_ns,
+                result.speedup,
+            },
+            headers.len,
+        );
+        try csv.writeRow(
+            file,
+            .{
+                "simd",
+                result.element_type,
+                result.vector_length,
+                result.simd.min_ns,
+                result.simd.max_ns,
+                result.simd.mean_ns,
+                result.simd.median_ns,
+                result.simd.stddev_ns,
+                result.speedup,
+            },
+            headers.len,
+        );
     }
     try file.flush();
     std.debug.print("Results written to {s}\n", .{csv_file_name});
