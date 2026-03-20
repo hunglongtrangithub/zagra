@@ -11,8 +11,8 @@ var stdout_buffer: [1024]u8 = undefined;
 var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
 const stdout = &stdout_writer.interface;
 
-const HELP =
-    \\zagra <vector_count> <graph_degree> [intermediate_graph_degree] [options]
+const HELP_TEMPLATE =
+    \\{s} <vector_count> <graph_degree> [intermediate_graph_degree] [options]
     \\- vector_count (required): Number of vectors in the dataset
     \\- graph_degree (required): Graph degree of the final CAGRA graph
     \\Options:
@@ -21,6 +21,7 @@ const HELP =
     \\- --k <n>: Number of nearest neighbors to search for (default: 4)
     \\- --queries <n>: Number of queries to search for (default: 1)
     \\- --save <path> or -o <path>: Save the built index to the specified directory (optional)
+    \\
 ;
 
 pub fn main() !void {
@@ -31,11 +32,21 @@ pub fn main() !void {
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
 
-    _ = args.skip();
+    const exe_path = args.next() orelse @src().file;
+    const exe_name = std.fs.path.basename(exe_path[0..]);
 
-    const vector_count_str = args.next() orelse {
-        std.debug.print("vector count needed.\n{s}\n", .{HELP});
-        return;
+    const vector_count_str = blk: {
+        const first_arg = args.next() orelse {
+            std.debug.print("vector count needed.\n" ++ HELP_TEMPLATE, .{exe_name});
+            return;
+        };
+
+        if (std.mem.eql(u8, first_arg, "--help") or std.mem.eql(u8, first_arg, "-h")) {
+            std.debug.print(HELP_TEMPLATE, .{exe_name});
+            return;
+        }
+
+        break :blk first_arg;
     };
     const vector_count = std.fmt.parseInt(usize, vector_count_str, 10) catch |e| {
         switch (e) {
@@ -46,7 +57,7 @@ pub fn main() !void {
     };
 
     const graph_degree_str = args.next() orelse {
-        std.debug.print("graph degree needed.\n{s}\n", .{HELP});
+        std.debug.print("graph degree needed.\n" ++ HELP_TEMPLATE, .{exe_name});
         return;
     };
     const graph_degree = std.fmt.parseInt(usize, graph_degree_str, 10) catch |e| {
@@ -121,7 +132,7 @@ pub fn main() !void {
                 return;
             };
         } else {
-            std.debug.print("Unknown argument: {s}\n{s}\n", .{ arg, HELP });
+            std.debug.print("Unknown argument: {s}\n" ++ HELP_TEMPLATE, .{ arg, exe_path });
             return;
         }
     }
@@ -289,7 +300,7 @@ pub fn main() !void {
         }
     };
     const search_time = timer.read();
-    std.debug.print("Search time: {}ms\n", .{search_time / std.time.ns_per_ms});
+    try stdout.print("Search time: {}ms\n", .{search_time / std.time.ns_per_ms});
     defer search_result.neighbors.deinit(allocator);
     defer search_result.distances.deinit(allocator);
 

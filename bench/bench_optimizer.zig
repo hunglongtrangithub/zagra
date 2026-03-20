@@ -2,6 +2,7 @@ const std = @import("std");
 const znpy = @import("znpy");
 const zagra = @import("zagra");
 const csv = @import("csv.zig");
+const help = @import("help.zig");
 
 pub const std_options: std.Options = .{
     .log_level = .err,
@@ -107,9 +108,10 @@ pub fn main() !void {
 
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
-    _ = args.skip();
+    const exe_path = args.next() orelse @src().file;
 
     const result_prefix = args.next();
+    help.checkHelp(result_prefix, exe_path);
 
     const T: type = f32;
     const N: usize = 128;

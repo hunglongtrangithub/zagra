@@ -2,6 +2,7 @@ const std = @import("std");
 
 const zagra = @import("zagra");
 const csv = @import("csv.zig");
+const help = @import("help.zig");
 
 /// Benchmark configuration
 const BenchmarkConfig = struct {
@@ -209,9 +210,10 @@ pub fn main() !void {
 
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
-    _ = args.skip();
+    const exe_path = args.next() orelse @src().file;
 
     const result_prefix = args.next();
+    help.checkHelp(result_prefix, exe_path);
 
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
