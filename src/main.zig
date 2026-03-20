@@ -26,7 +26,10 @@ const HELP_TEMPLATE =
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
-    defer _ = gpa.deinit();
+    defer {
+        const check = gpa.deinit();
+        std.debug.print("Heap check: {}\n", .{check});
+    }
     const allocator = gpa.allocator();
 
     var args = try std.process.argsWithAllocator(allocator);

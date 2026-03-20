@@ -1,3 +1,12 @@
+# Zig artifacts
 .zig-cache
 zig-out
+
+# Benchmark artifacts
 bench/results/
+
+# TEXMEX artifacts
+*.gz
+*.fvecs
+*.ivecs
+*.bvecs

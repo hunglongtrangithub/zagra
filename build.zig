@@ -104,6 +104,7 @@ pub fn build(b: *std.Build) void {
             inline for (benchmarks) |bench_name| {
                 try stdout.print("- {s}\n", .{bench_name});
             }
+            try stdout.print("Use `zig build <benchmark name> -- [args]` to run the benchmark.\n", .{});
             try stdout.flush();
         }
     }.make;
@@ -122,7 +123,7 @@ pub fn build(b: *std.Build) void {
     });
     const downloader_run_cmd = b.addRunArtifact(downloader_exe);
     if (b.args) |args| downloader_run_cmd.addArgs(args);
-    const downloader_run_step = b.step("dataset", "Run the dataset downloader");
+    const downloader_run_step = b.step("texmex", "Run the TEXMEX ANN vector set downloader");
     downloader_run_step.dependOn(&downloader_run_cmd.step);
 
     // Add test steps for both the module and the executable
