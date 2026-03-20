@@ -217,7 +217,7 @@ pub fn main() !void {
     const stdout = &stdout_writer.interface;
 
     const result_prefix = args.next();
-    help.checkHelp(stdout, result_prefix, exe_path);
+    try help.checkHelp(stdout, result_prefix, exe_path);
 
     try stdout.print("\n", .{});
     try stdout.print("SIMD Vector Distance Benchmark Suite\n", .{});

@@ -113,7 +113,7 @@ pub fn main() !void {
     const stdout = &stdout_writer.interface;
 
     const result_prefix = args.next();
-    help.checkHelp(stdout, result_prefix, exe_path);
+    try help.checkHelp(stdout, result_prefix, exe_path);
 
     const T: type = f32;
     const N: usize = 128;

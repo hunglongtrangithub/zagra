@@ -7,6 +7,11 @@ const benchmarks = [_][]const u8{
     "bench_nn_descent",
     "bench_optimizer",
 };
+comptime {
+    for (benchmarks) |bench_name| {
+        std.debug.assert(std.mem.startsWith(u8, bench_name, "bench_"));
+    }
+}
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -21,7 +26,7 @@ pub fn build(b: *std.Build) void {
 
     // Create zagra module
     const zagra_mod = b.addModule("zagra", .{
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path(config.SRC_DIR ++ "/root.zig"),
         .target = target,
         .imports = &.{
             .{ .name = "znpy", .module = znpy_mod },
@@ -29,10 +34,11 @@ pub fn build(b: *std.Build) void {
     });
 
     // Create zagra executable
+    // Will be automatically installed with `zig build`
     const zagra_exe = b.addExecutable(.{
         .name = "zagra",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = b.path(config.SRC_DIR ++ "/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -45,12 +51,12 @@ pub fn build(b: *std.Build) void {
 
     // Create run step for the main executable
     // Binary is installed first before running
-    const run_cmd = b.addRunArtifact(zagra_exe);
-    if (b.args) |args| run_cmd.addArgs(args);
-    run_cmd.step.dependOn(b.getInstallStep());
+    const zagra_run_cmd = b.addRunArtifact(zagra_exe);
+    if (b.args) |args| zagra_run_cmd.addArgs(args);
+    zagra_run_cmd.step.dependOn(b.getInstallStep());
 
-    const run_step = b.step("run", "Run the app");
-    run_step.dependOn(&run_cmd.step);
+    const zagra_run_step = b.step("run", "Run the app");
+    zagra_run_step.dependOn(&zagra_run_cmd.step);
 
     // Create config module
     // Shared configuration for benchmarks
@@ -90,12 +96,34 @@ pub fn build(b: *std.Build) void {
     const list_benchmarks_step = b.step("bench", "List all benchmarks");
     list_benchmarks_step.makeFn = struct {
         fn make(_: *std.Build.Step, _: std.Build.Step.MakeOptions) anyerror!void {
-            std.debug.print("Available benchmarks:\n", .{});
+            var stdout_buffer: [1024]u8 = undefined;
+            var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+            const stdout = &stdout_writer.interface;
+
+            try stdout.print("Available benchmarks:\n", .{});
             inline for (benchmarks) |bench_name| {
-                std.debug.print("- {s}\n", .{bench_name});
+                try stdout.print("- {s}\n", .{bench_name});
             }
+            try stdout.flush();
         }
     }.make;
+
+    // Add executable for dataset downloader
+    const downloader_exe = b.addExecutable(.{
+        .name = "textmexsteal",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(config.DATASET_DIR ++ "/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "config", .module = config_mod },
+            },
+        }),
+    });
+    const downloader_run_cmd = b.addRunArtifact(downloader_exe);
+    if (b.args) |args| downloader_run_cmd.addArgs(args);
+    const downloader_run_step = b.step("dataset", "Run the dataset downloader");
+    downloader_run_step.dependOn(&downloader_run_cmd.step);
 
     // Add test steps for both the module and the executable
     const mod_tests = b.addTest(.{
