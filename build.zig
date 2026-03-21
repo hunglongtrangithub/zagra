@@ -58,12 +58,32 @@ pub fn build(b: *std.Build) void {
     const zagra_run_step = b.step("run", "Run the app");
     zagra_run_step.dependOn(&zagra_run_cmd.step);
 
+    // Add test steps for both the zagra module and the executable
+    const zagra_mod_tests = b.addTest(.{
+        .root_module = zagra_mod,
+    });
+    const run_zagra_mod_tests = b.addRunArtifact(zagra_mod_tests);
+    const zagra_exe_tests = b.addTest(.{
+        .root_module = zagra_exe.root_module,
+    });
+    const run_zagra_exe_tests = b.addRunArtifact(zagra_exe_tests);
+
     // Create config module
     // Shared configuration for benchmarks
     const config_mod = b.addModule("config", .{
         .root_source_file = b.path("config.zig"),
         .target = target,
     });
+
+    //  Create bench module for testing
+    const bench_mod = b.addModule("bench", .{
+        .root_source_file = b.path(config.BENCH_DIR ++ "/root.zig"),
+        .target = target,
+    });
+    const bench_mod_tests = b.addTest(.{
+        .root_module = bench_mod,
+    });
+    const run_bench_mod_tests = b.addRunArtifact(bench_mod_tests);
 
     // Create benchmark executables and run steps
     // Binary is installed first before running
@@ -92,6 +112,7 @@ pub fn build(b: *std.Build) void {
         bench_step.dependOn(&bench_cmd.step);
         bench_step.dependOn(&install_step.step);
     }
+
     // Add a step to list all benchmarks
     const list_benchmarks_step = b.step("bench", "List all benchmarks");
     list_benchmarks_step.makeFn = struct {
@@ -110,7 +131,7 @@ pub fn build(b: *std.Build) void {
     }.make;
 
     // Add executable for dataset downloader
-    const downloader_exe = b.addExecutable(.{
+    const texmex_exe = b.addExecutable(.{
         .name = "textmexsteal",
         .root_module = b.createModule(.{
             .root_source_file = b.path(config.DATA_DIR ++ "/main.zig"),
@@ -122,21 +143,18 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    const downloader_run_cmd = b.addRunArtifact(downloader_exe);
-    if (b.args) |args| downloader_run_cmd.addArgs(args);
-    const downloader_run_step = b.step("texmex", "Run the TEXMEX ANN vector set downloader");
-    downloader_run_step.dependOn(&downloader_run_cmd.step);
+    const texmex_run_cmd = b.addRunArtifact(texmex_exe);
+    if (b.args) |args| texmex_run_cmd.addArgs(args);
+    const texmex_run_step = b.step("texmex", "Run the TEXMEX ANN vector set downloader");
+    texmex_run_step.dependOn(&texmex_run_cmd.step);
+    const texmex_exe_tests = b.addTest(.{
+        .root_module = texmex_exe.root_module,
+    });
+    const run_texmex_exe_tests = b.addRunArtifact(texmex_exe_tests);
 
-    // Add test steps for both the module and the executable
-    const mod_tests = b.addTest(.{
-        .root_module = zagra_mod,
-    });
-    const run_mod_tests = b.addRunArtifact(mod_tests);
-    const exe_tests = b.addTest(.{
-        .root_module = zagra_exe.root_module,
-    });
-    const run_exe_tests = b.addRunArtifact(exe_tests);
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_mod_tests.step);
-    test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_zagra_mod_tests.step);
+    test_step.dependOn(&run_zagra_exe_tests.step);
+    test_step.dependOn(&run_bench_mod_tests.step);
+    test_step.dependOn(&run_texmex_exe_tests.step);
 }

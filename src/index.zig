@@ -133,7 +133,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
         /// Loads the dataset from a .npy file reader.
         /// Validates that the shape has 2 dimensions and the second dimension equals N.
         fn loadDataset(
-            reader: *std.io.Reader,
+            reader: *std.Io.Reader,
             allocator: std.mem.Allocator,
         ) !Dataset {
             const array = try znpy.array.static.StaticArray(T, 2).fromFileAllocAligned(
@@ -163,7 +163,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
         /// Return the graph as a slice of `usize` neighbor IDs in row-major order (length = num_nodes * degree),
         /// and the graph degree (number of neighbors per node).
         fn loadGraph(
-            reader: *std.io.Reader,
+            reader: *std.Io.Reader,
             allocator: std.mem.Allocator,
             expected_num_nodes: usize,
         ) !struct { []usize, usize } {
@@ -359,7 +359,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
         /// The graph is stored as a 2D array with shape (num_nodes, num_neighbors_per_node).
         pub fn writeGraph(
             self: *const Self,
-            writer: *std.io.Writer,
+            writer: *std.Io.Writer,
             allocator: std.mem.Allocator,
         ) !void {
             const element_type = znpy.ElementType.fromZigType(NodeIdType) catch {

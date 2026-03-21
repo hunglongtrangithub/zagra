@@ -13,10 +13,10 @@ const HELP_TEMPLATE =
 
 /// Checks if the provided argument is a help flag and prints usage information if it is.
 pub fn checkHelp(
-    stdout: *std.io.Writer,
+    stdout: *std.Io.Writer,
     arg: ?[:0]const u8,
     exe_path: [:0]const u8,
-) std.io.Writer.Error!void {
+) std.Io.Writer.Error!void {
     if (arg) |a| {
         const help_args = [_][]const u8{ "--help", "-h" };
         for (help_args) |help_arg| {

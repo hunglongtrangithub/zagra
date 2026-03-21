@@ -52,7 +52,7 @@ pub fn Dataset(comptime T: type, comptime N: usize) type {
         /// Order is row-major (C order).
         pub fn toNpyFile(
             self: *const Self,
-            writer: *std.io.Writer,
+            writer: *std.Io.Writer,
             allocator: std.mem.Allocator,
         ) !void {
             const header = znpy.header.Header{
@@ -67,7 +67,7 @@ pub fn Dataset(comptime T: type, comptime N: usize) type {
         /// Load a dataset of fixed-size vectors from a .npy file reader.
         /// The .npy file must contain a 2D array where one dimension is of size N.
         pub fn fromNpyFileReader(
-            reader: *std.io.Reader,
+            reader: *std.Io.Reader,
             allocator: std.mem.Allocator,
         ) (znpy.array.static.FromFileReaderError || error{InvalidShape})!Self {
             const array = try znpy.array.static.StaticArray(T, 2).fromFileAllocAligned(

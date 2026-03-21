@@ -19,7 +19,7 @@ const BenchmarkResult = struct {
     median_ns: u64,
     stddev_ns: f64,
 
-    pub fn print(self: BenchmarkResult, writer: *std.io.Writer, name: []const u8) !void {
+    pub fn print(self: BenchmarkResult, writer: *std.Io.Writer, name: []const u8) !void {
         try writer.print("{s}:\n", .{name});
         try writer.print("  Min:    {d:>10.2} ns\n", .{@as(f64, @floatFromInt(self.min_ns))});
         try writer.print("  Max:    {d:>10.2} ns\n", .{@as(f64, @floatFromInt(self.max_ns))});
@@ -104,7 +104,7 @@ fn benchmarkComparison(
     comptime T: type,
     comptime N: usize,
     allocator: std.mem.Allocator,
-    writer: *std.io.Writer,
+    writer: *std.Io.Writer,
 ) !ComparisonResult {
     const VecType = zagra.Vector(T, N);
 

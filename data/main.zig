@@ -289,7 +289,7 @@ const VectorSet = enum {
     }
 };
 
-fn usage(exe_name: []const u8) std.io.Writer.Error!void {
+fn usage(exe_name: []const u8) std.Io.Writer.Error!void {
     try stdout.print("Usage: {s} [dataset_name] [custom_data_dir] [--no-convert] [--help|-h]\n", .{exe_name});
     try stdout.print("If dataset_name is not provided, enter interactive application.\n", .{});
     try stdout.print("If custom_data_dir is not provided, default to ./{s}\n", .{config.DATA_DIR});
@@ -302,7 +302,7 @@ fn usage(exe_name: []const u8) std.io.Writer.Error!void {
     std.process.exit(0);
 }
 
-fn checkHelp(arg: [:0]const u8, exe_name: []const u8) std.io.Writer.Error!void {
+fn checkHelp(arg: [:0]const u8, exe_name: []const u8) std.Io.Writer.Error!void {
     const help_args = [_][]const u8{ "--help", "-h" };
     for (help_args) |help_arg| {
         if (std.mem.eql(u8, arg, help_arg)) {
@@ -312,7 +312,7 @@ fn checkHelp(arg: [:0]const u8, exe_name: []const u8) std.io.Writer.Error!void {
     }
 }
 
-pub fn main() (std.mem.Allocator.Error || std.io.Writer.Error)!void {
+pub fn main() (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -456,4 +456,9 @@ pub fn main() (std.mem.Allocator.Error || std.io.Writer.Error)!void {
 
     log.info("Converting vector files to .npy format...", .{});
     vecs_to_npy.convertVecsToNpy(dataset_dir);
+}
+
+test {
+    _ = ftp;
+    _ = vecs_to_npy;
 }

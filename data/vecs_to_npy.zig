@@ -28,7 +28,7 @@ pub const VecsFileError = error{
     VecsDimExceedsUsize,
     NumVecsExceedsUsize,
     VecSizeExceedsUsize,
-};
+} || std.fs.File.GetEndPosError;
 
 /// Read the first 4 bytes of the vecs file to get the vector dimension,
 /// and check that the file size is consistent with the vector dimension to get the number of vectors.
@@ -38,7 +38,7 @@ pub const VecsFileError = error{
 fn getNumVecsAndVecsDim(
     vecs_type: VecsType,
     vecs_file: std.fs.File,
-) (VecsFileError || std.fs.File.GetEndPosError)!struct { usize, usize } {
+) VecsFileError!struct { usize, usize } {
     var vecs_buffer: [4]u8 = undefined;
     var vecs_reader = vecs_file.reader(&vecs_buffer);
     const reader = &vecs_reader.interface;
@@ -80,7 +80,7 @@ fn convert(
     vecs_type: VecsType,
     vecs_file: std.fs.File,
     npy_file: std.fs.File,
-) (std.io.Reader.Error || std.io.Writer.Error || VecsFileError || std.fs.File.GetEndPosError)!void {
+) (std.Io.Reader.Error || std.Io.Writer.Error || VecsFileError)!void {
     const num_vecs, const vecs_dim = try getNumVecsAndVecsDim(vecs_type, vecs_file);
     var npy_buffer: [8192]u8 = undefined;
     var npy_writer = npy_file.writer(&npy_buffer);
@@ -107,7 +107,7 @@ fn convert(
                 "Header buffer is too small, should not happen since we allocated 1024 bytes for header which is more than enough." ++
                     " Znpy library is doing something unexpected if this happens.",
             ),
-            error.WriteFailed => return std.io.Writer.Error.WriteFailed,
+            error.WriteFailed => return std.Io.Writer.Error.WriteFailed,
         }
     };
 
