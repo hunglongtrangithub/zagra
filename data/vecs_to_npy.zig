@@ -11,11 +11,33 @@ pub const VecsType = enum {
     Ivecs,
     Bvecs,
 
+    comptime {
+        std.debug.assert(VecsType.Bvecs.elemSize() == @sizeOf(u8));
+        std.debug.assert(VecsType.Ivecs.elemSize() == @sizeOf(i32));
+        std.debug.assert(VecsType.Fvecs.elemSize() == @sizeOf(f32));
+    }
+
     pub fn fromExtension(ext: []const u8) ?VecsType {
         if (std.mem.eql(u8, ext, ".fvecs")) return .Fvecs;
         if (std.mem.eql(u8, ext, ".ivecs")) return .Ivecs;
         if (std.mem.eql(u8, ext, ".bvecs")) return .Bvecs;
         return null;
+    }
+
+    pub fn fromZigType(comptime T: type) VecsType {
+        switch (T) {
+            f32 => return .Fvecs,
+            i32 => return .Ivecs,
+            u8 => return .Bvecs,
+            else => @compileError("Unsupported type for VecsType, only f32, i32, and u8 are supported."),
+        }
+    }
+
+    pub fn elemSize(self: VecsType) u3 {
+        return switch (self) {
+            .Fvecs, .Ivecs => 4,
+            .Bvecs => 1,
+        };
     }
 };
 
@@ -58,11 +80,7 @@ fn getNumVecsAndVecsDim(
         std.math.mul(
             u64,
             vecs_dim_u64,
-            switch (vecs_type) {
-                .Fvecs => 4,
-                .Ivecs => 4,
-                .Bvecs => 1,
-            },
+            @as(u64, vecs_type.elemSize()),
         ) catch return error.VecSizeOverflow,
     ) catch return error.VecSizeOverflow;
 
@@ -116,10 +134,7 @@ fn convert(
     const reader = &vecs_reader.interface;
 
     var elem_buffer_scratch: [4]u8 = undefined; // big enough for one element of any type
-    const elem_buffer = elem_buffer_scratch[0..switch (vecs_type) {
-        .Fvecs, .Ivecs => 4,
-        .Bvecs => 1,
-    }];
+    const elem_buffer = elem_buffer_scratch[0..vecs_type.elemSize()];
 
     // Write one element at a time
     for (0..num_vecs) |_| {
@@ -188,4 +203,104 @@ pub fn convertVecsToNpy(dataset_dir: std.fs.Dir) void {
         };
         log.info("Successfully converted {s} to {s}", .{ entry.name, npy_name });
     }
+}
+
+pub fn testConversion(comptime T: type, num_vecs: usize, dim: usize) !void {
+    const vecs_type = comptime VecsType.fromZigType(T);
+
+    const ogirinal_len = num_vecs * dim;
+    const original = try std.testing.allocator.alloc(T, ogirinal_len);
+    defer std.testing.allocator.free(original);
+
+    for (0..ogirinal_len) |i| {
+        const elem = if (vecs_type == .Fvecs)
+            @as(T, @floatFromInt(i))
+        else
+            std.math.cast(T, i) orelse @as(T, @intCast(i % std.math.maxInt(T)));
+        original[i] = elem;
+    }
+
+    const vec_size = 4 + dim * @sizeOf(T);
+    const vecs_bytes_len = num_vecs * vec_size;
+    var vecs_bytes = try std.testing.allocator.alloc(u8, vecs_bytes_len);
+    defer std.testing.allocator.free(vecs_bytes);
+
+    const dim_i32 = std.math.cast(i32, dim) orelse return error.VecsDimExceedsUsize;
+    for (0..num_vecs) |i| {
+        const start = i * vec_size;
+        std.mem.writeInt(i32, @ptrCast(vecs_bytes[start..][0..4]), dim_i32, .little);
+        const vec_slice: []T = original[i * dim ..][0..dim];
+        if (builtin.cpu.arch.endian() != .little and vecs_type != .Bvecs) {
+            // Need to swap endianness for multi-byte types if the CPU is not little-endian.
+            std.mem.byteSwapAllElements(T, vec_slice);
+        }
+        @memcpy(vecs_bytes[start + 4 .. start + vec_size], std.mem.sliceAsBytes(vec_slice));
+    }
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    {
+        const vecs_file = try tmp_dir.dir.createFile("test.fvecs", .{});
+        defer vecs_file.close();
+
+        var vecs_writer = vecs_file.writer(&.{});
+        const writer = &vecs_writer.interface;
+        try writer.writeAll(vecs_bytes);
+        try writer.flush();
+    }
+
+    {
+        const vecs_file = try tmp_dir.dir.openFile("test.fvecs", .{});
+        defer vecs_file.close();
+        const npy_file = try tmp_dir.dir.createFile("test.npy", .{});
+        defer npy_file.close();
+        try convert(vecs_type, vecs_file, npy_file);
+    }
+
+    const npy_content = try tmp_dir.dir.readFileAlloc(std.testing.allocator, "test.npy", std.math.maxInt(usize));
+    defer std.testing.allocator.free(npy_content);
+
+    const array = try znpy.array.static.StaticArray(T, 2).fromFileBuffer(npy_content, std.testing.allocator);
+
+    try std.testing.expectEqual(num_vecs, array.shape.dims[0]);
+    try std.testing.expectEqual(dim, array.shape.dims[1]);
+    try std.testing.expectEqual(znpy.Order.C, array.shape.order);
+    try std.testing.expectEqualSlices(T, original, array.data_buffer);
+}
+
+test "conversion of all types" {
+    try testConversion(f32, 10, 5);
+    try testConversion(i32, 10, 5);
+    try testConversion(u8, 10, 5);
+}
+
+test "single vector" {
+    try testConversion(f32, 1, 8);
+    try testConversion(i32, 1, 8);
+    try testConversion(u8, 1, 8);
+}
+
+test "dimension 1" {
+    try testConversion(f32, 5, 1);
+    try testConversion(i32, 5, 1);
+    try testConversion(u8, 5, 1);
+}
+
+test "single vector with dimension 1" {
+    try testConversion(f32, 1, 1);
+    try testConversion(i32, 1, 1);
+    try testConversion(u8, 1, 1);
+}
+
+test "large dimension" {
+    try testConversion(f32, 2, 128);
+    try testConversion(i32, 2, 128);
+    try testConversion(u8, 2, 128);
+}
+
+test "many vectors" {
+    try testConversion(f32, 1000, 4);
+    try testConversion(i32, 1000, 4);
+    try testConversion(u8, 1000, 4);
 }
