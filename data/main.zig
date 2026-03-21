@@ -1,6 +1,9 @@
 const std = @import("std");
 const config = @import("config");
 const ftp = @import("ftp.zig");
+const vecs_to_npy = @import("vecs_to_npy.zig");
+
+const log = std.log.scoped(.main);
 
 var stdin_buffer: [1024]u8 = undefined;
 var stdin_reader = std.fs.File.stdin().reader(&stdin_buffer);
@@ -29,7 +32,7 @@ const VectorSet = enum {
         }
     };
 
-    fn checkExecutable(name: []const u8, allocator: std.mem.Allocator) std.io.Writer.Error!void {
+    fn checkExecutable(name: []const u8, allocator: std.mem.Allocator) void {
         const run_result = std.process.Child.run(.{
             .allocator = allocator,
             .argv = &[_][]const u8{ "which", name },
@@ -62,7 +65,7 @@ const VectorSet = enum {
         }
 
         child.collectOutput(allocator, &stdout_output, &stderr_output, 50 * 1024) catch |e| {
-            std.log.err("Error collecting output: {}", .{e});
+            log.err("Error collecting output: {}", .{e});
         };
 
         return .{
@@ -77,7 +80,7 @@ const VectorSet = enum {
     fn spawnAndWait(
         argv: []const []const u8,
         allocator: std.mem.Allocator,
-    ) std.io.Writer.Error!void {
+    ) void {
         if (argv.len == 0) return;
         const exe = argv[0];
         var cmd = std.process.Child.init(argv, allocator);
@@ -92,18 +95,19 @@ const VectorSet = enum {
     }
 
     /// Make dataset directory if it doesn't exist, or verify access if it does. Exits on failure.
-    fn makeDatasetDir(dataset_dir: []const u8) std.io.Writer.Error!std.fs.Dir {
-        if (std.fs.path.isAbsolute(dataset_dir)) {
-            std.fs.makeDirAbsolute(dataset_dir) catch |e| switch (e) {
-                error.PathAlreadyExists => std.log.info("Dataset directory already exists: {s}", .{dataset_dir}),
+    /// Returns the opened directory on success.
+    fn makeDatasetDir(dataset_dir_str: []const u8) std.fs.Dir {
+        if (std.fs.path.isAbsolute(dataset_dir_str)) {
+            std.fs.makeDirAbsolute(dataset_dir_str) catch |e| switch (e) {
+                error.PathAlreadyExists => log.info("Dataset directory already exists: {s}", .{dataset_dir_str}),
                 else => {
                     std.debug.print("Error creating dataset directory: {}\n", .{e});
                     std.process.exit(1);
                 },
             };
         } else {
-            std.fs.cwd().makeDir(dataset_dir) catch |e| switch (e) {
-                error.PathAlreadyExists => std.log.info("Dataset directory already exists: {s}", .{dataset_dir}),
+            std.fs.cwd().makeDir(dataset_dir_str) catch |e| switch (e) {
+                error.PathAlreadyExists => log.info("Dataset directory already exists: {s}", .{dataset_dir_str}),
                 else => {
                     std.debug.print("Error creating dataset directory: {}\n", .{e});
                     std.process.exit(1);
@@ -112,7 +116,7 @@ const VectorSet = enum {
         }
 
         // Try opening the directory
-        return std.fs.cwd().openDir(dataset_dir, .{ .iterate = true }) catch |e| {
+        return std.fs.cwd().openDir(dataset_dir_str, .{ .iterate = true }) catch |e| {
             std.debug.print("Error opening dataset directory: {}\n", .{e});
             std.process.exit(1);
         };
@@ -122,17 +126,17 @@ const VectorSet = enum {
         self: VectorSet,
         allocator: std.mem.Allocator,
         data_dir: []const u8,
-    ) (std.mem.Allocator.Error || std.io.Writer.Error)!void {
+    ) std.mem.Allocator.Error!void {
         // Check if executables are available
         const executables = [_][]const u8{ "tar", "gzip" };
         for (executables) |exe| {
-            try checkExecutable(exe, allocator);
+            checkExecutable(exe, allocator);
         }
 
         // Ensure parent data directory exists (e.g., "data/")
         if (std.fs.path.isAbsolute(data_dir)) {
             std.fs.makeDirAbsolute(data_dir) catch |e| switch (e) {
-                error.PathAlreadyExists => std.log.info("Data directory already exists: {s}", .{data_dir}),
+                error.PathAlreadyExists => log.info("Data directory already exists: {s}", .{data_dir}),
                 else => {
                     std.debug.print("Error creating data directory: {}\n", .{e});
                     std.process.exit(1);
@@ -140,7 +144,7 @@ const VectorSet = enum {
             };
         } else {
             std.fs.cwd().makePath(data_dir) catch |e| switch (e) {
-                error.PathAlreadyExists => std.log.info("Data directory already exists: {s}", .{data_dir}),
+                error.PathAlreadyExists => log.info("Data directory already exists: {s}", .{data_dir}),
                 else => {
                     std.debug.print("Error creating data directory: {}\n", .{e});
                     std.process.exit(1);
@@ -149,9 +153,8 @@ const VectorSet = enum {
         }
         const dataset_dir_str = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ data_dir, @tagName(self) });
         defer allocator.free(dataset_dir_str);
-        const dataset_dir = try makeDatasetDir(dataset_dir_str);
-
-        const valid_extensions = [_][]const u8{ ".fvecs", ".ivecs", ".bvecs" };
+        var dataset_dir = makeDatasetDir(dataset_dir_str);
+        defer dataset_dir.close();
 
         switch (self) {
             .ANN_SIFT10K, .ANN_SIFT1M, .ANN_GIST1M => {
@@ -173,7 +176,7 @@ const VectorSet = enum {
                     .output_path = tar_file_path,
                 }};
 
-                std.log.info("Downloading {s}...", .{file_name});
+                log.info("Downloading {s}...", .{file_name});
                 const results = ftp.downloadFiles(allocator, &download_items) orelse {
                     std.debug.print("Download failed (out of memory). Exiting.\n", .{});
                     std.process.exit(1);
@@ -187,8 +190,8 @@ const VectorSet = enum {
                     };
                 }
 
-                std.log.info("Extracting...", .{});
-                try spawnAndWait(&[_][]const u8{
+                log.info("Extracting...", .{});
+                spawnAndWait(&[_][]const u8{
                     "tar",
                     "-xzf",
                     tar_file_path,
@@ -235,9 +238,9 @@ const VectorSet = enum {
 
                 // Extract the ground truth set with tar, and all other sets with gzip, sequentially
                 for (file_names, file_paths) |name, file_path| {
-                    std.log.info("Extracting {s}...", .{name});
+                    log.info("Extracting {s}...", .{name});
                     if (std.mem.endsWith(u8, name, ".tar.gz")) {
-                        try spawnAndWait(&[_][]const u8{
+                        spawnAndWait(&[_][]const u8{
                             "tar",
                             "-xzf",
                             file_path,
@@ -245,20 +248,20 @@ const VectorSet = enum {
                             dataset_dir_str,
                         }, allocator);
                     } else if (std.mem.endsWith(u8, name, ".gz")) {
-                        try spawnAndWait(&[_][]const u8{
+                        spawnAndWait(&[_][]const u8{
                             "gzip",
                             "-d",
                             file_path,
                         }, allocator);
                     } else {
-                        std.log.warn("Unknown file type for {s}, skipping extraction", .{name});
+                        log.warn("Unknown file type for {s}, skipping extraction", .{name});
                         continue;
                     }
                 }
             },
         }
 
-        std.log.info("Moving vector files to dataset root directory", .{});
+        log.info("Moving vector files to dataset root directory", .{});
 
         // Move every .fvecs, .ivecs, or .bvecs file potentially nested in dataset dir
         // to the dataset dir root
@@ -270,29 +273,27 @@ const VectorSet = enum {
             std.process.exit(0);
         }) |entry| {
             if (entry.kind != .file) continue;
-            std.log.debug("Found file: {s}", .{entry.path});
             const ext = std.fs.path.extension(entry.path);
-            for (valid_extensions) |valid_ext| {
-                if (std.mem.eql(u8, ext, valid_ext)) {
-                    const file_name = std.fs.path.basename(entry.path);
-                    std.log.info("Moving {s} to {s}", .{ entry.path, file_name });
-                    dataset_dir.rename(entry.path, file_name) catch |e| {
-                        std.debug.print("Error moving file, trying to move other files: {}\n", .{e});
-                        break;
-                    };
-                    break;
-                }
-            }
+            const vecs_type = vecs_to_npy.VecsType.fromExtension(ext) orelse continue;
+            log.debug("Found valid file with vecs type {}: {s}", .{ vecs_type, entry.path });
+
+            const file_name = std.fs.path.basename(entry.path);
+            log.info("Moving {s} to {s}", .{ entry.path, file_name });
+            dataset_dir.rename(entry.path, file_name) catch |e| {
+                std.debug.print("Error moving file, trying to move other files: {}\n", .{e});
+                continue;
+            };
         }
 
-        std.log.info("Finished installing the dataset", .{});
+        log.info("Finished installing the dataset", .{});
     }
 };
 
 fn usage(exe_name: []const u8) std.io.Writer.Error!void {
-    try stdout.print("Usage: {s} [dataset_name] [custom_data_dir]\n", .{exe_name});
+    try stdout.print("Usage: {s} [dataset_name] [custom_data_dir] [--no-convert]\n", .{exe_name});
     try stdout.print("If dataset_name is not provided, enter interactive application.\n", .{});
-    try stdout.print("If custom_data_dir is not provided, defaults to ./{s}\n", .{config.DATA_DIR});
+    try stdout.print("If custom_data_dir is not provided, default to ./{s}\n", .{config.DATA_DIR});
+    try stdout.print("If --no-convert is provided, do not perform version from fvecs/bvecs/ivecs files to npy files.\n", .{});
     try stdout.print("Available datasets:\n", .{});
     inline for (std.meta.fieldNames(VectorSet)) |name| {
         try stdout.print("  {s}\n", .{name});
@@ -311,7 +312,7 @@ fn checkHelp(arg: [:0]const u8, exe_name: []const u8) std.io.Writer.Error!void {
     }
 }
 
-pub fn main() !void {
+pub fn main() (std.mem.Allocator.Error || std.io.Writer.Error)!void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -329,8 +330,37 @@ pub fn main() !void {
             std.process.exit(1);
         };
 
-        const data_dir = args.next() orelse config.DATA_DIR;
-        try vector_set.install(allocator, data_dir);
+        const data_dir_input = args.next() orelse config.DATA_DIR;
+        const trimmed_data_dir = std.mem.trim(u8, data_dir_input, " \t\r\n");
+        const final_data_dir = if (trimmed_data_dir.len == 0) config.DATA_DIR else trimmed_data_dir;
+
+        // Check conversion flag
+        const do_convert = if (args.next()) |flag| blk: {
+            if (std.mem.eql(u8, flag, "--no-convert")) {
+                break :blk false;
+            } else {
+                std.debug.print("Unknown flag '{s}'.\n", .{flag});
+                try usage(exe_name);
+                std.process.exit(1);
+            }
+        } else true;
+
+        try vector_set.install(allocator, final_data_dir);
+
+        if (do_convert) {
+            const dataset_dir_str = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ final_data_dir, @tagName(vector_set) });
+            defer allocator.free(dataset_dir_str);
+            var dataset_dir = std.fs.cwd().openDir(dataset_dir_str, .{ .iterate = true }) catch |e| {
+                std.debug.print("Error opening dataset directory {s}: {}\n", .{ dataset_dir_str, e });
+                std.process.exit(1);
+            };
+            defer dataset_dir.close();
+
+            log.info("Converting vector files to .npy format...", .{});
+            vecs_to_npy.convertVecsToNpy(dataset_dir);
+        } else {
+            log.info("Skipping conversion to .npy format as per --no-convert flag.", .{});
+        }
         return;
     }
 
@@ -404,4 +434,26 @@ pub fn main() !void {
     const final_data_dir = if (trimmed_data_dir.len == 0) config.DATA_DIR else trimmed_data_dir;
 
     try vector_set.install(allocator, final_data_dir);
+
+    try stdout.print("Convert .fvecs/.ivecs/.bvecs files to .npy format? (press Enter to convert, anything else to skip): ", .{});
+    try stdout.flush();
+    const response = stdin.takeDelimiter('\n') catch |e| {
+        std.debug.print("Error reading input: {}. Exiting.\n", .{e});
+        return;
+    } orelse {
+        std.debug.print("\nEnd-of-input detected. Exiting.\n", .{});
+        return;
+    };
+    if (response.len == 0) return;
+
+    const dataset_dir_str = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ final_data_dir, @tagName(vector_set) });
+    defer allocator.free(dataset_dir_str);
+    var dataset_dir = std.fs.cwd().openDir(dataset_dir_str, .{ .iterate = true }) catch |e| {
+        std.debug.print("Error opening dataset directory {s}: {}\n", .{ dataset_dir_str, e });
+        std.process.exit(1);
+    };
+    defer dataset_dir.close();
+
+    log.info("Converting vector files to .npy format...", .{});
+    vecs_to_npy.convertVecsToNpy(dataset_dir);
 }

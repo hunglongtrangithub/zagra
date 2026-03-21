@@ -118,6 +118,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "config", .module = config_mod },
+                .{ .name = "znpy", .module = znpy_mod },
             },
         }),
     });
