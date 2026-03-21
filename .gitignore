@@ -10,3 +10,6 @@ bench/results/
 *.fvecs
 *.ivecs
 *.bvecs
+
+# MacOS
+.DS_Store

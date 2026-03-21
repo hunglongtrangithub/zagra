@@ -1,5 +1,6 @@
 const std = @import("std");
 const config = @import("config");
+const ftp = @import("ftp.zig");
 
 var stdin_buffer: [1024]u8 = undefined;
 var stdin_reader = std.fs.File.stdin().reader(&stdin_buffer);
@@ -92,37 +93,22 @@ const VectorSet = enum {
 
     /// Make dataset directory if it doesn't exist, or verify access if it does. Exits on failure.
     fn makeDatasetDir(dataset_dir: []const u8) std.io.Writer.Error!std.fs.Dir {
-        const is_absolute = std.fs.path.isAbsolute(dataset_dir);
-
-        std.log.info("Checking dataset directory: {s}", .{dataset_dir});
-        const access_result = if (is_absolute)
-            std.fs.accessAbsolute(dataset_dir, .{})
-        else
-            std.fs.cwd().access(dataset_dir, .{});
-
-        if (access_result) {
-            std.log.info("Dataset directory already exists: {s}", .{dataset_dir});
-        } else |err| {
-            switch (err) {
-                error.FileNotFound => {
-                    std.log.info("Creating dataset directory: {s}", .{dataset_dir});
-                    const make_dir_result = if (is_absolute)
-                        std.fs.makeDirAbsolute(dataset_dir)
-                    else
-                        std.fs.cwd().makeDir(dataset_dir);
-
-                    if (make_dir_result) {
-                        std.log.info("Dataset directory successfully created.", .{});
-                    } else |e| {
-                        std.debug.print("Error creating dataset directory: {}\n", .{e});
-                        std.process.exit(1);
-                    }
-                },
+        if (std.fs.path.isAbsolute(dataset_dir)) {
+            std.fs.makeDirAbsolute(dataset_dir) catch |e| switch (e) {
+                error.PathAlreadyExists => std.log.info("Dataset directory already exists: {s}", .{dataset_dir}),
                 else => {
-                    std.debug.print("Error accessing dataset directory: {}\n", .{err});
+                    std.debug.print("Error creating dataset directory: {}\n", .{e});
                     std.process.exit(1);
                 },
-            }
+            };
+        } else {
+            std.fs.cwd().makeDir(dataset_dir) catch |e| switch (e) {
+                error.PathAlreadyExists => std.log.info("Dataset directory already exists: {s}", .{dataset_dir}),
+                else => {
+                    std.debug.print("Error creating dataset directory: {}\n", .{e});
+                    std.process.exit(1);
+                },
+            };
         }
 
         // Try opening the directory
@@ -138,11 +124,29 @@ const VectorSet = enum {
         data_dir: []const u8,
     ) (std.mem.Allocator.Error || std.io.Writer.Error)!void {
         // Check if executables are available
-        const executables = [_][]const u8{ "wget", "tar", "gzip" };
+        const executables = [_][]const u8{ "tar", "gzip" };
         for (executables) |exe| {
             try checkExecutable(exe, allocator);
         }
 
+        // Ensure parent data directory exists (e.g., "data/")
+        if (std.fs.path.isAbsolute(data_dir)) {
+            std.fs.makeDirAbsolute(data_dir) catch |e| switch (e) {
+                error.PathAlreadyExists => std.log.info("Data directory already exists: {s}", .{data_dir}),
+                else => {
+                    std.debug.print("Error creating data directory: {}\n", .{e});
+                    std.process.exit(1);
+                },
+            };
+        } else {
+            std.fs.cwd().makePath(data_dir) catch |e| switch (e) {
+                error.PathAlreadyExists => std.log.info("Data directory already exists: {s}", .{data_dir}),
+                else => {
+                    std.debug.print("Error creating data directory: {}\n", .{e});
+                    std.process.exit(1);
+                },
+            };
+        }
         const dataset_dir_str = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ data_dir, @tagName(self) });
         defer allocator.free(dataset_dir_str);
         const dataset_dir = try makeDatasetDir(dataset_dir_str);
@@ -151,25 +155,38 @@ const VectorSet = enum {
 
         switch (self) {
             .ANN_SIFT10K, .ANN_SIFT1M, .ANN_GIST1M => {
-                const tar_file_path = try std.fmt.allocPrint(allocator, "{s}/{s}.tar.gz", .{ dataset_dir_str, @tagName(self) });
-                defer allocator.free(tar_file_path);
-
                 const file_name = switch (self) {
                     .ANN_SIFT10K => "siftsmall.tar.gz",
                     .ANN_SIFT1M => "sift.tar.gz",
                     .ANN_GIST1M => "gist.tar.gz",
                     else => unreachable,
                 };
-                const url = try std.fmt.allocPrint(allocator, "{s}{s}", .{ URL_PREFIX, file_name });
-                defer allocator.free(url);
 
-                std.log.info("Downloading {s} from {s}...", .{ file_name, URL_PREFIX });
-                try spawnAndWait(&[_][]const u8{
-                    "wget",
-                    "-O",
-                    tar_file_path,
-                    url,
-                }, allocator);
+                const tar_file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dataset_dir_str, file_name });
+                defer allocator.free(tar_file_path);
+
+                const tar_file_url = try std.fmt.allocPrint(allocator, "{s}{s}", .{ URL_PREFIX, file_name });
+                defer allocator.free(tar_file_url);
+
+                const download_items = [_]ftp.DownloadItem{.{
+                    .url = tar_file_url,
+                    .output_path = tar_file_path,
+                }};
+
+                std.log.info("Downloading {s}...", .{file_name});
+                const results = ftp.downloadFiles(allocator, &download_items) orelse {
+                    std.debug.print("Download failed (out of memory). Exiting.\n", .{});
+                    std.process.exit(1);
+                };
+                defer allocator.free(results);
+
+                for (results) |result| {
+                    _ = result catch |err| {
+                        std.debug.print("Download failed: {}. Exiting.\n", .{err});
+                        std.process.exit(1);
+                    };
+                }
+
                 std.log.info("Extracting...", .{});
                 try spawnAndWait(&[_][]const u8{
                     "tar",
@@ -180,71 +197,46 @@ const VectorSet = enum {
                 }, allocator);
             },
             .ANN_SIFT1B => {
-                // ftp://ftp.irisa.fr/local/texmex/corpus/bigann_base.bvecs.gz
-                // ftp://ftp.irisa.fr/local/texmex/corpus/bigann_learn.bvecs.gz
-                // ftp://ftp.irisa.fr/local/texmex/corpus/bigann_query.bvecs.gz
-                // ftp://ftp.irisa.fr/local/texmex/corpus/bigann_gnd.tar.gz
-                const sets = [_][]const u8{
+                const file_names = [_][]const u8{
                     "bigann_base.bvecs.gz",
                     "bigann_learn.bvecs.gz",
                     "bigann_query.bvecs.gz",
                     "bigann_gnd.tar.gz",
                 };
 
-                const file_paths = try allocator.alloc([]const u8, sets.len);
-                for (sets, 0..) |set, i| {
-                    file_paths[i] = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dataset_dir_str, set });
-                }
+                const file_paths = try allocator.alloc([]const u8, file_names.len);
                 defer {
                     for (file_paths) |path| allocator.free(path);
                     allocator.free(file_paths);
                 }
 
-                const spawn_results = try allocator.alloc(SpawnResult, sets.len);
-                defer {
-                    for (spawn_results) |result| result.deinit(allocator);
-                    allocator.free(spawn_results);
+                var download_items: [file_names.len]ftp.DownloadItem = undefined;
+                inline for (file_names, 0..) |name, i| {
+                    file_paths[i] = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dataset_dir_str, name });
+                    download_items[i] = .{
+                        .url = URL_PREFIX ++ name,
+                        .output_path = file_paths[i],
+                    };
                 }
 
-                // Download each set with wget in parallel
-                inline for (sets, file_paths, 0..) |set, file_path, i| {
-                    std.log.info("starting download for {s}", .{set});
-                    const spawn_result = spawnAndCollectOutput(&[_][]const u8{
-                        "wget",
-                        "-O",
-                        file_path,
-                        URL_PREFIX ++ set,
-                    }, allocator) catch |e| switch (e) {
-                        error.OutOfMemory => return std.mem.Allocator.Error.OutOfMemory,
-                        else => {
-                            std.debug.print("Error starting wget for {s}: {}\n", .{ set, e });
-                            std.process.exit(1);
-                        },
-                    };
-                    spawn_results[i] = spawn_result;
-                }
+                // Download all files in parallel
+                const results = ftp.downloadFiles(allocator, &download_items) orelse {
+                    std.debug.print("Download failed (out of memory). Exiting.\n", .{});
+                    std.process.exit(1);
+                };
+                defer allocator.free(results);
 
-                // Wait and check exit code. If non-zero, print error and exit. If zero, continue to extract/move files.
-                for (spawn_results, sets) |*result, set| {
-                    const term = result.child.wait() catch |e| {
-                        std.debug.print("[{s}] Error waiting for {s} to finish: {}\n", .{ set, result.child.argv[0], e });
+                for (results) |result| {
+                    _ = result catch |err| {
+                        std.debug.print("Some downloads failed: {}. Exiting.\n", .{err});
                         std.process.exit(1);
                     };
-                    if (term.Exited != 0) {
-                        std.debug.print(
-                            "[{s}] Error: {s} failed with exit code {d}. stderr:\n{s}\n",
-                            .{ set, result.child.argv[0], term.Exited, result.stderr },
-                        );
-                        std.process.exit(1);
-                    } else {
-                        std.log.info("{s} downloaded successfully", .{set});
-                    }
                 }
 
                 // Extract the ground truth set with tar, and all other sets with gzip, sequentially
-                for (sets, file_paths) |set, file_path| {
-                    std.log.info("starting extraction for {s}", .{set});
-                    if (std.mem.endsWith(u8, set, ".tar.gz")) {
+                for (file_names, file_paths) |name, file_path| {
+                    std.log.info("Extracting {s}...", .{name});
+                    if (std.mem.endsWith(u8, name, ".tar.gz")) {
                         try spawnAndWait(&[_][]const u8{
                             "tar",
                             "-xzf",
@@ -252,14 +244,14 @@ const VectorSet = enum {
                             "-C",
                             dataset_dir_str,
                         }, allocator);
-                    } else if (std.mem.endsWith(u8, set, ".gz")) {
+                    } else if (std.mem.endsWith(u8, name, ".gz")) {
                         try spawnAndWait(&[_][]const u8{
                             "gzip",
                             "-d",
                             file_path,
                         }, allocator);
                     } else {
-                        std.log.warn("Unknown file type for {s}, skipping extraction", .{set});
+                        std.log.warn("Unknown file type for {s}, skipping extraction", .{name});
                         continue;
                     }
                 }

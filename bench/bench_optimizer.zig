@@ -173,8 +173,8 @@ pub fn main() !void {
     }
 
     const results_dir = csv.CSV_RESULTS_DIR;
-    std.fs.cwd().access(results_dir, .{}) catch |e| switch (e) {
-        error.FileNotFound => try std.fs.cwd().makeDir(results_dir),
+    std.fs.cwd().makePath(results_dir) catch |e| switch (e) {
+        error.PathAlreadyExists => {},
         else => return e,
     };
 
