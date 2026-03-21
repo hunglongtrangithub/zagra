@@ -290,10 +290,10 @@ const VectorSet = enum {
 };
 
 fn usage(exe_name: []const u8) std.io.Writer.Error!void {
-    try stdout.print("Usage: {s} [dataset_name] [custom_data_dir] [--no-convert]\n", .{exe_name});
+    try stdout.print("Usage: {s} [dataset_name] [custom_data_dir] [--no-convert] [--help|-h]\n", .{exe_name});
     try stdout.print("If dataset_name is not provided, enter interactive application.\n", .{});
     try stdout.print("If custom_data_dir is not provided, default to ./{s}\n", .{config.DATA_DIR});
-    try stdout.print("If --no-convert is provided, do not perform version from fvecs/bvecs/ivecs files to npy files.\n", .{});
+    try stdout.print("If --no-convert is provided, do not convert fvecs/bvecs/ivecs files to npy files.\n", .{});
     try stdout.print("Available datasets:\n", .{});
     inline for (std.meta.fieldNames(VectorSet)) |name| {
         try stdout.print("  {s}\n", .{name});
@@ -303,7 +303,7 @@ fn usage(exe_name: []const u8) std.io.Writer.Error!void {
 }
 
 fn checkHelp(arg: [:0]const u8, exe_name: []const u8) std.io.Writer.Error!void {
-    const help_args = [_][]const u8{ "help", "--help", "-h" };
+    const help_args = [_][]const u8{ "--help", "-h" };
     for (help_args) |help_arg| {
         if (std.mem.eql(u8, arg, help_arg)) {
             try usage(exe_name);

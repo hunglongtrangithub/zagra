@@ -12,7 +12,7 @@ var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
 const stdout = &stdout_writer.interface;
 
 const HELP_TEMPLATE =
-    \\{s} <vector_count> <graph_degree> [intermediate_graph_degree] [options]
+    \\Usage: {s} <vector_count> <graph_degree> [intermediate_graph_degree] [--help|-h] [options]
     \\- vector_count (required): Number of vectors in the dataset
     \\- graph_degree (required): Graph degree of the final CAGRA graph
     \\Options:
@@ -21,6 +21,7 @@ const HELP_TEMPLATE =
     \\- --k <n>: Number of nearest neighbors to search for (default: 4)
     \\- --queries <n>: Number of queries to search for (default: 1)
     \\- --save <path> or -o <path>: Save the built index to the specified directory (optional)
+    \\- --help, -h: Show this help message
     \\
 ;
 
