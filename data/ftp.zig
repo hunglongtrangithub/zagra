@@ -120,6 +120,7 @@ const DownloadContext = struct {
 
     const Response = struct {
         code: u16,
+        /// owned by caller
         message: []const u8,
     };
 
@@ -132,13 +133,17 @@ const DownloadContext = struct {
 
     /// Download a file via FTP with progress reporting
     fn download(self: *Self) FtpError!u64 {
+        // Arena for all FTP response message allocations
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
         // 1. Parse URL
         const uri = std.Uri.parse(self.url) catch {
             self.printStatus(.{ .err = "Invalid URL" });
             return error.InvalidUrl;
         };
 
-        // Verify it's an FTP URL
         if (!std.mem.eql(u8, uri.scheme, "ftp")) {
             self.printStatus(.{ .err = "Not an FTP URL" });
             return error.InvalidUrl;
@@ -146,27 +151,43 @@ const DownloadContext = struct {
 
         self.printStatus(.{ .msg = "Connecting..." });
 
-        // Get host string
         var host_buf: [std.Uri.host_name_max]u8 = undefined;
         const host = uri.getHost(&host_buf) catch {
             self.printStatus(.{ .err = "Invalid host" });
             return error.InvalidUrl;
         };
 
-        // Get port (default 21 for FTP)
         const port: u16 = uri.port orelse DEFAULT_PORT;
 
-        // 2. Connect to FTP server (control connection)
-        var control = std.net.tcpConnectToHost(self.allocator, host, port) catch {
+        // 2. Connect
+        const addr_list = std.net.getAddressList(self.allocator, host, port) catch {
+            self.printStatus(.{ .err = "DNS resolution failed" });
+            return error.ConnectionFailed;
+        };
+        defer addr_list.deinit();
+        if (addr_list.addrs.len == 0) {
+            self.printStatus(.{ .err = "Unknown host" });
+            return error.ConnectionFailed;
+        }
+        const server_addr = addr_list.addrs[0];
+
+        var control = std.net.tcpConnectToAddress(server_addr) catch {
             self.printStatus(.{ .err = "Connection failed" });
             return error.ConnectionFailed;
         };
         defer control.close();
 
-        var response_buf: [1024]u8 = undefined;
+        // Create persistent reader and writer
+        var read_buf: [4096]u8 = undefined;
+        var stream_reader = control.reader(&read_buf);
+        const reader: *std.Io.Reader = stream_reader.interface();
 
-        // 3. Read welcome message (expect 220)
-        const welcome = readResponse(&control, &response_buf) catch {
+        var write_buf: [512]u8 = undefined;
+        var stream_writer = control.writer(&write_buf);
+        const writer: *std.Io.Writer = &stream_writer.interface;
+
+        // 3. Welcome
+        const welcome = readResponse(reader, allocator) catch {
             self.printStatus(.{ .err = "No welcome message" });
             return error.ConnectionFailed;
         };
@@ -177,12 +198,12 @@ const DownloadContext = struct {
 
         self.printStatus(.{ .msg = "Logging in..." });
 
-        // 4. Login: USER anonymous
-        sendCommand(&control, "USER anonymous") catch {
+        // 4. USER
+        sendCommand(writer, "USER anonymous") catch {
             self.printStatus(.{ .err = "Failed to send USER" });
             return error.ConnectionFailed;
         };
-        const user_resp = readResponse(&control, &response_buf) catch {
+        const user_resp = readResponse(reader, allocator) catch {
             self.printStatus(.{ .err = "No USER response" });
             return error.ConnectionFailed;
         };
@@ -191,13 +212,13 @@ const DownloadContext = struct {
             return error.LoginFailed;
         }
 
-        // 5. PASS (if needed)
+        // 5. PASS
         if (user_resp.code == 331) {
-            sendCommand(&control, "PASS anonymous@example.com") catch {
+            sendCommand(writer, "PASS anonymous@example.com") catch {
                 self.printStatus(.{ .err = "Failed to send PASS" });
                 return error.ConnectionFailed;
             };
-            const pass_resp = readResponse(&control, &response_buf) catch {
+            const pass_resp = readResponse(reader, allocator) catch {
                 self.printStatus(.{ .err = "No PASS response" });
                 return error.ConnectionFailed;
             };
@@ -207,12 +228,12 @@ const DownloadContext = struct {
             }
         }
 
-        // 6. Set binary mode: TYPE I
-        sendCommand(&control, "TYPE I") catch {
+        // 6. TYPE I
+        sendCommand(writer, "TYPE I") catch {
             self.printStatus(.{ .err = "Failed to send TYPE" });
             return error.ConnectionFailed;
         };
-        const type_resp = readResponse(&control, &response_buf) catch {
+        const type_resp = readResponse(reader, allocator) catch {
             self.printStatus(.{ .err = "No TYPE response" });
             return error.ConnectionFailed;
         };
@@ -223,20 +244,19 @@ const DownloadContext = struct {
 
         self.printStatus(.{ .msg = "Getting file size..." });
 
-        // Get full path from URL
         const file_path = uri.path.percent_encoded;
 
-        // 7. Get file size: SIZE full_path
+        // 7. SIZE
         var size_cmd_buf: [512]u8 = undefined;
         const size_cmd = std.fmt.bufPrint(&size_cmd_buf, "SIZE {s}", .{file_path}) catch {
             self.printStatus(.{ .err = "Path too long" });
             return error.CommandFailed;
         };
-        sendCommand(&control, size_cmd) catch {
+        sendCommand(writer, size_cmd) catch {
             self.printStatus(.{ .err = "Failed to send SIZE" });
             return error.ConnectionFailed;
         };
-        const size_resp = readResponse(&control, &response_buf) catch {
+        const size_resp = readResponse(reader, allocator) catch {
             self.printStatus(.{ .err = "No SIZE response" });
             return error.ConnectionFailed;
         };
@@ -249,31 +269,28 @@ const DownloadContext = struct {
             return error.InvalidResponse;
         };
 
-        // 8. Enter passive mode (try EPSV first, fall back to PASV)
+        // 8. EPSV / PASV
         var data_addr: std.net.Address = undefined;
-        var epsv_failed = false;
 
-        sendCommand(&control, "EPSV") catch {
+        sendCommand(writer, "EPSV") catch {
             self.printStatus(.{ .err = "Failed to send EPSV" });
             return error.ConnectionFailed;
         };
-        const epsv_resp = readResponse(&control, &response_buf) catch {
+        const epsv_resp = readResponse(reader, allocator) catch {
             self.printStatus(.{ .err = "No EPSV response" });
             return error.ConnectionFailed;
         };
 
         if (epsv_resp.code == 229) {
-            // EPSV response - try to parse, fall back to PASV if parsing fails
-            if (parseEpsvResponse(epsv_resp.message, host, port)) |addr| {
+            if (parseEpsvResponse(epsv_resp.message, server_addr)) |addr| {
                 data_addr = addr;
             } else |_| {
                 self.printStatus(.{ .msg = "EPSV parse failed, falling back to PASV..." });
-                epsv_failed = true;
-                sendCommand(&control, "PASV") catch {
+                sendCommand(writer, "PASV") catch {
                     self.printStatus(.{ .err = "Failed to send PASV" });
                     return error.ConnectionFailed;
                 };
-                const pasv_resp = readResponse(&control, &response_buf) catch {
+                const pasv_resp = readResponse(reader, allocator) catch {
                     self.printStatus(.{ .err = "No PASV response" });
                     return error.ConnectionFailed;
                 };
@@ -287,13 +304,11 @@ const DownloadContext = struct {
                 };
             }
         } else if (epsv_resp.code == 500) {
-            // EPSV not supported, fall back to PASV
-            epsv_failed = true;
-            sendCommand(&control, "PASV") catch {
+            sendCommand(writer, "PASV") catch {
                 self.printStatus(.{ .err = "Failed to send PASV" });
                 return error.ConnectionFailed;
             };
-            const pasv_resp = readResponse(&control, &response_buf) catch {
+            const pasv_resp = readResponse(reader, allocator) catch {
                 self.printStatus(.{ .err = "No PASV response" });
                 return error.ConnectionFailed;
             };
@@ -310,24 +325,24 @@ const DownloadContext = struct {
             return error.CommandFailed;
         }
 
-        // 10. Connect to data port
+        // 9. Connect to data port
         var data_stream = std.net.tcpConnectToAddress(data_addr) catch {
             self.printStatus(.{ .err = "Data connection failed" });
             return error.ConnectionFailed;
         };
         defer data_stream.close();
 
-        // 10. Request file: RETR full_path
+        // 10. RETR
         var retr_cmd_buf: [512]u8 = undefined;
         const retr_cmd = std.fmt.bufPrint(&retr_cmd_buf, "RETR {s}", .{file_path}) catch {
             self.printStatus(.{ .err = "Path too long" });
             return error.CommandFailed;
         };
-        sendCommand(&control, retr_cmd) catch {
+        sendCommand(writer, retr_cmd) catch {
             self.printStatus(.{ .err = "Failed to send RETR" });
             return error.ConnectionFailed;
         };
-        const retr_resp = readResponse(&control, &response_buf) catch {
+        const retr_resp = readResponse(reader, allocator) catch {
             self.printStatus(.{ .err = "No RETR response" });
             return error.ConnectionFailed;
         };
@@ -336,7 +351,7 @@ const DownloadContext = struct {
             return error.TransferFailed;
         }
 
-        // 12. Open local file for writing
+        // 11. Open output file
         const file = blk: {
             if (std.fs.path.isAbsolute(self.output_path)) {
                 break :blk std.fs.createFileAbsolute(self.output_path, .{}) catch {
@@ -352,7 +367,7 @@ const DownloadContext = struct {
         };
         defer file.close();
 
-        // 13. Read data and write to file, update progress
+        // 12. Transfer
         var downloaded: u64 = 0;
         var buffer: [64 * 1024]u8 = undefined;
 
@@ -375,14 +390,14 @@ const DownloadContext = struct {
             } });
         }
 
-        // 14. Read transfer complete (226)
-        const complete_resp = readResponse(&control, &response_buf) catch {
+        // 13. 226 complete
+        const complete_resp = readResponse(reader, allocator) catch {
             self.printStatus(.{ .err = "No completion response" });
             return error.ConnectionFailed;
         };
-        _ = complete_resp; // May not be 226, but transfer might still be OK
+        _ = complete_resp;
 
-        // 15. Verify size
+        // 14. Verify size
         if (downloaded != file_size) {
             self.printStatus(.{ .err = "Size mismatch!" });
             return error.SizeMismatch;
@@ -390,16 +405,88 @@ const DownloadContext = struct {
 
         self.printStatus(.{ .done = downloaded });
 
-        // 16. QUIT (best effort)
-        sendCommand(&control, "QUIT") catch {};
-        _ = readResponse(&control, &response_buf) catch {};
+        // 15. QUIT (best effort)
+        sendCommand(writer, "QUIT") catch {};
+        _ = readResponse(reader, allocator) catch {};
 
         return downloaded;
     }
 
-    fn sendCommand(stream: *std.net.Stream, cmd: []const u8) !void {
-        stream.writeAll(cmd) catch return error.ConnectionFailed;
-        stream.writeAll("\r\n") catch return error.ConnectionFailed;
+    fn sendCommand(writer: *std.Io.Writer, cmd: []const u8) error{ConnectionFailed}!void {
+        writer.writeAll(cmd) catch return error.ConnectionFailed;
+        writer.writeAll("\r\n") catch return error.ConnectionFailed;
+        writer.flush() catch return error.ConnectionFailed;
+    }
+
+    fn readResponse(reader: *std.Io.Reader, allocator: std.mem.Allocator) !Response {
+        while (true) {
+            // Accumulate into a growable allocation
+            var line_writer = std.Io.Writer.Allocating.init(allocator);
+            defer line_writer.deinit();
+
+            // Stream up to (but not including) '\n' into line_writer
+            _ = reader.streamDelimiter(&line_writer.writer, '\n') catch |err| switch (err) {
+                error.EndOfStream => return error.ConnectionFailed,
+                error.ReadFailed, error.WriteFailed => return error.ConnectionFailed,
+            };
+            // Toss the '\n' itself
+            reader.toss(1);
+
+            // Strip trailing \r
+            const line = std.mem.trimRight(u8, line_writer.written(), "\r");
+
+            if (line.len < 4) continue;
+
+            const code = std.fmt.parseInt(u16, line[0..3], 10) catch continue;
+
+            if (line[3] == ' ') {
+                const msg = try allocator.dupe(u8, line[4..]);
+                return Response{ .code = code, .message = msg };
+            }
+            // NNN- continuation, loop and deinit this line's allocation
+        }
+    }
+
+    /// Parse PASV response: "Entering Passive Mode (h1,h2,h3,h4,p1,p2)"
+    fn parsePasvResponse(msg: []const u8) !std.net.Address {
+        const start = std.mem.indexOf(u8, msg, "(") orelse return error.InvalidResponse;
+        const end = std.mem.indexOf(u8, msg, ")") orelse return error.InvalidResponse;
+        if (start >= end) return error.InvalidResponse;
+
+        const nums_str = msg[start + 1 .. end];
+
+        // Parse 6 comma-separated numbers
+        var nums: [6]u8 = undefined;
+        var iter = std.mem.splitScalar(u8, nums_str, ',');
+        var i: usize = 0;
+        while (iter.next()) |part| {
+            if (i >= 6) return error.InvalidResponse;
+            nums[i] = std.fmt.parseInt(u8, std.mem.trim(u8, part, " "), 10) catch return error.InvalidResponse;
+            i += 1;
+        }
+        if (i != 6) return error.InvalidResponse;
+
+        // Port = p1 * 256 + p2
+        const port: u16 = @as(u16, nums[4]) * 256 + nums[5];
+
+        return std.net.Address{ .in = std.net.Ip4Address.init(nums[0..4].*, port) };
+    }
+
+    fn parseEpsvResponse(msg: []const u8, server_addr: std.net.Address) !std.net.Address {
+        const start = std.mem.indexOf(u8, msg, "|||") orelse return error.InvalidResponse;
+        const end = std.mem.indexOfScalar(u8, msg[start + 3 ..], '|') orelse return error.InvalidResponse;
+        const port_str = msg[start + 3 .. start + 3 + end];
+        const port = std.fmt.parseInt(u16, port_str, 10) catch return error.InvalidResponse;
+
+        var addr = server_addr;
+        addr.setPort(port);
+        return addr;
+    }
+
+    test parsePasvResponse {
+        const addr = try parsePasvResponse("Entering Passive Mode (131,254,14,19,196,108)");
+        const expected = std.net.Address{ .in = std.net.Ip4Address.init(.{ 131, 254, 14, 19 }, 50284) };
+        try std.testing.expectEqual(expected, addr);
     }
 
     /// Print status on this thread's designated terminal line
@@ -458,80 +545,6 @@ const DownloadContext = struct {
         // Move cursor back down
         // \x1b[nB = move down n lines
         writer.print("\x1b[{d}B\r", .{lines_up}) catch return;
-    }
-
-    fn readResponse(stream: *std.net.Stream, buffer: []u8) !Response {
-        var total_read: usize = 0;
-
-        // Read until we get \r\n
-        while (total_read < buffer.len) {
-            const n = stream.read(buffer[total_read..]) catch return error.ConnectionFailed;
-            if (n == 0) return error.ConnectionFailed;
-            total_read += n;
-
-            if (std.mem.indexOf(u8, buffer[0..total_read], "\r\n")) |_| break;
-        }
-
-        if (total_read < 4) return error.InvalidResponse;
-
-        // Parse code (first 3 digits)
-        const code = std.fmt.parseInt(u16, buffer[0..3], 10) catch return error.InvalidResponse;
-
-        // Find end of first line
-        const line_end = std.mem.indexOf(u8, buffer[0..total_read], "\r\n") orelse total_read;
-
-        // Message starts after "XXX " (code + space)
-        const msg_start: usize = if (buffer[3] == ' ' or buffer[3] == '-') 4 else 3;
-
-        return Response{
-            .code = code,
-            .message = std.mem.trim(u8, buffer[msg_start..line_end], " \r\n"),
-        };
-    }
-
-    /// Parse PASV response: "Entering Passive Mode (h1,h2,h3,h4,p1,p2)"
-    fn parsePasvResponse(msg: []const u8) !std.net.Address {
-        const start = std.mem.indexOf(u8, msg, "(") orelse return error.InvalidResponse;
-        const end = std.mem.indexOf(u8, msg, ")") orelse return error.InvalidResponse;
-        if (start >= end) return error.InvalidResponse;
-
-        const nums_str = msg[start + 1 .. end];
-
-        // Parse 6 comma-separated numbers
-        var nums: [6]u8 = undefined;
-        var iter = std.mem.splitScalar(u8, nums_str, ',');
-        var i: usize = 0;
-        while (iter.next()) |part| {
-            if (i >= 6) return error.InvalidResponse;
-            nums[i] = std.fmt.parseInt(u8, std.mem.trim(u8, part, " "), 10) catch return error.InvalidResponse;
-            i += 1;
-        }
-        if (i != 6) return error.InvalidResponse;
-
-        // Port = p1 * 256 + p2
-        const port: u16 = @as(u16, nums[4]) * 256 + nums[5];
-
-        return std.net.Address{ .in = std.net.Ip4Address.init(nums[0..4].*, port) };
-    }
-
-    /// Parse EPSV response: "Entering Extended Passive Mode (|||port|)"
-    fn parseEpsvResponse(msg: []const u8, host: []const u8, control_port: u16) !std.net.Address {
-        const start = std.mem.indexOf(u8, msg, "|||") orelse return error.InvalidResponse;
-        const end = std.mem.indexOfScalar(u8, msg[start + 3 ..], '|') orelse return error.InvalidResponse;
-        const port_str = msg[start + 3 .. start + 3 + end];
-        const port = std.fmt.parseInt(u16, port_str, 10) catch return error.InvalidResponse;
-
-        // Parse the IP address and use it with the new port
-        const ip = try std.net.Ip4Address.parse(host, control_port);
-        var addr = std.net.Address{ .in = ip };
-        addr.setPort(port);
-        return addr;
-    }
-
-    test "parsePasvResponse" {
-        const addr = try parsePasvResponse("Entering Passive Mode (131,254,14,19,196,108)");
-        const expected = std.net.Address{ .in = std.net.Ip4Address.init(.{ 131, 254, 14, 19 }, 50284) };
-        try std.testing.expectEqual(expected, addr);
     }
 };
 
