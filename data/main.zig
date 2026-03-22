@@ -21,17 +21,6 @@ const VectorSet = enum {
     ANN_GIST1M,
     ANN_SIFT1B,
 
-    const SpawnResult = struct {
-        child: std.process.Child,
-        stdout: []u8,
-        stderr: []u8,
-
-        pub fn deinit(self: *const SpawnResult, allocator: std.mem.Allocator) void {
-            allocator.free(self.stdout);
-            allocator.free(self.stderr);
-        }
-    };
-
     fn checkExecutable(name: []const u8, allocator: std.mem.Allocator) void {
         const run_result = std.process.Child.run(.{
             .allocator = allocator,
@@ -48,48 +37,38 @@ const VectorSet = enum {
         }
     }
 
-    fn spawnAndCollectOutput(argv: []const []const u8, allocator: std.mem.Allocator) !SpawnResult {
-        var child = std.process.Child.init(argv, allocator);
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
-
-        var stdout_output: std.ArrayList(u8) = .empty;
-        defer stdout_output.deinit(allocator);
-        var stderr_output: std.ArrayList(u8) = .empty;
-        defer stderr_output.deinit(allocator);
-
-        try child.spawn();
-        errdefer {
-            _ = child.kill() catch {};
-        }
-
-        child.collectOutput(allocator, &stdout_output, &stderr_output, 50 * 1024) catch |e| {
-            log.err("Error collecting output: {}", .{e});
-        };
-
-        return .{
-            .child = child,
-            .stdout = try stdout_output.toOwnedSlice(allocator),
-            .stderr = try stderr_output.toOwnedSlice(allocator),
-        };
-    }
-
-    /// Spawns a child process with the given arguments and waits for it to finish.
-    /// Exits on spawn failure or non-zero exit code.
-    fn spawnAndWait(
+    /// Spawns a child process with the given arguments.
+    /// Exits on spawn failure. Return the spawned child process on success.
+    fn spawn(
         argv: []const []const u8,
         allocator: std.mem.Allocator,
-    ) void {
-        if (argv.len == 0) return;
-        const exe = argv[0];
+    ) std.process.Child {
         var cmd = std.process.Child.init(argv, allocator);
-        const term = cmd.spawnAndWait() catch |e| {
-            std.debug.print("Error starting {s}: {}\n", .{ exe, e });
+        cmd.spawn() catch |e| {
+            std.debug.print("Error starting process: {}\n", .{e});
+            std.debug.print("Argv: ", .{});
+            for (argv) |arg| std.debug.print("{s} ", .{arg});
+            std.debug.print("\n", .{});
+            std.process.exit(1);
+        };
+        return cmd;
+    }
+
+    /// Waits for the given child process to finish.
+    /// Exits if the process fails or exits with a non-zero code.
+    fn wait(cmd: *std.process.Child) void {
+        const term = cmd.wait() catch |e| {
+            std.debug.print("Error waiting for process: {}\n", .{e});
+            std.debug.print("Argv: ", .{});
+            for (cmd.argv) |arg| std.debug.print("{s} ", .{arg});
+            std.debug.print("\n", .{});
             std.process.exit(1);
         };
         if (term.Exited != 0) {
-            std.debug.print("Error: {s} failed with exit code {d}.\n", .{ exe, term.Exited });
+            std.debug.print("Error: Process exited with code {d}.\n", .{term.Exited});
+            std.debug.print("Argv: ", .{});
+            for (cmd.argv) |arg| std.debug.print("{s} ", .{arg});
+            std.debug.print("\n", .{});
             std.process.exit(1);
         }
     }
@@ -171,13 +150,14 @@ const VectorSet = enum {
                 const tar_file_url = try std.fmt.allocPrint(allocator, "{s}{s}", .{ URL_PREFIX, file_name });
                 defer allocator.free(tar_file_url);
 
-                const download_items = [_]ftp.DownloadItem{.{
-                    .url = tar_file_url,
-                    .output_path = tar_file_path,
-                }};
-
                 log.info("Downloading {s}...", .{file_name});
-                const results = ftp.downloadFiles(allocator, &download_items) orelse {
+                const results = ftp.downloadFiles(
+                    allocator,
+                    &[_]ftp.DownloadItem{.{
+                        .url = tar_file_url,
+                        .output_path = tar_file_path,
+                    }},
+                ) orelse {
                     std.debug.print("Download failed (out of memory). Exiting.\n", .{});
                     std.process.exit(1);
                 };
@@ -191,13 +171,14 @@ const VectorSet = enum {
                 }
 
                 log.info("Extracting...", .{});
-                spawnAndWait(&[_][]const u8{
+                var cmd = spawn(&[_][]const u8{
                     "tar",
                     "-xzf",
                     tar_file_path,
                     "-C",
                     dataset_dir_str,
                 }, allocator);
+                wait(&cmd);
             },
             .ANN_SIFT1B => {
                 const file_names = [_][]const u8{
@@ -236,28 +217,30 @@ const VectorSet = enum {
                     };
                 }
 
-                // Extract the ground truth set with tar, and all other sets with gzip, sequentially
-                for (file_names, file_paths) |name, file_path| {
+                var cmds: [4]std.process.Child = undefined;
+                // Extract the ground truth set with tar, and all other sets with gzip, in parallel
+                for (file_names, file_paths, &cmds) |name, file_path, *cmd| {
                     log.info("Extracting {s}...", .{name});
-                    if (std.mem.endsWith(u8, name, ".tar.gz")) {
-                        spawnAndWait(&[_][]const u8{
+                    cmd.* = if (std.mem.endsWith(u8, name, ".tar.gz"))
+                        spawn(&[_][]const u8{
                             "tar",
                             "-xzf",
                             file_path,
                             "-C",
                             dataset_dir_str,
-                        }, allocator);
-                    } else if (std.mem.endsWith(u8, name, ".gz")) {
-                        spawnAndWait(&[_][]const u8{
+                        }, allocator)
+                    else if (std.mem.endsWith(u8, name, ".gz"))
+                        spawn(&[_][]const u8{
                             "gzip",
                             "-d",
                             file_path,
-                        }, allocator);
-                    } else {
+                        }, allocator)
+                    else {
                         log.warn("Unknown file type for {s}, skipping extraction", .{name});
                         continue;
-                    }
+                    };
                 }
+                for (&cmds) |*cmd| wait(cmd);
             },
         }
 
