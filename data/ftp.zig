@@ -2,6 +2,7 @@
 //! Supports anonymous login and passive mode transfers
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const FtpError = error{
     InvalidUrl,
@@ -128,7 +129,18 @@ const DownloadContext = struct {
 
     /// Thread entry point
     fn run(self: *Self) void {
+        enableWindowsAnsi();
         self.result.* = self.download();
+    }
+
+    /// Enable ANSI escape code processing on Windows 10+ to allow cursor movement and line clearing
+    fn enableWindowsAnsi() void {
+        // NOTE: haven't tested this on Winddows yet
+        if (builtin.os.tag != .windows) return;
+        const handle = std.os.windows.GetStdHandle(std.os.windows.STD_ERROR_HANDLE) catch return;
+        var mode: std.os.windows.DWORD = 0;
+        if (std.os.windows.kernel32.GetConsoleMode(handle, &mode) == 0) return;
+        _ = std.os.windows.kernel32.SetConsoleMode(handle, mode | 0x0004); // ENABLE_VIRTUAL_TERMINAL_PROCESSING
     }
 
     /// Download a file via FTP with progress reporting

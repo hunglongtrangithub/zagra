@@ -232,7 +232,7 @@ const VectorSet = enum {
                     else if (std.mem.endsWith(u8, name, ".gz"))
                         spawn(&[_][]const u8{
                             "gzip",
-                            "-d",
+                            "-df",
                             file_path,
                         }, allocator)
                     else {
