@@ -347,13 +347,13 @@ pub fn main() (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
         return;
     }
 
+    // Ask for vector set
     try stdout.print("Welcome to TEXMEXSTEAL!\n", .{});
     try stdout.print("Install the vector set of your choosing (send end-of-file signal to exit):\n", .{});
     inline for (std.meta.fieldNames(VectorSet), 1..) |name, i| {
         try stdout.print("  {d}: {s}\n", .{ i, name });
     }
     try stdout.flush();
-
     const vector_set: VectorSet = while (true) {
         try stdout.print("Your choice: ", .{});
         try stdout.flush();
@@ -400,6 +400,7 @@ pub fn main() (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
         }
     };
 
+    // Ask for data directory
     try stdout.print("Enter data directory (either relative to CWD or absolute) (press Enter to use default): ", .{});
     try stdout.flush();
     const data_dir_input = stdin.takeDelimiter('\n') catch |e| blk: {
@@ -413,11 +414,7 @@ pub fn main() (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
         return;
     };
 
-    const trimmed_data_dir = std.mem.trim(u8, data_dir_input, " \t\r\n");
-    const final_data_dir = if (trimmed_data_dir.len == 0) config.DATA_DIR else trimmed_data_dir;
-
-    try vector_set.install(allocator, final_data_dir);
-
+    // Ask about conversion to .npy
     try stdout.print("Convert .fvecs/.ivecs/.bvecs files to .npy format? (press Enter to convert, anything else to skip): ", .{});
     try stdout.flush();
     const response = stdin.takeDelimiter('\n') catch |e| {
@@ -427,8 +424,18 @@ pub fn main() (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
         std.debug.print("\nEnd-of-input detected. Exiting.\n", .{});
         return;
     };
-    if (response.len == 0) return;
 
+    // Install the dataset
+    const trimmed_data_dir = std.mem.trim(u8, data_dir_input, " \t\r\n");
+    const final_data_dir = if (trimmed_data_dir.len == 0) config.DATA_DIR else trimmed_data_dir;
+    try vector_set.install(allocator, final_data_dir);
+
+    // Convert to .npy format if user agreed
+    const do_convert = response.len == 0;
+    if (!do_convert) {
+        log.info("Skipping conversion to .npy format as per user choice.", .{});
+        return;
+    }
     const dataset_dir_str = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ final_data_dir, @tagName(vector_set) });
     defer allocator.free(dataset_dir_str);
     var dataset_dir = std.fs.cwd().openDir(dataset_dir_str, .{ .iterate = true }) catch |e| {

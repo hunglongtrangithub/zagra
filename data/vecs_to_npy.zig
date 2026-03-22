@@ -187,6 +187,7 @@ pub fn convertVecsToNpy(dataset_dir: std.fs.Dir) void {
         };
         defer npy_file.close();
 
+        log.info("Converting {s} to {s}", .{ entry.name, npy_name });
         convert(
             vecs_type,
             vecs_file,
