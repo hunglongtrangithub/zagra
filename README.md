@@ -43,6 +43,9 @@ To achieve this, I chose Zig to leverages Zig's unique capabilities, such as **c
 ### Phase 5: Benchmarking & Evaluation (Planned)
 - [ ] Benchmark against HNSW
 
+## Benchmark details
+HNSW code is from [hnswlib](https://github.com/nmslib/hnswlib/tree/c1b9b79af3d10c6ee7b5d0afa1ce851ae975254c).
+
 ## Acknowledgements
 - [CAGRA paper](https://arxiv.org/pdf/2308.15136)
 - [PyNNDescent](https://github.com/lmcinnes/pynndescent)

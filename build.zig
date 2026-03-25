@@ -157,4 +157,53 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_zagra_exe_tests.step);
     test_step.dependOn(&run_bench_mod_tests.step);
     test_step.dependOn(&run_texmex_exe_tests.step);
+
+    // Create hnsw module that wraps the hnswlib C++ library
+    const hnsw_mod = b.createModule(.{
+        .root_source_file = b.path("hnsw/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    // Compile C++ source files
+    const hnsw_cpp_sources = [_][]const u8{
+        "hnsw/hnswlib-c/hnsw.cpp",
+        "hnsw/hnswlib-c/bruteforce.cpp",
+    };
+
+    for (hnsw_cpp_sources) |cpp_src| {
+        hnsw_mod.addCSourceFile(.{
+            .file = b.path(cpp_src),
+            .language = .cpp,
+        });
+    }
+
+    // Create hnsw executable
+    const hnsw_exe = b.addExecutable(.{
+        .name = "hnsw",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("hnsw/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "hnsw", .module = hnsw_mod },
+            },
+        }),
+    });
+    // Link C++ standard library
+    hnsw_exe.root_module.link_libcpp = true;
+
+    b.installArtifact(hnsw_exe);
+
+    const hnsw_run_cmd = b.addRunArtifact(hnsw_exe);
+    if (b.args) |args| hnsw_run_cmd.addArgs(args);
+    hnsw_run_cmd.step.dependOn(b.getInstallStep());
+
+    const hnsw_run_step = b.step("hnsw", "Run the hnsw example");
+    hnsw_run_step.dependOn(&hnsw_run_cmd.step);
+
+    const hnsw_exe_tests = b.addTest(.{
+        .root_module = hnsw_exe.root_module,
+    });
+    const run_hnsw_exe_tests = b.addRunArtifact(hnsw_exe_tests);
+    test_step.dependOn(&run_hnsw_exe_tests.step);
 }
