@@ -49,7 +49,9 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
         const SearchBuffer = mod_soa_slice.SoaSlice(SearchEntry);
 
         pub const SearchResult = struct {
+            /// dims: [num_queries, k]
             neighbors: StaticArray(NodeIdType, 2),
+            /// dims: [num_queries, k]
             distances: StaticArray(T, 2),
         };
 

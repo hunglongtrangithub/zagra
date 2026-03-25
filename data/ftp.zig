@@ -437,10 +437,7 @@ const DownloadContext = struct {
             defer line_writer.deinit();
 
             // Stream up to (but not including) '\n' into line_writer
-            _ = reader.streamDelimiter(&line_writer.writer, '\n') catch |err| switch (err) {
-                error.EndOfStream => return error.ConnectionFailed,
-                error.ReadFailed, error.WriteFailed => return error.ConnectionFailed,
-            };
+            _ = reader.streamDelimiter(&line_writer.writer, '\n') catch return error.ConnectionFailed;
             // Toss the '\n' itself
             reader.toss(1);
 
