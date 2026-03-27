@@ -110,6 +110,7 @@ fn convert(
     const allocator = fba.allocator();
 
     // Craft the header and write to npy file.
+    // Endianness is little endian so that the data can be written directly from the vecs file without needing to swap byte order.
     const npy_header = znpy.header.Header{
         .descr = switch (vecs_type) {
             .Fvecs => .{ .Float32 = .little },
@@ -142,11 +143,9 @@ fn convert(
         // since we already checked the file size is consistent with the dim value.
         _ = try reader.takeInt(i32, .little);
         for (0..vecs_dim) |_| {
+            // Byte order in the buffer if preserved:
+            // little endian in vecs file to little endian in npy file
             try reader.readSliceAll(elem_buffer);
-            if (builtin.cpu.arch.endian() != .little and vecs_type != .Bvecs) {
-                // Need to swap endianness for multi-byte types if the CPU is not little-endian.
-                std.mem.reverse(u8, elem_buffer);
-            }
             try writer.writeAll(elem_buffer);
         }
     }
@@ -209,6 +208,7 @@ pub fn convertVecsToNpy(dataset_dir: std.fs.Dir) void {
 pub fn testConversion(comptime T: type, num_vecs: usize, dim: usize) !void {
     const vecs_type = comptime VecsType.fromZigType(T);
 
+    // Prepare the original data buffer that we will write to the vecs file and expect to read back from the npy file.
     const ogirinal_len = num_vecs * dim;
     const original = try std.testing.allocator.alloc(T, ogirinal_len);
     defer std.testing.allocator.free(original);
@@ -221,28 +221,39 @@ pub fn testConversion(comptime T: type, num_vecs: usize, dim: usize) !void {
         original[i] = elem;
     }
 
+    // Prepare the vecs file content in memory. Each vector is stored as [dim (i32), data...], and data is stored in little endian byte order.
     const vec_size = 4 + dim * @sizeOf(T);
     const vecs_bytes_len = num_vecs * vec_size;
     var vecs_bytes = try std.testing.allocator.alloc(u8, vecs_bytes_len);
     defer std.testing.allocator.free(vecs_bytes);
 
-    const dim_i32 = std.math.cast(i32, dim) orelse return error.VecsDimExceedsUsize;
-    for (0..num_vecs) |i| {
-        const start = i * vec_size;
-        std.mem.writeInt(i32, @ptrCast(vecs_bytes[start..][0..4]), dim_i32, .little);
-        const vec_slice: []T = original[i * dim ..][0..dim];
-        if (builtin.cpu.arch.endian() != .little and vecs_type != .Bvecs) {
-            // Need to swap endianness for multi-byte types if the CPU is not little-endian.
+    const dim_i32 = std.math.cast(i32, dim) orelse @panic("Dimension exceeds i32 max value.");
+    if (builtin.cpu.arch.endian() != .little and vecs_type != .Bvecs) {
+        // Need to swap endianness for multi-byte types if the CPU is not little-endian.
+        const vec_slice = try std.testing.allocator.alloc(T, dim);
+        defer std.testing.allocator.free(vec_slice);
+        for (0..num_vecs) |i| {
+            const start = i * vec_size;
+            std.mem.writeInt(i32, @ptrCast(vecs_bytes[start..][0..4]), dim_i32, .little);
+            @memcpy(vec_slice, original[i * dim ..][0..dim]);
             std.mem.byteSwapAllElements(T, vec_slice);
+            @memcpy(vecs_bytes[start + 4 .. start + vec_size], std.mem.sliceAsBytes(vec_slice));
         }
-        @memcpy(vecs_bytes[start + 4 .. start + vec_size], std.mem.sliceAsBytes(vec_slice));
+    } else {
+        for (0..num_vecs) |i| {
+            const start = i * vec_size;
+            const vec_slice = original[i * dim ..][0..dim];
+            @memcpy(vecs_bytes[start + 4 .. start + vec_size], std.mem.sliceAsBytes(vec_slice));
+        }
     }
 
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
+    // Write the vecs bytes to a vecs file.
+    const vecs_file_name = "test.fvecs";
     {
-        const vecs_file = try tmp_dir.dir.createFile("test.fvecs", .{});
+        const vecs_file = try tmp_dir.dir.createFile(vecs_file_name, .{});
         defer vecs_file.close();
 
         var vecs_writer = vecs_file.writer(&.{});
@@ -251,15 +262,18 @@ pub fn testConversion(comptime T: type, num_vecs: usize, dim: usize) !void {
         try writer.flush();
     }
 
+    // Convert the vecs file to npy format using our convert function, and write to a npy file.
+    const npy_file_name = "test.npy";
     {
-        const vecs_file = try tmp_dir.dir.openFile("test.fvecs", .{});
+        const vecs_file = try tmp_dir.dir.openFile(vecs_file_name, .{});
         defer vecs_file.close();
-        const npy_file = try tmp_dir.dir.createFile("test.npy", .{});
+        const npy_file = try tmp_dir.dir.createFile(npy_file_name, .{});
         defer npy_file.close();
         try convert(vecs_type, vecs_file, npy_file);
     }
 
-    const npy_content = try tmp_dir.dir.readFileAlloc(std.testing.allocator, "test.npy", std.math.maxInt(usize));
+    // Read the npy file content back and check that it matches the original data.
+    const npy_content = try tmp_dir.dir.readFileAlloc(std.testing.allocator, npy_file_name, std.math.maxInt(usize));
     defer std.testing.allocator.free(npy_content);
 
     const array = try znpy.array.static.StaticArray(T, 2).fromFileBuffer(npy_content, std.testing.allocator);
