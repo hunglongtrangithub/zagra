@@ -471,7 +471,7 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
             const search_distances: []T = search_buffer.items(.distance);
             var candidate_count = config.search_width;
             for (0..config.max_iterations) |iteration| {
-                log.info("Iteration {d}, candidate_count: {d}", .{ iteration, candidate_count });
+                log.debug("Iteration {d}, candidate_count: {d}", .{ iteration, candidate_count });
 
                 sortTopK(search_buffer.subslice(
                     0,

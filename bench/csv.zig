@@ -1,8 +1,4 @@
 const std = @import("std");
-const config = @import("config");
-
-/// Directory to store csv files from running benchmarks
-pub const CSV_RESULTS_DIR: []const u8 = config.BENCH_DIR ++ "/results";
 
 const Error = error{RowLengthMismatch} || std.Io.Writer.Error;
 
