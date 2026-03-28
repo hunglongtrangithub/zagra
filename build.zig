@@ -6,6 +6,7 @@ const benchmarks = [_][]const u8{
     "bench_vector_simd",
     "bench_nn_descent",
     "bench_optimizer",
+    "bench_hnsw_vs_zagra",
 };
 comptime {
     for (benchmarks) |bench_name| {
@@ -75,6 +76,37 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    // Create texmex module for VectorSet enum
+    const texmex_mod = b.addModule("texmex", .{
+        .root_source_file = b.path("data/root.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "config", .module = config_mod },
+            .{ .name = "znpy", .module = znpy_mod },
+        },
+    });
+    // Add executable for dataset downloader
+    const texmex_exe = b.addExecutable(.{
+        .name = "textmexsteal",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(config.DATA_DIR ++ "/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "config", .module = config_mod },
+                .{ .name = "znpy", .module = znpy_mod },
+            },
+        }),
+    });
+    const texmex_run_cmd = b.addRunArtifact(texmex_exe);
+    if (b.args) |args| texmex_run_cmd.addArgs(args);
+    const texmex_run_step = b.step("texmex", "Run the TEXMEX ANN vector set downloader");
+    texmex_run_step.dependOn(&texmex_run_cmd.step);
+    const texmex_mod_tests = b.addTest(.{
+        .root_module = texmex_mod,
+    });
+    const run_texmex_mod_tests = b.addRunArtifact(texmex_mod_tests);
+
     //  Create bench module for testing
     const bench_mod = b.addModule("bench", .{
         .root_source_file = b.path(config.BENCH_DIR ++ "/root.zig"),
@@ -85,6 +117,25 @@ pub fn build(b: *std.Build) void {
     });
     const run_bench_mod_tests = b.addRunArtifact(bench_mod_tests);
 
+    // Create hnsw module that wraps the hnswlib C++ library
+    const hnsw_mod = b.createModule(.{
+        .root_source_file = b.path("hnsw/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    // Compile C++ source files
+    const hnsw_cpp_sources = [_][]const u8{
+        "hnsw/c/hnsw.cpp",
+        "hnsw/c/bruteforce.cpp",
+    };
+    for (hnsw_cpp_sources) |cpp_src| {
+        hnsw_mod.addCSourceFile(.{
+            .file = b.path(cpp_src),
+            .language = .cpp,
+        });
+    }
+    hnsw_mod.link_libcpp = true;
+
     // Create benchmark executables and run steps
     // Binary is installed first before running
     inline for (benchmarks) |bench_name| {
@@ -94,10 +145,13 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path(config.BENCH_DIR ++ "/" ++ bench_name ++ ".zig"),
                 .target = target,
                 // Always compile to ReleaseFast
-                .optimize = std.builtin.OptimizeMode.ReleaseFast,
+                .optimize = optimize,
                 .imports = &.{
                     .{ .name = "zagra", .module = zagra_mod },
                     .{ .name = "config", .module = config_mod },
+                    .{ .name = "texmex", .module = texmex_mod },
+                    .{ .name = "znpy", .module = znpy_mod },
+                    .{ .name = "hnsw", .module = hnsw_mod },
                 },
             }),
         });
@@ -130,52 +184,11 @@ pub fn build(b: *std.Build) void {
         }
     }.make;
 
-    // Add executable for dataset downloader
-    const texmex_exe = b.addExecutable(.{
-        .name = "textmexsteal",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path(config.DATA_DIR ++ "/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "config", .module = config_mod },
-                .{ .name = "znpy", .module = znpy_mod },
-            },
-        }),
-    });
-    const texmex_run_cmd = b.addRunArtifact(texmex_exe);
-    if (b.args) |args| texmex_run_cmd.addArgs(args);
-    const texmex_run_step = b.step("texmex", "Run the TEXMEX ANN vector set downloader");
-    texmex_run_step.dependOn(&texmex_run_cmd.step);
-    const texmex_exe_tests = b.addTest(.{
-        .root_module = texmex_exe.root_module,
-    });
-    const run_texmex_exe_tests = b.addRunArtifact(texmex_exe_tests);
-
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_zagra_mod_tests.step);
     test_step.dependOn(&run_zagra_exe_tests.step);
     test_step.dependOn(&run_bench_mod_tests.step);
-    test_step.dependOn(&run_texmex_exe_tests.step);
-
-    // Create hnsw module that wraps the hnswlib C++ library
-    const hnsw_mod = b.createModule(.{
-        .root_source_file = b.path("hnsw/root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    // Compile C++ source files
-    const hnsw_cpp_sources = [_][]const u8{
-        "hnsw/hnswlib-c/hnsw.cpp",
-        "hnsw/hnswlib-c/bruteforce.cpp",
-    };
-
-    for (hnsw_cpp_sources) |cpp_src| {
-        hnsw_mod.addCSourceFile(.{
-            .file = b.path(cpp_src),
-            .language = .cpp,
-        });
-    }
+    test_step.dependOn(&run_texmex_mod_tests.step);
 
     // Create hnsw executable
     const hnsw_exe = b.addExecutable(.{
@@ -189,7 +202,6 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    // Link C++ standard library
     hnsw_exe.root_module.link_libcpp = true;
 
     b.installArtifact(hnsw_exe);

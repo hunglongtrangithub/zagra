@@ -223,6 +223,10 @@ pub const Index = struct {
     /// Search for k nearest neighbors with custom ef parameter.
     ///
     /// `ef` controls search breadth (higher = more accurate, slower).
+    /// `query` must be a slice of length exactly `dim`.
+    /// Caller must provide output buffers with length >= k.
+    ///
+    /// Returns the number of results written (0..k).
     pub fn searchKnnWithEf(
         self: *Index,
         query: []const f32,

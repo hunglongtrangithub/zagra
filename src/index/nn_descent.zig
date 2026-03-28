@@ -379,7 +379,7 @@ pub fn NNDescent(
                         }
                     }
 
-                    log.info("NN-Descent iteration {d} - block {d}", .{ iteration, block_id });
+                    log.debug("NN-Descent iteration {d} - block {d}", .{ iteration, block_id });
 
                     timer.reset();
                     self.generateBlockGraphUpdateProposals(block_id);
@@ -400,7 +400,7 @@ pub fn NNDescent(
                 try timing.iterations.append(allocator, iter_timing);
                 timing.num_iterations_completed = iteration + 1;
 
-                log.info("Applied {d} graph updates", .{updates_count});
+                log.debug("Applied {d} graph updates", .{updates_count});
 
                 if (updates_count <= convergence_threshold) {
                     log.info("Converged after {d} iterations", .{iteration + 1});
@@ -453,13 +453,13 @@ pub fn NNDescent(
                             list.clearRetainingCapacity();
                         }
                     }
-                    log.info("NN-Descent iteration {d} - block {d}", .{ iteration, block_id });
+                    log.debug("NN-Descent iteration {d} - block {d}", .{ iteration, block_id });
                     self.generateBlockGraphUpdateProposals(block_id);
                     const count = self.applyBlockGraphUpdatesProposals(block_id);
                     updates_count += count;
                 }
 
-                log.info("Applied {d} graph updates", .{updates_count});
+                log.debug("Applied {d} graph updates", .{updates_count});
 
                 if (updates_count <= convergence_threshold) {
                     log.info("Converged after {d} iterations", .{iteration + 1});

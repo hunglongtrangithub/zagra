@@ -1,5 +1,6 @@
 const std = @import("std");
 
+/// A type for node identifiers, chosen based on the size of usize.
 pub const NodeIdType = switch (@sizeOf(usize)) {
     1 => u8,
     2 => u16,

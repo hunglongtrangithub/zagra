@@ -2,6 +2,7 @@ const std = @import("std");
 const znpy = @import("znpy");
 const log = std.log.scoped(.searcher);
 
+const mod_index = @import("../index.zig");
 const mod_types = @import("../types.zig");
 const mod_dataset = @import("../dataset.zig");
 const mod_vector = @import("../vector.zig");
@@ -19,8 +20,30 @@ pub const SearchConfig = struct {
     /// Number of intermediate search results retained during the search.
     internal_k: usize,
     max_iterations: usize,
-    search_width: usize,
-    num_threads: usize,
+    search_width: usize = 1,
+    num_threads: usize = 1,
+
+    /// Computes the maximum number of iterations for the search using CAGRA heuristic.
+    pub fn maxIterations(
+        internal_k: usize,
+        search_width: usize,
+        dataset_size: usize,
+        graph_degree: usize,
+    ) usize {
+        // Graph expansion term
+        const branching_factor: usize = @max(2, graph_degree / 2);
+
+        // Base term: internal_k / search_width
+        var max_iterations: usize = @max(1, internal_k / search_width);
+
+        var num_reachable_nodes: usize = 1;
+        while (num_reachable_nodes < dataset_size) {
+            num_reachable_nodes *= branching_factor;
+            max_iterations += 1;
+        }
+
+        return max_iterations;
+    }
 };
 
 /// Number of threads from an optional thread pool.
@@ -113,7 +136,7 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
             ) catch return Error.NumQueriesTooLarge;
 
             // Number of queries per block. 0 when number of queries or threads is 0.
-            const num_queries_per_block = @min(config.num_threads, num_queries);
+            const num_queries_per_block: usize = @min(config.num_threads, num_queries);
 
             // Thread pool with num_queries_per_block threads if num_queries_per_block > 1, otherwise null.
             const thread_pool = if (num_queries_per_block != 1) blk: {
@@ -471,7 +494,7 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
             const search_distances: []T = search_buffer.items(.distance);
             var candidate_count = config.search_width;
             for (0..config.max_iterations) |iteration| {
-                log.info("Iteration {d}, candidate_count: {d}", .{ iteration, candidate_count });
+                log.debug("Iteration {d}, candidate_count: {d}", .{ iteration, candidate_count });
 
                 sortTopK(search_buffer.subslice(
                     0,

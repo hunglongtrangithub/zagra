@@ -70,16 +70,26 @@ pub fn Dataset(comptime T: type, comptime N: usize) type {
             reader: *std.Io.Reader,
             allocator: std.mem.Allocator,
         ) (znpy.array.static.FromFileReaderError || error{InvalidShape})!Self {
-            const array = try znpy.array.static.StaticArray(T, 2).fromFileAllocAligned(
+            const header = try znpy.header.Header.fromReader(reader, allocator);
+            defer header.deinit(allocator);
+            const shape = try znpy.shape.StaticShape(2).fromHeader(header);
+            const dataset_len = try verifyShape(shape);
+
+            // Shape is valid -> load data buffer
+            const data_buffer = try allocator.alignedAlloc(
+                T,
+                .@"64",
+                shape.numElements(),
+            );
+            errdefer allocator.free(data_buffer);
+            try znpy.Element(T).readSlice(
+                data_buffer,
                 reader,
-                std.mem.Alignment.@"64",
-                allocator,
+                header.descr,
             );
 
-            const dataset_len = try verifyShape(array.shape);
-
             return Self{
-                .data_buffer = @as([]align(64) const T, @alignCast(array.data_buffer)),
+                .data_buffer = @as([]align(64) const T, @alignCast(data_buffer)),
                 .len = dataset_len,
             };
         }

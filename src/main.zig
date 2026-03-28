@@ -262,7 +262,7 @@ pub fn main() !void {
         query_vectors[i] = @rem(random.int(T), 2);
     }
 
-    var queries_array = try znpy.array.static.StaticArray(T, 2).init(
+    var queries_array = try znpy.array.StaticArray(T, 2).init(
         [_]usize{ num_queries, N },
         .C,
         allocator,

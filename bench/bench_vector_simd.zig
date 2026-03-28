@@ -3,6 +3,7 @@ const std = @import("std");
 const zagra = @import("zagra");
 const csv = @import("csv.zig");
 const help = @import("help.zig");
+const root = @import("root.zig");
 
 /// Benchmark configuration
 const BenchmarkConfig = struct {
@@ -234,7 +235,7 @@ pub fn main() !void {
 
     try stdout.flush();
 
-    const results_dir = csv.CSV_RESULTS_DIR;
+    const results_dir = root.RESULTS_DIR;
     std.fs.cwd().makePath(results_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return e,

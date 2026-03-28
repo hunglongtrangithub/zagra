@@ -90,12 +90,27 @@ pub const BuildConfig = struct {
         seed: ?u64,
         block_size: usize,
     ) Self {
-        const nn_descent_config = NNDTrainingConfig.init(
+        return initExtended(graph_degree, intermediate_graph_degree, num_vectors, num_threads, seed, block_size, null, null);
+    }
+
+    pub fn initExtended(
+        graph_degree: usize,
+        intermediate_graph_degree: usize,
+        num_vectors: usize,
+        num_threads: ?usize,
+        seed: ?u64,
+        block_size: usize,
+        max_iterations: ?usize,
+        max_candidates: ?usize,
+    ) Self {
+        var nn_descent_config = NNDTrainingConfig.init(
             intermediate_graph_degree,
             num_vectors,
             num_threads,
             seed,
         );
+        if (max_iterations) |mi| nn_descent_config.max_iterations = mi;
+        if (max_candidates) |mc| nn_descent_config.max_candidates = mc;
         var config = Self{
             .graph_degree = graph_degree,
             .nn_descent_config = nn_descent_config,
