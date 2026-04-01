@@ -594,11 +594,11 @@ pub fn main() !void {
     };
 
     const zagra_cfg = ZagraConfig{
-        .graph_degree = 128,
+        .graph_degree = 64,
         .intermediate_degree = 256,
-        .internal_k = 10,
-        .search_width = 10,
-        .max_iterations = 3,
+        .internal_k = 16,
+        .search_width = 16,
+        .max_iterations = 100,
     };
 
     const hnsw_result = try runHnswBenchmark(
