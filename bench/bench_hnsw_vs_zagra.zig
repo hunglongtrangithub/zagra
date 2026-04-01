@@ -598,7 +598,7 @@ pub fn main() !void {
         .intermediate_degree = 256,
         .internal_k = 10,
         .search_width = 10,
-        .max_iterations = 100,
+        .max_iterations = 3,
     };
 
     const hnsw_result = try runHnswBenchmark(
