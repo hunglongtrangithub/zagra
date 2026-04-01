@@ -113,8 +113,8 @@ pub fn main() !void {
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    const result_prefix = args.next();
-    try help.checkHelp(stdout, result_prefix, exe_path);
+    const result_id = args.next();
+    try help.checkHelp(stdout, result_id, exe_path);
 
     const T: type = f32;
     const N: usize = 128;
@@ -180,10 +180,10 @@ pub fn main() !void {
     };
 
     const result_name = "optimizer_summary";
-    const summary_file_name = if (result_prefix) |prefix|
-        try std.fmt.allocPrint(allocator, "{s}/{s}_{s}.csv", .{ results_dir, prefix, result_name })
+    const summary_file_name = if (result_id) |id|
+        try std.fmt.allocPrint(allocator, "{s}/{s}_{s}.csv", .{ results_dir, result_name, id })
     else
-        try std.fmt.allocPrint(allocator, "{s}/{s}.csv", .{ results_dir, result_name });
+        try std.fmt.allocPrint(allocator, "{s}/{s}_{d}.csv", .{ results_dir, result_name, std.time.timestamp() });
     const summary_csv_file = try std.fs.cwd().createFile(summary_file_name, .{});
     defer summary_csv_file.close();
     var summary_csv_buffer: [1024]u8 = undefined;

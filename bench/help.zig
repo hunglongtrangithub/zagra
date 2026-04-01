@@ -1,10 +1,11 @@
 const std = @import("std");
 
 const DEFAULT_USAGE =
-    \\Usage: {s} [prefix]
+    \\Usage: {s} [id]
     \\
-    \\Optional argument 'prefix' will be used to prefix CSV result files.
-    \\Example: {s} myrun -> myrun_<name>.csv
+    \\Optional argument 'id' will be used as suffix for result files.
+    \\If not provided, the current timestamp will be used as suffix.
+    \\Example: {s} myid -> <name>_myid.csv
     \\
     \\Available flags:
     \\  --help, -h     Show this help message

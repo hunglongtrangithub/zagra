@@ -217,8 +217,8 @@ pub fn main() !void {
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    const result_prefix = args.next();
-    try help.checkHelp(stdout, result_prefix, exe_path);
+    const result_id = args.next();
+    try help.checkHelp(stdout, result_id, exe_path);
 
     try stdout.print("\n", .{});
     try stdout.print("SIMD Vector Distance Benchmark Suite\n", .{});
@@ -241,10 +241,10 @@ pub fn main() !void {
         else => return e,
     };
 
-    const csv_file_name = if (result_prefix) |prefix|
-        try std.fmt.allocPrint(allocator, "{s}/{s}_{s}.csv", .{ results_dir, prefix, result_name })
+    const csv_file_name = if (result_id) |id|
+        try std.fmt.allocPrint(allocator, "{s}/{s}_{s}.csv", .{ results_dir, result_name, id })
     else
-        try std.fmt.allocPrint(allocator, "{s}/{s}.csv", .{ results_dir, result_name });
+        try std.fmt.allocPrint(allocator, "{s}/{s}_{d}.csv", .{ results_dir, result_name, std.time.timestamp() });
     const csv_file = try std.fs.cwd().createFile(csv_file_name, .{});
     defer csv_file.close();
 

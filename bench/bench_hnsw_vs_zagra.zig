@@ -500,8 +500,10 @@ fn writeResults(result: *const BenchmarkResult, output_path: []const u8) !void {
 }
 
 const USAGE =
-    \\Usage: {s} <vectorset_dir> <vectorset_name> [result_prefix]
+    \\Usage: {s} <vectorset_dir> <vectorset_name> [id]
     \\Both absolute paths and relative paths to CWD are supported for <vectorset_dir>.
+    \\Optional argument 'id' will be used as suffix for result files.
+    \\If not provided, the current timestamp will be used as suffix.
     \\
 ;
 
@@ -550,7 +552,7 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
-    const result_prefix = args.next();
+    const result_id = args.next();
 
     const vector_set = std.meta.stringToEnum(texmex.VectorSet, vectorset_name) orelse {
         log.err("Error: Unknown vectorset '{s}'", .{vectorset_name});
@@ -595,6 +597,7 @@ pub fn main() !void {
         k,
     );
 
+    const timestamp = std.time.timestamp();
     const bench_result = BenchmarkResult{
         .dataset_name = dataset.name,
         .num_base = dataset.base_array.len,
@@ -605,7 +608,7 @@ pub fn main() !void {
         .hnsw = hnsw_result,
         .zagra_config = zagra_cfg,
         .zagra = zagra_result,
-        .timestamp = std.time.timestamp(),
+        .timestamp = timestamp,
     };
 
     const results_dir = root.RESULTS_DIR;
@@ -614,11 +617,11 @@ pub fn main() !void {
         else => return e,
     };
 
-    const output_path = if (result_prefix) |prefix|
-        try std.fmt.allocPrint(allocator, results_dir ++ "/{s}_hnsw_vs_zagra.json", .{prefix})
+    const output_path = if (result_id) |id|
+        try std.fmt.allocPrint(allocator, results_dir ++ "/hnsw_vs_zagra_{s}.json", .{id})
     else
-        results_dir ++ "/hnsw_vs_zagra.json";
-    defer if (result_prefix) |_| allocator.free(output_path);
+        try std.fmt.allocPrint(allocator, results_dir ++ "/hnsw_vs_zagra_{d}.json", .{timestamp});
+    defer allocator.free(output_path);
     try writeResults(&bench_result, output_path);
     try stdout.print("Benchmark completed successfully.\n", .{});
     try stdout.flush();

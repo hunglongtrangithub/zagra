@@ -72,20 +72,18 @@ pub fn main() !void {
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    const result_prefix = args.next();
-    try help.checkHelp(stdout, result_prefix, exe_path);
+    const result_id = args.next();
+    try help.checkHelp(stdout, result_id, exe_path);
 
     const T: type = f32; // Element type
     const N: usize = 128; // Vector length
 
-    // Benchmark configuration
     const bench_config = BenchmarkConfig{
         .vector_counts = &[_]usize{ 1_000_000, 5_000_000 },
         .graph_degrees = &[_]usize{ 8, 16, 32, 64 },
         .num_threads = 4,
     };
 
-    // Allocate the largest vector buffer upfront
     const max_dataset_size = bench_config.vector_counts[bench_config.vector_counts.len - 1];
     try stdout.print("Allocating maximum dataset of {} vectors...\n", .{max_dataset_size});
     try stdout.flush();
@@ -96,7 +94,6 @@ pub fn main() !void {
     );
     defer allocator.free(vectors_buffer);
 
-    // Fill with synthetic data
     var prng = std.Random.DefaultPrng.init(bench_config.seed);
     const random = prng.random();
     for (0..vectors_buffer.len) |i| {
@@ -114,13 +111,11 @@ pub fn main() !void {
         all_results.deinit(allocator);
     }
 
-    // Run benchmarks
     for (bench_config.vector_counts) |vector_count| {
         for (bench_config.graph_degrees) |graph_degree| {
             try stdout.print("Benchmarking: {} vectors, degree {}...\n", .{ vector_count, graph_degree });
             try stdout.flush();
 
-            // Create a slice of the dataset
             const sliced_dataset = zagra.dataset.Dataset(T, N){
                 .data_buffer = vectors_buffer[0 .. vector_count * N],
                 .len = vector_count,
@@ -138,19 +133,18 @@ pub fn main() !void {
         }
     }
 
-    // Write results to CSV files
     const results_dir = root.RESULTS_DIR;
     std.fs.cwd().makePath(results_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return e,
     };
 
-    // Run summary
+    const timestamp = std.time.timestamp();
     const summary_name = "nn_descent_summary";
-    const summary_file_name = if (result_prefix) |prefix|
-        try std.fmt.allocPrint(allocator, "{s}/{s}_{s}.csv", .{ results_dir, prefix, summary_name })
+    const summary_file_name = if (result_id) |id|
+        try std.fmt.allocPrint(allocator, "{s}/{s}_{s}.csv", .{ results_dir, summary_name, id })
     else
-        try std.fmt.allocPrint(allocator, "{s}/{s}.csv", .{ results_dir, summary_name });
+        try std.fmt.allocPrint(allocator, "{s}/{s}_{d}.csv", .{ results_dir, summary_name, timestamp });
     const summary_csv_file = try std.fs.cwd().createFile(summary_file_name, .{});
     defer summary_csv_file.close();
 
@@ -168,12 +162,11 @@ pub fn main() !void {
     };
     try csv.writeHeaders(summary_csv, summary_headers);
 
-    // Iteration details
     const iterations_name = "nn_descent_iterations";
-    const iterations_file_name = if (result_prefix) |prefix|
-        try std.fmt.allocPrint(allocator, "{s}/{s}_{s}.csv", .{ results_dir, prefix, iterations_name })
+    const iterations_file_name = if (result_id) |id|
+        try std.fmt.allocPrint(allocator, "{s}/{s}_{s}.csv", .{ results_dir, iterations_name, id })
     else
-        try std.fmt.allocPrint(allocator, "{s}/{s}.csv", .{ results_dir, iterations_name });
+        try std.fmt.allocPrint(allocator, "{s}/{s}_{d}.csv", .{ results_dir, iterations_name, timestamp });
     const iterations_csv_file = try std.fs.cwd().createFile(iterations_file_name, .{});
     defer iterations_csv_file.close();
 
