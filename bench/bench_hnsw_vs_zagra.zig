@@ -275,6 +275,7 @@ fn runHnswBenchmark(
         try index.addPoint(base_vec, i, false);
     }
     const construction_ns = timer.read();
+    log.info("HNSW construction: {d}ms", .{construction_ns / std.time.ns_per_ms});
 
     var labels = try allocator.alloc(usize, num_query * k_val);
     defer allocator.free(labels);
@@ -473,6 +474,8 @@ fn writeResults(result: *const BenchmarkResult, output_path: []const u8) !void {
     try json_s.beginObject();
     try json_s.objectField("graph_degree");
     try json_s.write(result.zagra_config.graph_degree);
+    try json_s.objectField("intermediate_graph_degree");
+    try json_s.write(result.zagra_config.intermediate_degree);
     try json_s.objectField("internal_k");
     try json_s.write(result.zagra_config.internal_k);
     try json_s.objectField("search_width");
