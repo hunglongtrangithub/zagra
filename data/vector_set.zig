@@ -112,7 +112,8 @@ pub const VectorSet = enum {
                 },
             };
         }
-        const dataset_dir_str = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ data_dir, @tagName(self) });
+        const dataset_dir_str = std.fs.path.join(allocator, &[_][]const u8{ data_dir, @tagName(self) }) catch
+            return std.mem.Allocator.Error.OutOfMemory;
         defer allocator.free(dataset_dir_str);
         var dataset_dir = makeDatasetDir(dataset_dir_str);
         defer dataset_dir.close();
@@ -126,7 +127,8 @@ pub const VectorSet = enum {
                     else => unreachable,
                 };
 
-                const tar_file_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dataset_dir_str, file_name });
+                const tar_file_path = std.fs.path.join(allocator, &[_][]const u8{ dataset_dir_str, file_name }) catch
+                    return std.mem.Allocator.Error.OutOfMemory;
                 defer allocator.free(tar_file_path);
 
                 const tar_file_url = try std.fmt.allocPrint(allocator, "{s}{s}", .{ URL_PREFIX, file_name });
@@ -178,7 +180,8 @@ pub const VectorSet = enum {
 
                 var download_items: [file_names.len]ftp.DownloadItem = undefined;
                 inline for (file_names, 0..) |name, i| {
-                    file_paths[i] = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dataset_dir_str, name });
+                    file_paths[i] = std.fs.path.join(allocator, &[_][]const u8{ dataset_dir_str, name }) catch
+                        return std.mem.Allocator.Error.OutOfMemory;
                     download_items[i] = .{
                         .url = URL_PREFIX ++ name,
                         .output_path = file_paths[i],
