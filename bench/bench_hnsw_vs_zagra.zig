@@ -245,6 +245,39 @@ const AnnDataset = struct {
     }
 };
 
+/// Computes the recall of ANN search results.
+///
+/// Recall is the fraction of returned neighbors that are among the true k
+/// nearest neighbors, averaged across all queries.
+fn computeRecall(
+    num_query: usize,
+    k_val: usize,
+    gt_k: usize,
+    groundtruth: []const i32,
+    labels: []const usize,
+) error{LengthMismatch}!f64 {
+    if (labels.len != num_query * k_val) return error.LengthMismatch;
+    if (groundtruth.len != num_query * gt_k) return error.LengthMismatch;
+
+    var recall_hits: usize = 0;
+    for (0..num_query) |qi| {
+        const gt_offset = qi * gt_k;
+        const labels_offset = qi * k_val;
+        for (0..k_val) |ki| {
+            const label = labels[labels_offset + ki];
+            for (0..gt_k) |gi| {
+                const gt_label = std.math.cast(usize, groundtruth[gt_offset + gi]) orelse
+                    @panic("Ground truth label does not fit into usize");
+                if (label == gt_label) {
+                    recall_hits += 1;
+                    break;
+                }
+            }
+        }
+    }
+    return @as(f64, @floatFromInt(recall_hits)) / @as(f64, @floatFromInt(num_query * k_val));
+}
+
 fn runHnswBenchmark(
     dataset: *const AnnDataset,
     allocator: std.mem.Allocator,
@@ -303,24 +336,13 @@ fn runHnswBenchmark(
 
     log.info("HNSW: avg={d}ns, throughput={d:.1} qps", .{ avg_query_ns, throughput_qps });
 
-    // Count recall hits from all queries
-    var recall_hits: usize = 0;
-    for (0..num_query) |qi| {
-        const gt_offset = qi * gt_k;
-        const hnsw_offset = qi * k_val;
-        for (0..k_val) |ki| {
-            const label = labels[hnsw_offset + ki];
-            for (0..gt_k) |gi| {
-                const gt_label = std.math.cast(usize, dataset.groundtruth.data_buffer[gt_offset + gi]) orelse
-                    @panic("Ground truth label does not fit into usize");
-                if (label == gt_label) {
-                    recall_hits += 1;
-                    break;
-                }
-            }
-        }
-    }
-    const recall = @as(f64, @floatFromInt(recall_hits)) / @as(f64, @floatFromInt(num_query * k_val));
+    const recall = try computeRecall(
+        num_query,
+        k_val,
+        gt_k,
+        dataset.groundtruth.data_buffer,
+        labels,
+    );
     log.info("HNSW recall@{}: {:.4}", .{ k_val, recall });
 
     return HnswResult{
@@ -391,23 +413,15 @@ fn runZagraBenchmark(
 
     log.info("ZAGRA: avg={d}ns, throughput={d:.1} qps", .{ avg_query_ns, throughput_qps });
 
-    var recall_hits: usize = 0;
-    for (0..num_query) |qi| {
-        const gt_offset = qi * gt_k;
-        for (0..k_val) |ki| {
-            const label = std.math.cast(usize, result.neighbors.data_buffer[qi * k_val + ki]) orelse
-                @panic("ZAGRA returned neighbor label that does not fit into usize");
-            for (0..gt_k) |gi| {
-                const gt_label = std.math.cast(usize, dataset.groundtruth.data_buffer[gt_offset + gi]) orelse
-                    @panic("Ground truth label does not fit into usize");
-                if (label == gt_label) {
-                    recall_hits += 1;
-                    break;
-                }
-            }
-        }
-    }
-    const recall = @as(f64, @floatFromInt(recall_hits)) / @as(f64, @floatFromInt(num_query * k_val));
+    // Safe to cast to usize, since NodeIdType always fits into usize.
+    const neighbors_usize = @as([*]usize, @ptrCast(result.neighbors.data_buffer.ptr))[0 .. num_query * k_val];
+    const recall = try computeRecall(
+        num_query,
+        k_val,
+        gt_k,
+        dataset.groundtruth.data_buffer,
+        neighbors_usize,
+    );
     log.info("ZAGRA recall@{}: {:.4}", .{ k_val, recall });
 
     return ZagraResult{
