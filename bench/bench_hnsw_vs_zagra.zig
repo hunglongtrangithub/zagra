@@ -306,34 +306,35 @@ fn runHnswBenchmark(
         false,
     );
     defer index.deinit();
-    index.setNumThreads(std.math.cast(i32, cfg.num_threads) orelse @panic("num_threads does not fit into i32"));
+    try index.setNumThreads(std.math.cast(i32, cfg.num_threads) orelse @panic("num_threads does not fit into i32"));
+
+    const base_data = dataset.base_array.data_buffer;
+    const labels = try allocator.alloc(usize, num_base);
+    defer allocator.free(labels);
     for (0..num_base) |i| {
-        const base_vec = dataset.base_array.data_buffer[i * dim ..][0..dim];
-        // label is the same as the index in the base array, which is what the ground truth uses
-        try index.addPoint(base_vec, i, false);
+        labels[i] = i;
     }
+    try index.addPoints(base_data, labels, false);
     const construction_ns = timer.read();
     log.info("HNSW construction: {d}ms", .{construction_ns / std.time.ns_per_ms});
 
-    var labels = try allocator.alloc(usize, num_query * k_val);
-    defer allocator.free(labels);
-    var distances = try allocator.alloc(f32, num_query * k_val);
-    defer allocator.free(distances);
+    const out_labels = try allocator.alloc(usize, num_query * k_val);
+    defer allocator.free(out_labels);
+    const out_distances = try allocator.alloc(f32, num_query * k_val);
+    defer allocator.free(out_distances);
+    const out_counts = try allocator.alloc(usize, num_query);
+    defer allocator.free(out_counts);
 
     timer.reset();
-    for (0..num_query) |qi| {
-        const query_vec = dataset.query_array.data_buffer[qi * dim ..][0..dim];
-        const out_labels = labels[qi * k_val ..][0..k_val];
-        const out_distances = distances[qi * k_val ..][0..k_val];
-        const out_count = try index.searchKnnWithEf(
-            query_vec,
-            k_val,
-            cfg.ef_search,
-            out_labels,
-            out_distances,
-        );
-        if (out_count != k_val) @panic("HNSW search returned fewer results than requested. This should not happen since ef_search >= k_val.");
-    }
+    const query_data = dataset.query_array.data_buffer;
+    try index.searchKnnBatch(
+        query_data,
+        k_val,
+        out_labels,
+        out_distances,
+        out_counts,
+        num_query,
+    );
 
     const total_query_ns: u64 = timer.read();
     const avg_query_ns = total_query_ns / num_query;
@@ -346,7 +347,7 @@ fn runHnswBenchmark(
         k_val,
         gt_k,
         dataset.groundtruth.data_buffer,
-        labels,
+        out_labels,
     );
     log.info("HNSW recall@{}: {:.4}", .{ k_val, recall });
 
@@ -606,8 +607,8 @@ pub fn main() !void {
     const zagra_cfg = ZagraConfig{
         .graph_degree = 128,
         .intermediate_degree = 256,
-        .internal_k = 10,
-        .search_width = 10,
+        .internal_k = 256,
+        .search_width = 256,
         .max_iterations = 100,
         .num_threads = std.Thread.getCpuCount() catch 1,
     };

@@ -7,13 +7,72 @@
 
 #include "hnsw.h"
 #include "../hnswlib/hnswlib.h"
+#include <atomic>
+#include <thread>
+#include <mutex>
+#include <vector>
+#include <exception>
 
 using namespace hnswlib;
+
+/*
+ * replacement for the openmp '#pragma omp parallel for' directive
+ * only handles a subset of functionality (no reductions etc)
+ * Process ids from start (inclusive) to end (EXCLUSIVE)
+ *
+ * The method is borrowed from nmslib 
+ */
+template<class Function>
+inline void ParallelFor(size_t start, size_t end, size_t numThreads, Function fn) {
+    if (numThreads <= 0) {
+        numThreads = std::thread::hardware_concurrency();
+    }
+
+    if (numThreads == 1) {
+        for (size_t id = start; id < end; id++) {
+            fn(id, 0);
+        }
+    } else {
+        std::vector<std::thread> threads;
+        std::atomic<size_t> current(start);
+
+        std::exception_ptr lastException = nullptr;
+        std::mutex lastExceptMutex;
+
+        for (size_t threadId = 0; threadId < numThreads; ++threadId) {
+            threads.push_back(std::thread([&, threadId] {
+                while (true) {
+                    size_t id = current.fetch_add(1);
+
+                    if ((id >= end)) {
+                        break;
+                    }
+
+                    try {
+                        fn(id, threadId);
+                    } catch (...) {
+                        std::unique_lock<std::mutex> lastExcepLock(lastExceptMutex);
+                        lastException = std::current_exception();
+                        current = end;
+                        break;
+                    }
+                }
+            }));
+        }
+        for (auto &thread : threads) {
+            thread.join();
+        }
+        if (lastException) {
+            std::rethrow_exception(lastException);
+        }
+    }
+}
 
 struct hnsw_index_t {
   HierarchicalNSW<float> *idx;
   L2Space *space;
   size_t dim;
+  size_t num_threads;
 };
 
 // Helper: translate exceptions into hnsw_res
@@ -51,6 +110,7 @@ hnsw_index_t *hnsw_new_l2(size_t dim, size_t max_elements, size_t M,
     h->idx = idx;
     h->space = space;
     h->dim = dim;
+    h->num_threads = std::thread::hardware_concurrency();
     return h;
   } catch (const std::bad_alloc &) {
     return nullptr;
@@ -77,6 +137,7 @@ hnsw_index_t *hnsw_load_l2(const char *path, size_t dim) {
     h->idx = idx;
     h->space = space;
     h->dim = dim;
+    h->num_threads = std::thread::hardware_concurrency();
     return h;
   } catch (const std::bad_alloc &) {
     return nullptr;
@@ -276,13 +337,56 @@ hnsw_res hnsw_save(hnsw_index_t *h, const char *path) {
   });
 }
 
-// Set number of threads (best-effort hint). If not supported, just return
-// success/no-op.
-hnsw_res hnsw_set_num_threads(hnsw_index_t * /*h*/, int /*num_threads*/) {
-  // hnswlib HierarchicalNSW does not expose a built-in thread-count setter in
-  // this API. We provide a no-op that returns success to allow callers to
-  // compile/link portably.
+// Set number of threads for parallel operations.
+hnsw_res hnsw_set_num_threads(hnsw_index_t *h, int num_threads) {
+  if (!h)
+    return HNSW_EINVAL;
+  h->num_threads = num_threads > 0 ? num_threads : std::thread::hardware_concurrency();
   return HNSW_SUCCESS;
+}
+
+// Batch add points using ParallelFor.
+hnsw_res hnsw_add_points_batch(hnsw_index_t *h, const float *data,
+                                const hnsw_label_t *labels, size_t count,
+                                bool replace_deleted) {
+  if (!h || !data || !labels)
+    return HNSW_EINVAL;
+  return translate_exception([&]() -> hnsw_res {
+    ParallelFor(0, count, h->num_threads, [&](size_t id, size_t threadId) {
+      const float *vec = data + id * h->dim;
+      h->idx->addPoint(reinterpret_cast<const void *>(vec), labels[id],
+                       replace_deleted);
+    });
+    return HNSW_SUCCESS;
+  });
+}
+
+// Batch search for k nearest neighbors.
+// Results written as flat array: query i's k results start at index i*k.
+// out_counts returns actual result count per query (0 to k).
+// Total allocated: num_queries * k slots per array.
+hnsw_res hnsw_search_knn_batch(hnsw_index_t *h, const float *queries,
+                               size_t k, hnsw_label_t *out_labels,
+                               float *out_distances, size_t *out_counts,
+                               size_t num_queries) {
+  if (!h || !queries || !out_labels || !out_distances || !out_counts)
+    return HNSW_EINVAL;
+  return translate_exception([&]() -> hnsw_res {
+    ParallelFor(0, num_queries, h->num_threads, [&](size_t qid, size_t threadId) {
+      const float *query = queries + qid * h->dim;
+      hnsw_label_t *out_labels_q = out_labels + qid * k;
+      float *out_distances_q = out_distances + qid * k;
+      std::vector<std::pair<float, labeltype>> res =
+          h->idx->searchKnnCloserFirst(reinterpret_cast<const void *>(query), k, nullptr);
+      size_t n = res.size();
+      out_counts[qid] = n;
+      for (size_t i = 0; i < n; i++) {
+        out_labels_q[i] = res[i].second;
+        out_distances_q[i] = res[i].first;
+      }
+    });
+    return HNSW_SUCCESS;
+  });
 }
 
 } // extern "C"

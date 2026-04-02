@@ -168,6 +168,31 @@ hnsw_res hnsw_save(hnsw_index_t *idx, const char *path);
 hnsw_res hnsw_set_num_threads(hnsw_index_t *idx, int num_threads);
 
 /*
+ * Batch add points:
+ * - `data` points to a flat array of `count * dim` floats (row-major).
+ * - `labels` points to array of `count` labels.
+ * - Uses ParallelFor internally for parallel insertion.
+ * - Returns HNSW_SUCCESS on success, or an error code on failure.
+ */
+hnsw_res hnsw_add_points_batch(hnsw_index_t *idx, const float *data,
+                                const hnsw_label_t *labels, size_t count,
+                                bool replace_deleted);
+
+/*
+ * Batch search for k nearest neighbors:
+ * - `queries` points to a flat array of `num_queries * dim` floats (row-major).
+ * - `k` is number of results per query.
+ * - Results written as flat array: query i's k results start at index i*k.
+ * - `out_counts` returns actual result count per query (0 to k).
+ * - Total allocated: `num_queries * k` slots per array.
+ * - Returns HNSW_SUCCESS on success, or an error code on failure.
+ */
+hnsw_res hnsw_search_knn_batch(hnsw_index_t *idx, const float *queries,
+                               size_t k, hnsw_label_t *out_labels,
+                               float *out_distances, size_t *out_counts,
+                               size_t num_queries);
+
+/*
  * Notes
  * - All functions are C-callable; actual implementation will be in a C++
  * translation unit that constructs and manipulates

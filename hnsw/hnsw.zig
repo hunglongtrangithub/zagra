@@ -67,6 +67,23 @@ extern fn hnsw_get_data_by_label(
 extern fn hnsw_save(idx: *hnsw_index_t, path: [*]const u8) root.hnsw_res;
 extern fn hnsw_set_num_threads(idx: *hnsw_index_t, num_threads: i32) root.hnsw_res;
 
+extern fn hnsw_add_points_batch(
+    idx: *hnsw_index_t,
+    data: [*]const f32,
+    labels: [*]const usize,
+    count: usize,
+    replace_deleted: bool,
+) root.hnsw_res;
+extern fn hnsw_search_knn_batch(
+    idx: *hnsw_index_t,
+    queries: [*]const f32,
+    k: usize,
+    out_labels: [*]usize,
+    out_distances: [*]f32,
+    out_counts: [*]usize,
+    num_queries: usize,
+) root.hnsw_res;
+
 fn map_res(res: root.hnsw_res) root.Error!void {
     return root.map_res(res);
 }
@@ -169,6 +186,28 @@ pub const Index = struct {
         try map_res(res);
     }
 
+    /// Batch add vectors to the index.
+    ///
+    /// `data` must be a slice of length `count * dim` (row-major).
+    /// `labels` must be a slice of length `count`.
+    /// Uses ParallelFor internally for parallel insertion.
+    pub fn addPoints(
+        self: *Index,
+        data: []const f32,
+        labels: []const usize,
+        replace_deleted: bool,
+    ) root.Error!void {
+        if (data.len != labels.len * self.dim) return root.Error.InvalidArgument;
+        const res = hnsw_add_points_batch(
+            self.handle,
+            data.ptr,
+            labels.ptr,
+            labels.len,
+            replace_deleted,
+        );
+        try map_res(res);
+    }
+
     /// Mark a vector as deleted (soft delete).
     ///
     /// The vector is excluded from search results but not removed from memory.
@@ -250,6 +289,39 @@ pub const Index = struct {
         );
         try map_res(res);
         return out_count;
+    }
+
+    /// Batch search for k nearest neighbors across multiple queries.
+    ///
+    /// `queries` must be a slice of length `num_queries * dim` (row-major).
+    /// Results written as flat array: query i's k results start at index i*k.
+    /// `out_counts` returns actual result count per query (0 to k).
+    /// Caller must provide output buffers with length >= num_queries * k.
+    /// Caller must provide out_counts with length >= num_queries.
+    pub fn searchKnnBatch(
+        self: *Index,
+        queries: []const f32,
+        k: usize,
+        out_labels: []usize,
+        out_distances: []f32,
+        out_counts: []usize,
+        num_queries: usize,
+    ) (error{BufferTooSmall} || root.Error)!void {
+        if (queries.len != num_queries * self.dim) return root.Error.InvalidArgument;
+        if (num_queries * k > out_labels.len or num_queries * k > out_distances.len) {
+            return error.BufferTooSmall;
+        }
+        if (out_counts.len < num_queries) return error.BufferTooSmall;
+        const res = hnsw_search_knn_batch(
+            self.handle,
+            queries.ptr,
+            k,
+            out_labels.ptr,
+            out_distances.ptr,
+            out_counts.ptr,
+            num_queries,
+        );
+        try map_res(res);
     }
 
     /// Search for k nearest neighbors, allocating output buffers.

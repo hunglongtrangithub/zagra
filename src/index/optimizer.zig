@@ -160,7 +160,7 @@ pub const Optimizer = struct {
         const reverse_neighbor_ids = try allocator.alloc(usize, num_nodes * output_degree);
         defer allocator.free(reverse_neighbor_ids);
 
-        log.info("Couting detours in the input graph...", .{});
+        log.info("Counting detours in the input graph...", .{});
         self.countDetours(
             two_hop_neighbors_buffer,
             num_two_hop_neighbors_per_node,
