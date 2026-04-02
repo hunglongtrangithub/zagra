@@ -15,6 +15,7 @@ const HnswConfig = struct {
     M: usize,
     ef_construction: usize,
     ef_search: usize,
+    num_threads: usize,
 };
 
 const HnswResult = struct {
@@ -30,6 +31,7 @@ const ZagraConfig = struct {
     internal_k: usize,
     search_width: usize,
     max_iterations: usize,
+    num_threads: usize,
 };
 
 const ZagraResult = struct {
@@ -292,6 +294,8 @@ fn runHnswBenchmark(
     const num_query = dataset.numQueries();
     const gt_k = dataset.gtK();
 
+    log.info("Building HNSW index (dim={d}, M={d}, ef_construction={d})...", .{ dim, cfg.M, cfg.ef_construction });
+
     var timer = try std.time.Timer.start();
     var index = try hnsw.HierarchicalIndex.create(
         dim,
@@ -302,6 +306,7 @@ fn runHnswBenchmark(
         false,
     );
     defer index.deinit();
+    index.setNumThreads(std.math.cast(i32, cfg.num_threads) orelse @panic("num_threads does not fit into i32"));
     for (0..num_base) |i| {
         const base_vec = dataset.base_array.data_buffer[i * dim ..][0..dim];
         // label is the same as the index in the base array, which is what the ground truth uses
@@ -370,7 +375,7 @@ fn runZagraBenchmark(
         cfg.graph_degree,
         cfg.intermediate_degree,
         num_base,
-        null,
+        cfg.num_threads,
         42,
         16,
     );
@@ -471,6 +476,8 @@ fn writeResults(result: *const BenchmarkResult, output_path: []const u8) !void {
     try json_s.write(result.hnsw_config.ef_construction);
     try json_s.objectField("ef_search");
     try json_s.write(result.hnsw_config.ef_search);
+    try json_s.objectField("num_threads");
+    try json_s.write(result.hnsw_config.num_threads);
     try json_s.endObject();
     try json_s.objectField("construction_time_ns");
     try json_s.write(result.hnsw.construction_ns);
@@ -496,6 +503,8 @@ fn writeResults(result: *const BenchmarkResult, output_path: []const u8) !void {
     try json_s.write(result.zagra_config.search_width);
     try json_s.objectField("max_iterations");
     try json_s.write(result.zagra_config.max_iterations);
+    try json_s.objectField("num_threads");
+    try json_s.write(result.zagra_config.num_threads);
     try json_s.endObject();
     try json_s.objectField("construction_time_ns");
     try json_s.write(result.zagra.construction_ns);
@@ -591,6 +600,7 @@ pub fn main() !void {
         .M = 16,
         .ef_construction = 200,
         .ef_search = 100,
+        .num_threads = std.Thread.getCpuCount() catch 1,
     };
 
     const zagra_cfg = ZagraConfig{
@@ -599,6 +609,7 @@ pub fn main() !void {
         .internal_k = 10,
         .search_width = 10,
         .max_iterations = 100,
+        .num_threads = std.Thread.getCpuCount() catch 1,
     };
 
     const hnsw_result = try runHnswBenchmark(

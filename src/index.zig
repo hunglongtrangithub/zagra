@@ -90,7 +90,16 @@ pub const BuildConfig = struct {
         seed: ?u64,
         block_size: usize,
     ) Self {
-        return initExtended(graph_degree, intermediate_graph_degree, num_vectors, num_threads, seed, block_size, null, null);
+        return initExtended(
+            graph_degree,
+            intermediate_graph_degree,
+            num_vectors,
+            num_threads,
+            seed,
+            block_size,
+            null,
+            null,
+        );
     }
 
     pub fn initExtended(
