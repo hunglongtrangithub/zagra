@@ -77,6 +77,7 @@ pub fn downloadFiles(allocator: std.mem.Allocator, items: []const DownloadItem) 
     // Reserve lines for progress bars
     for (0..total_threads) |_| std.debug.print("\n", .{});
 
+    enableWindowsAnsi();
     // Hide cursor during downloads
     std.debug.print("\x1b[?25l", .{});
     defer std.debug.print("\x1b[?25h\n", .{}); // Show cursor when done
@@ -92,11 +93,22 @@ pub fn downloadFiles(allocator: std.mem.Allocator, items: []const DownloadItem) 
             return results;
         };
     }
+    // Wait for all successfully spawned tasks
     for (threads) |*t| {
         t.join();
     }
 
     return results;
+}
+
+/// Enable ANSI escape code processing on Windows 10+ to allow cursor movement and line clearing
+/// Note: haven't tested this on Winddows yet
+fn enableWindowsAnsi() void {
+    if (builtin.os.tag != .windows) return;
+    const handle = std.os.windows.GetStdHandle(std.os.windows.STD_ERROR_HANDLE) catch return;
+    var mode: std.os.windows.DWORD = 0;
+    if (std.os.windows.kernel32.GetConsoleMode(handle, &mode) == 0) return;
+    _ = std.os.windows.kernel32.SetConsoleMode(handle, mode | 0x0004); // ENABLE_VIRTUAL_TERMINAL_PROCESSING
 }
 
 fn getFilename(url: []const u8) []const u8 {
@@ -133,16 +145,6 @@ const DownloadContext = struct {
         self.result.* = self.download();
     }
 
-    /// Enable ANSI escape code processing on Windows 10+ to allow cursor movement and line clearing
-    fn enableWindowsAnsi() void {
-        // NOTE: haven't tested this on Winddows yet
-        if (builtin.os.tag != .windows) return;
-        const handle = std.os.windows.GetStdHandle(std.os.windows.STD_ERROR_HANDLE) catch return;
-        var mode: std.os.windows.DWORD = 0;
-        if (std.os.windows.kernel32.GetConsoleMode(handle, &mode) == 0) return;
-        _ = std.os.windows.kernel32.SetConsoleMode(handle, mode | 0x0004); // ENABLE_VIRTUAL_TERMINAL_PROCESSING
-    }
-
     /// Download a file via FTP with progress reporting
     fn download(self: *Self) FtpError!u64 {
         // Arena for all FTP response message allocations
@@ -172,11 +174,10 @@ const DownloadContext = struct {
         const port: u16 = uri.port orelse DEFAULT_PORT;
 
         // 2. Connect
-        const addr_list = std.net.getAddressList(self.allocator, host, port) catch {
+        const addr_list = std.net.getAddressList(allocator, host, port) catch {
             self.printStatus(.{ .err = "DNS resolution failed" });
             return error.ConnectionFailed;
         };
-        defer addr_list.deinit();
         if (addr_list.addrs.len == 0) {
             self.printStatus(.{ .err = "Unknown host" });
             return error.ConnectionFailed;
@@ -211,7 +212,7 @@ const DownloadContext = struct {
         self.printStatus(.{ .msg = "Logging in..." });
 
         // 4. USER
-        sendCommand(writer, "USER anonymous") catch {
+        sendCommand(writer, &.{"USER anonymous"}) catch {
             self.printStatus(.{ .err = "Failed to send USER" });
             return error.ConnectionFailed;
         };
@@ -226,7 +227,7 @@ const DownloadContext = struct {
 
         // 5. PASS
         if (user_resp.code == 331) {
-            sendCommand(writer, "PASS anonymous@example.com") catch {
+            sendCommand(writer, &.{"PASS anonymous@example.com"}) catch {
                 self.printStatus(.{ .err = "Failed to send PASS" });
                 return error.ConnectionFailed;
             };
@@ -241,7 +242,7 @@ const DownloadContext = struct {
         }
 
         // 6. TYPE I
-        sendCommand(writer, "TYPE I") catch {
+        sendCommand(writer, &.{"TYPE I"}) catch {
             self.printStatus(.{ .err = "Failed to send TYPE" });
             return error.ConnectionFailed;
         };
@@ -259,15 +260,11 @@ const DownloadContext = struct {
         const file_path = uri.path.percent_encoded;
 
         // 7. SIZE
-        var size_cmd_buf: [512]u8 = undefined;
-        const size_cmd = std.fmt.bufPrint(&size_cmd_buf, "SIZE {s}", .{file_path}) catch {
-            self.printStatus(.{ .err = "Path too long" });
-            return error.CommandFailed;
-        };
-        sendCommand(writer, size_cmd) catch {
+        sendCommand(writer, &.{ "SIZE ", file_path }) catch {
             self.printStatus(.{ .err = "Failed to send SIZE" });
             return error.ConnectionFailed;
         };
+        self.printStatus(.{ .msg = "SIZE sent, waiting for response..." });
         const size_resp = readResponse(reader, allocator) catch {
             self.printStatus(.{ .err = "No SIZE response" });
             return error.ConnectionFailed;
@@ -282,23 +279,41 @@ const DownloadContext = struct {
         };
 
         // 8. EPSV / PASV
-        var data_addr: std.net.Address = undefined;
-
-        sendCommand(writer, "EPSV") catch {
+        sendCommand(writer, &.{"EPSV"}) catch {
             self.printStatus(.{ .err = "Failed to send EPSV" });
             return error.ConnectionFailed;
         };
+        self.printStatus(.{ .msg = "EPSV sent, waiting for response..." });
         const epsv_resp = readResponse(reader, allocator) catch {
             self.printStatus(.{ .err = "No EPSV response" });
             return error.ConnectionFailed;
         };
 
-        if (epsv_resp.code == 229) {
-            if (parseEpsvResponse(epsv_resp.message, server_addr)) |addr| {
-                data_addr = addr;
-            } else |_| {
-                self.printStatus(.{ .msg = "EPSV parse failed, falling back to PASV..." });
-                sendCommand(writer, "PASV") catch {
+        const data_addr = blk: {
+            if (epsv_resp.code == 229) {
+                if (parseEpsvResponse(epsv_resp.message, server_addr)) |addr| {
+                    break :blk addr;
+                } else |_| {
+                    self.printStatus(.{ .msg = "EPSV parse failed, falling back to PASV..." });
+                    sendCommand(writer, &.{"PASV"}) catch {
+                        self.printStatus(.{ .err = "Failed to send PASV" });
+                        return error.ConnectionFailed;
+                    };
+                    const pasv_resp = readResponse(reader, allocator) catch {
+                        self.printStatus(.{ .err = "No PASV response" });
+                        return error.ConnectionFailed;
+                    };
+                    if (pasv_resp.code != 227) {
+                        self.printStatus(.{ .err = "PASV failed" });
+                        return error.CommandFailed;
+                    }
+                    break :blk parsePasvResponse(pasv_resp.message) catch {
+                        self.printStatus(.{ .err = "Invalid PASV response" });
+                        return error.InvalidResponse;
+                    };
+                }
+            } else if (epsv_resp.code == 500) {
+                sendCommand(writer, &.{"PASV"}) catch {
                     self.printStatus(.{ .err = "Failed to send PASV" });
                     return error.ConnectionFailed;
                 };
@@ -310,32 +325,15 @@ const DownloadContext = struct {
                     self.printStatus(.{ .err = "PASV failed" });
                     return error.CommandFailed;
                 }
-                data_addr = parsePasvResponse(pasv_resp.message) catch {
+                break :blk parsePasvResponse(pasv_resp.message) catch {
                     self.printStatus(.{ .err = "Invalid PASV response" });
                     return error.InvalidResponse;
                 };
-            }
-        } else if (epsv_resp.code == 500) {
-            sendCommand(writer, "PASV") catch {
-                self.printStatus(.{ .err = "Failed to send PASV" });
-                return error.ConnectionFailed;
-            };
-            const pasv_resp = readResponse(reader, allocator) catch {
-                self.printStatus(.{ .err = "No PASV response" });
-                return error.ConnectionFailed;
-            };
-            if (pasv_resp.code != 227) {
-                self.printStatus(.{ .err = "PASV failed" });
+            } else {
+                self.printStatus(.{ .err = "EPSV failed" });
                 return error.CommandFailed;
             }
-            data_addr = parsePasvResponse(pasv_resp.message) catch {
-                self.printStatus(.{ .err = "Invalid PASV response" });
-                return error.InvalidResponse;
-            };
-        } else {
-            self.printStatus(.{ .err = "EPSV failed" });
-            return error.CommandFailed;
-        }
+        };
 
         // 9. Connect to data port
         var data_stream = std.net.tcpConnectToAddress(data_addr) catch {
@@ -345,12 +343,7 @@ const DownloadContext = struct {
         defer data_stream.close();
 
         // 10. RETR
-        var retr_cmd_buf: [512]u8 = undefined;
-        const retr_cmd = std.fmt.bufPrint(&retr_cmd_buf, "RETR {s}", .{file_path}) catch {
-            self.printStatus(.{ .err = "Path too long" });
-            return error.CommandFailed;
-        };
-        sendCommand(writer, retr_cmd) catch {
+        sendCommand(writer, &.{ "RETR ", file_path }) catch {
             self.printStatus(.{ .err = "Failed to send RETR" });
             return error.ConnectionFailed;
         };
@@ -380,27 +373,35 @@ const DownloadContext = struct {
         defer file.close();
 
         // 12. Transfer
-        var downloaded: u64 = 0;
-        var buffer: [64 * 1024]u8 = undefined;
+        const buffer_size = 64 * 1024; // Large buffer size for better performance
+        var ds_buffer: [buffer_size]u8 = undefined;
+        var ds_reader = data_stream.reader(&ds_buffer);
+        const ds_reader_interface: *std.Io.Reader = ds_reader.interface();
 
-        while (true) {
-            const n = data_stream.read(&buffer) catch {
-                self.printStatus(.{ .err = "Transfer error" });
+        var file_buffer: [buffer_size]u8 = undefined;
+        var file_writer = file.writer(&file_buffer);
+        const file_writer_interface = &file_writer.interface;
+
+        self.printStatus(.{ .msg = "Start downloading..." });
+        var downloaded: usize = 0;
+        const chunk_size = 8192; // Small chunk size for frequent UI update
+        while (downloaded < file_size) {
+            const to_read = @min(chunk_size, file_size - downloaded);
+            ds_reader_interface.streamExact(file_writer_interface, to_read) catch |e| {
+                // error.EndOfStream happening here means that the actual number of bytes we get is less than the file size.
+                // We require exactly file_size bytes, so error.EndOfStream is an error case.
+                switch (e) {
+                    error.EndOfStream => self.printStatus(.{ .err = "Incomplete transfer (server sent fewer bytes than expected)" }),
+                    error.ReadFailed => self.printStatus(.{ .err = "Network read error" }),
+                    error.WriteFailed => self.printStatus(.{ .err = "Disk write error" }),
+                }
                 return error.TransferFailed;
             };
-            if (n == 0) break;
-
-            file.writeAll(buffer[0..n]) catch {
-                self.printStatus(.{ .err = "Write error" });
-                return error.TransferFailed;
-            };
-
-            downloaded += n;
-            self.printStatus(.{ .progress = .{
-                .downloaded = downloaded,
-                .total = file_size,
-            } });
+            downloaded += to_read;
+            self.printStatus(.{ .progress = .{ .downloaded = downloaded, .total = file_size } });
         }
+        // Don't forget to flush!
+        file_writer_interface.flush() catch self.printStatus(.{ .err = "Disk write error" });
 
         // 13. 226 complete
         const complete_resp = readResponse(reader, allocator) catch {
@@ -409,23 +410,19 @@ const DownloadContext = struct {
         };
         _ = complete_resp;
 
-        // 14. Verify size
-        if (downloaded != file_size) {
-            self.printStatus(.{ .err = "Size mismatch!" });
-            return error.SizeMismatch;
-        }
-
         self.printStatus(.{ .done = downloaded });
 
-        // 15. QUIT (best effort)
-        sendCommand(writer, "QUIT") catch {};
+        // 14. QUIT (best effort)
+        sendCommand(writer, &.{"QUIT"}) catch {};
         _ = readResponse(reader, allocator) catch {};
 
         return downloaded;
     }
 
-    fn sendCommand(writer: *std.Io.Writer, cmd: []const u8) error{ConnectionFailed}!void {
-        writer.writeAll(cmd) catch return error.ConnectionFailed;
+    fn sendCommand(writer: *std.Io.Writer, cmd: []const []const u8) error{ConnectionFailed}!void {
+        for (cmd) |part| {
+            writer.writeAll(part) catch return error.ConnectionFailed;
+        }
         writer.writeAll("\r\n") catch return error.ConnectionFailed;
         writer.flush() catch return error.ConnectionFailed;
     }
@@ -515,10 +512,10 @@ const DownloadContext = struct {
 
         switch (status) {
             .msg => |msg| {
-                writer.print("{s}", .{msg}) catch return;
+                writer.print("{s}", .{std.mem.trim(u8, msg, " \r\t\n")}) catch return;
             },
             .err => |err| {
-                writer.print("ERROR: {s}", .{err}) catch return;
+                writer.print("ERROR: {s}", .{std.mem.trim(u8, err, " \r\t\n")}) catch return;
             },
             .progress => |p| {
                 const percent: f64 = if (p.total > 0)

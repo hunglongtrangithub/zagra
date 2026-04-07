@@ -7,15 +7,7 @@ const log = std.log.scoped(.main);
 
 const VectorSet = vector_set_mod.VectorSet;
 
-var stdin_buffer: [1024]u8 = undefined;
-var stdin_reader = std.fs.File.stdin().reader(&stdin_buffer);
-const stdin = &stdin_reader.interface;
-
-var stdout_buffer: [1024]u8 = undefined;
-var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-const stdout = &stdout_writer.interface;
-
-fn usage(exe_name: []const u8) std.Io.Writer.Error!void {
+fn usage(stdout: *std.Io.Writer, exe_name: []const u8) std.Io.Writer.Error!void {
     try stdout.print("Usage: {s} [dataset_name] [custom_data_dir] [--no-convert] [--help|-h]\n", .{exe_name});
     try stdout.print("If dataset_name is not provided, enter interactive application.\n", .{});
     try stdout.print("If custom_data_dir is not provided, default to ./{s}\n", .{config.DATA_DIR});
@@ -28,11 +20,11 @@ fn usage(exe_name: []const u8) std.Io.Writer.Error!void {
     std.process.exit(0);
 }
 
-fn checkHelp(arg: [:0]const u8, exe_name: []const u8) std.Io.Writer.Error!void {
+fn checkHelp(stdout: *std.Io.Writer, arg: [:0]const u8, exe_name: []const u8) std.Io.Writer.Error!void {
     const help_args = [_][]const u8{ "--help", "-h" };
     for (help_args) |help_arg| {
         if (std.mem.eql(u8, arg, help_arg)) {
-            try usage(exe_name);
+            try usage(stdout, exe_name);
             return;
         }
     }
@@ -43,16 +35,25 @@ pub fn main() (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var args = std.process.args();
+    var args = try std.process.argsWithAllocator(allocator);
+    defer args.deinit();
     const exe_path = args.next() orelse @src().file;
     const exe_name = std.fs.path.basename(exe_path);
 
+    var stdin_buffer: [1024]u8 = undefined;
+    var stdin_reader = std.fs.File.stdin().reader(&stdin_buffer);
+    const stdin = &stdin_reader.interface;
+
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
     if (args.next()) |dataset_name| {
-        try checkHelp(dataset_name, exe_name);
+        try checkHelp(stdout, dataset_name, exe_name);
 
         const vector_set = std.meta.stringToEnum(VectorSet, dataset_name) orelse {
             std.debug.print("Error: Unknown dataset '{s}'.\n", .{dataset_name});
-            try usage(exe_name);
+            try usage(stdout, exe_name);
             std.process.exit(1);
         };
 
@@ -66,7 +67,7 @@ pub fn main() (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
                 break :blk false;
             } else {
                 std.debug.print("Unknown flag '{s}'.\n", .{flag});
-                try usage(exe_name);
+                try usage(stdout, exe_name);
                 std.process.exit(1);
             }
         } else true;

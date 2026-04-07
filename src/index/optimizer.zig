@@ -22,11 +22,11 @@ pub const Optimizer = struct {
     };
 
     pub const OptimizationTiming = struct {
-        count_detours_ns: u64,
-        prune_ns: u64,
-        build_reverse_graph_ns: u64,
-        combine_ns: u64,
-        total_optimization_ns: u64,
+        count_detours_ns: u64 = 0,
+        prune_ns: u64 = 0,
+        build_reverse_graph_ns: u64 = 0,
+        combine_ns: u64 = 0,
+        total_optimization_ns: u64 = 0,
     };
 
     /// Generic neighbors list container.
@@ -93,6 +93,13 @@ pub const Optimizer = struct {
     /// Wait group for synchronizing threads.
     wait_group: std.Thread.WaitGroup,
 
+    fn OptimizeResult(comptime do_timing: bool) type {
+        return struct {
+            graph: NeighborsList(false),
+            timing: if (do_timing) OptimizationTiming else void,
+        };
+    }
+
     const Self = @This();
 
     /// Initializes the optimizer with the borrowed neighbors list, thread pool, and number of nodes per block.
@@ -110,27 +117,35 @@ pub const Optimizer = struct {
         return optimizer;
     }
 
-    /// Optimizes the graph by removing redundant edges based on the number of detourable routes.
-    /// Final graph degree is less than or equal to the initial number of neighbors per node.
-    pub fn optimize(
+    /// Internal implementation of `optimize` and `optimizeWithTiming`.
+    ///
+    /// When `do_timing` is `false`, returns only the optimized graph.
+    /// When `do_timing` is `true`, returns the optimized graph along with timing metrics.
+    ///
+    /// The optimization process consists of four phases:
+    /// 1. Count detours: Counts how many 2-hop paths exist between each pair of neighbors
+    /// 2. Prune: Selects neighbors with the fewest detours to keep
+    /// 3. Build reverse graph: Maps each node to which nodes have it as a neighbor
+    /// 4. Combine: Merges pruned neighbors with reverse edges to form the final graph
+    fn optimizeImpl(
         self: *Self,
         graph_degree: usize,
         allocator: std.mem.Allocator,
-    ) (Error || std.mem.Allocator.Error)!NeighborsList(false) {
+        comptime do_timing: bool,
+    ) (Error || std.mem.Allocator.Error || (if (do_timing) std.time.Timer.Error else error{}))!OptimizeResult(do_timing) {
+        var total_timer = if (do_timing) try std.time.Timer.start() else {};
+        var timer = if (do_timing) try std.time.Timer.start() else {};
+
         const num_nodes = self.neighbors_list.num_nodes;
         const input_degree = self.neighbors_list.num_neighbors_per_node;
         const output_degree = if (graph_degree <= input_degree) graph_degree else return Error.InvalidGraphDegree;
 
-        // Output graph that will store the optimized neighbors.
-        // Does not store detour counts, only neighbor IDs.
         var output_graph = try NeighborsList(false).init(
             num_nodes,
             output_degree,
             allocator,
         );
 
-        // Number of 2-hop neighbors to store for one node.
-        // If input degree is 0, the number will just be 0
         const num_two_hop_neighbors_per_node =
             std.math.mul(
                 usize,
@@ -138,7 +153,6 @@ pub const Optimizer = struct {
                 input_degree -| 1,
             ) catch return Error.NumNeighborsPerNodeTooLarge;
 
-        // Buffer for storing 2-hop neighbors during detour counting for each thread.
         const two_hop_neighbors_buffer_size =
             std.math.mul(
                 usize,
@@ -148,39 +162,62 @@ pub const Optimizer = struct {
         const two_hop_neighbors_buffer = try allocator.alloc(usize, two_hop_neighbors_buffer_size);
         defer allocator.free(two_hop_neighbors_buffer);
 
-        // Buffer for storing reverse neighbor counts per node. The value of ech element
-        // in this buffer may be larger than the output_degree (which is invalid),
-        // but we will cap the number of reverse neighbors to output_degree in the combine step.
         const reverse_neighbor_counts = try allocator.alloc(usize, num_nodes);
         defer allocator.free(reverse_neighbor_counts);
 
-        // Buffer for storing reverse neighbors.
-        // Each node can have at most `output_degree` reverse neighbors.
-        // The multiplication cannot overflow because of the check when initializing output graph.
         const reverse_neighbor_ids = try allocator.alloc(usize, num_nodes * output_degree);
         defer allocator.free(reverse_neighbor_ids);
 
+        var timing = if (do_timing) OptimizationTiming{} else {};
+
         log.info("Counting detours in the input graph...", .{});
+        if (do_timing) timer.reset();
         self.countDetours(
             two_hop_neighbors_buffer,
             num_two_hop_neighbors_per_node,
         );
+        if (do_timing) timing.count_detours_ns = timer.read();
+
         log.info("Pruning edges from the graph...", .{});
+        if (do_timing) timer.reset();
         self.prune(&output_graph);
+        if (do_timing) timing.prune_ns = timer.read();
+
         log.info("Building reverse graph from pruned graph...", .{});
+        if (do_timing) timer.reset();
         self.buildReverseGraph(
             &output_graph,
             reverse_neighbor_counts,
             reverse_neighbor_ids,
         );
+        if (do_timing) timing.build_reverse_graph_ns = timer.read();
+
         log.info("Combining edges from pruned graph and reverse graph...", .{});
+        if (do_timing) timer.reset();
         self.combine(
             &output_graph,
             reverse_neighbor_counts,
             reverse_neighbor_ids,
         );
+        if (do_timing) timing.combine_ns = timer.read();
 
-        return output_graph;
+        if (do_timing) timing.total_optimization_ns = total_timer.read();
+
+        return .{
+            .graph = output_graph,
+            .timing = if (do_timing) timing else {},
+        };
+    }
+
+    /// Optimizes the graph by removing redundant edges based on the number of detourable routes.
+    /// Final graph degree is less than or equal to the initial number of neighbors per node.
+    pub fn optimize(
+        self: *Self,
+        graph_degree: usize,
+        allocator: std.mem.Allocator,
+    ) (Error || std.mem.Allocator.Error)!NeighborsList(false) {
+        const optimize_result: OptimizeResult(false) = try self.optimizeImpl(graph_degree, allocator, false);
+        return optimize_result.graph;
     }
 
     /// Optimizes the graph with timing information for each phase.
@@ -193,79 +230,10 @@ pub const Optimizer = struct {
         graph: NeighborsList(false),
         timing: OptimizationTiming,
     } {
-        var total_timer = try std.time.Timer.start();
-        var timer = try std.time.Timer.start();
-
-        const num_nodes = self.neighbors_list.num_nodes;
-        const input_degree = self.neighbors_list.num_neighbors_per_node;
-        const output_degree = @min(graph_degree, input_degree);
-
-        var output_graph = try NeighborsList(false).init(
-            num_nodes,
-            output_degree,
-            allocator,
-        );
-
-        const num_two_hop_neighbors_per_node =
-            std.math.mul(
-                usize,
-                input_degree -| 1,
-                input_degree -| 1,
-            ) catch return Error.NumNeighborsPerNodeTooLarge;
-
-        const two_hop_neighbors_buffer_size =
-            std.math.mul(
-                usize,
-                numThreads(self.thread_pool),
-                num_two_hop_neighbors_per_node,
-            ) catch return Error.NumNeighborsPerNodeTooLarge;
-        const two_hop_neighbors_buffer = try allocator.alloc(usize, two_hop_neighbors_buffer_size);
-        defer allocator.free(two_hop_neighbors_buffer);
-
-        const reverse_neighbor_counts = try allocator.alloc(usize, num_nodes);
-        defer allocator.free(reverse_neighbor_counts);
-
-        const reverse_neighbor_ids = try allocator.alloc(usize, num_nodes * output_degree);
-        defer allocator.free(reverse_neighbor_ids);
-
-        timer.reset();
-        self.countDetours(
-            two_hop_neighbors_buffer,
-            num_two_hop_neighbors_per_node,
-        );
-        const count_detours_ns = timer.read();
-
-        timer.reset();
-        self.prune(&output_graph);
-        const prune_ns = timer.read();
-
-        timer.reset();
-        self.buildReverseGraph(
-            &output_graph,
-            reverse_neighbor_counts,
-            reverse_neighbor_ids,
-        );
-        const build_reverse_graph_ns = timer.read();
-
-        timer.reset();
-        self.combine(
-            &output_graph,
-            reverse_neighbor_counts,
-            reverse_neighbor_ids,
-        );
-        const combine_ns = timer.read();
-
-        const total_optimization_ns = total_timer.read();
-
+        const optimize_result: OptimizeResult(true) = try self.optimizeImpl(graph_degree, allocator, true);
         return .{
-            .graph = output_graph,
-            .timing = .{
-                .count_detours_ns = count_detours_ns,
-                .prune_ns = prune_ns,
-                .build_reverse_graph_ns = build_reverse_graph_ns,
-                .combine_ns = combine_ns,
-                .total_optimization_ns = total_optimization_ns,
-            },
+            .graph = optimize_result.graph,
+            .timing = optimize_result.timing,
         };
     }
 
@@ -998,4 +966,46 @@ test "edge case - single node graph" {
 
     // Just verify it doesn't crash and has correct degree
     try std.testing.expectEqual(output_degree, output_graph.num_neighbors_per_node);
+}
+
+test "optimize and optimizeWithTiming produce identical results" {
+    var neighbor_ids = [_]usize{
+        1, 2, 3,
+        0, 2, 3,
+        0, 1, 3,
+        0, 1, 2,
+    };
+    var detour_counts = [_]usize{
+        2, 1, 0,
+        0, 1, 0,
+        0, 0, 0,
+        0, 0, 0,
+    };
+
+    const neighbors_list = Optimizer.NeighborsList(true){
+        .num_nodes = 4,
+        .num_neighbors_per_node = 3,
+        .entries = mod_soa_slice.SoaSlice(Optimizer.NeighborsList(true).Entry){
+            .ptrs = [_][*]u8{
+                @ptrCast(&neighbor_ids),
+                @ptrCast(&detour_counts),
+            },
+            .len = 12,
+        },
+    };
+
+    var optimizer = Optimizer.init(neighbors_list, null, 2);
+
+    const output_degree: usize = 2;
+    var result1 = try optimizer.optimize(output_degree, std.testing.allocator);
+    defer result1.deinit(std.testing.allocator);
+
+    var result2 = try optimizer.optimizeWithTiming(output_degree, std.testing.allocator);
+    defer result2.graph.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualSlices(
+        usize,
+        result1.entries.items(.neighbor_id),
+        result2.graph.entries.items(.neighbor_id),
+    );
 }

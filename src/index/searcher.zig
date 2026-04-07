@@ -52,14 +52,42 @@ inline fn numThreads(thread_pool: ?*std.Thread.Pool) usize {
     return if (thread_pool) |pool| pool.threads.len else 1;
 }
 
+/// Error set for search operations.
+pub const SearchError = error{
+    /// The search configuration is invalid (e.g., internal_k < k or internal_k < search_width).
+    InvalidSearchConfig,
+    /// The queries array is invalid (e.g., not 64-byte aligned or wrong dimensions).
+    InvalidQueriesArray,
+    /// The search buffer size calculation would overflow.
+    SearchBufferSizeOverflow,
+    /// The number of threads times nodes would overflow buffer size calculation.
+    NumThreadsTooLarge,
+    /// The number of queries would cause seed overflow.
+    NumQueriesTooLarge,
+    /// The requested k value is too large for the output array.
+    KTooLarge,
+};
+
+/// CAGRA searcher for k-nearest neighbor search on a graph index.
+///
+/// Type parameters:
+/// - `T`: Element type (e.g., `f32`, `i32`)
+/// - `N`: Vector dimensionality
+///
+/// The searcher uses iterative graph traversal to find k nearest neighbors
+/// for a given query vector, starting from random nodes in the graph.
 pub fn Searcher(comptime T: type, comptime N: usize) type {
     const elem_type = mod_types.ElemType.fromZigType(T) orelse
         @compileError("Unsupported element type: " ++ @typeName(T));
 
     return struct {
+        /// The neighbor graph (k-nearest neighbor graph).
         graph: []const usize,
+        /// The dataset containing the vectors.
         dataset: *const Dataset,
+        /// Number of nodes in the graph.
         num_nodes: usize,
+        /// Number of neighbors per node in the graph.
         num_neighbors_per_node: usize,
 
         const Dataset = mod_dataset.Dataset(T, N);
@@ -71,20 +99,12 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
         };
         const SearchBuffer = mod_soa_slice.SoaSlice(SearchEntry);
 
+        /// Result of a search operation containing neighbors and distances.
         pub const SearchResult = struct {
-            /// dims: [num_queries, k]
+            /// Neighbor IDs for each query, shape: [num_queries, k].
             neighbors: StaticArray(NodeIdType, 2),
-            /// dims: [num_queries, k]
+            /// Distances for each neighbor, shape: [num_queries, k].
             distances: StaticArray(T, 2),
-        };
-
-        pub const Error = error{
-            InvalidSearchConfig,
-            InvalidQueriesArray,
-            SearchBufferSizeOverflow,
-            NumThreadsTooLarge,
-            NumQueriesTooLarge,
-            KTooLarge,
         };
 
         const Self = @This();
@@ -117,23 +137,37 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
             }
         }
 
+        /// Searches for k nearest neighbors for each query vector.
+        ///
+        /// Uses iterative graph traversal starting from random nodes. Each iteration:
+        /// 1. Sorts candidates to find top-k
+        /// 2. Expands to neighbors of top candidates
+        /// 3. Repeats until max iterations reached or no new candidates
+        ///
+        /// Arguments:
+        /// - `queries`: Query vectors, must be 64-byte aligned
+        /// - `config`: Search configuration
+        /// - `seed`: Random seed for initialization and tie-breaking
+        /// - `allocator`: Memory allocator for buffers
+        ///
+        /// Returns search results containing neighbor IDs and distances.
         pub fn search(
             self: *const Self,
             queries: *const ConstStaticArray(T, 2),
             config: *const SearchConfig,
             seed: u64,
             allocator: std.mem.Allocator,
-        ) (Error || std.mem.Allocator.Error)!SearchResult {
-            if (config.internal_k < config.k) return Error.InvalidSearchConfig;
-            if (config.internal_k < config.search_width) return Error.InvalidSearchConfig;
+        ) (SearchError || std.mem.Allocator.Error)!SearchResult {
+            if (config.internal_k < config.k) return SearchError.InvalidSearchConfig;
+            if (config.internal_k < config.search_width) return SearchError.InvalidSearchConfig;
 
-            const num_queries = verifyQueriesArray(queries) orelse return Error.InvalidQueriesArray;
+            const num_queries = verifyQueriesArray(queries) orelse return SearchError.InvalidQueriesArray;
             // Will seed each query with a different seed: from seed to seed + num_queries - 1. Guard against overflow of seed.
             _ = std.math.add(
                 u64,
                 seed,
-                std.math.cast(u64, num_queries -| 1) orelse return Error.NumQueriesTooLarge,
-            ) catch return Error.NumQueriesTooLarge;
+                std.math.cast(u64, num_queries -| 1) orelse return SearchError.NumQueriesTooLarge,
+            ) catch return SearchError.NumQueriesTooLarge;
 
             // Number of queries per block. 0 when number of queries or threads is 0.
             const num_queries_per_block: usize = @min(config.num_threads, num_queries);
@@ -157,14 +191,14 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
                 usize,
                 num_queries_per_block,
                 self.num_nodes,
-            ) catch return Error.NumThreadsTooLarge);
+            ) catch return SearchError.NumThreadsTooLarge);
             defer allocator.free(first_time_parent_flags_buffers);
 
             const first_time_candidate_flags_buffers = try allocator.alloc(bool, std.math.mul(
                 usize,
                 num_queries_per_block,
                 self.num_nodes,
-            ) catch return Error.NumThreadsTooLarge);
+            ) catch return SearchError.NumThreadsTooLarge);
             defer allocator.free(first_time_candidate_flags_buffers);
 
             const search_buffer_size = std.math.add(
@@ -174,14 +208,14 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
                     usize,
                     config.search_width,
                     self.num_neighbors_per_node,
-                ) catch return Error.SearchBufferSizeOverflow,
-            ) catch return Error.SearchBufferSizeOverflow;
+                ) catch return SearchError.SearchBufferSizeOverflow,
+            ) catch return SearchError.SearchBufferSizeOverflow;
             var search_buffers = try SearchBuffer.init(
                 std.math.mul(
                     usize,
                     num_queries_per_block,
                     search_buffer_size,
-                ) catch return Error.NumThreadsTooLarge,
+                ) catch return SearchError.NumThreadsTooLarge,
                 allocator,
             );
             defer search_buffers.deinit(allocator);
@@ -191,7 +225,7 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
                 .C,
                 allocator,
             ) catch |e| return switch (e) {
-                znpy.array.static.InitError.ShapeSizeOverflow => Error.KTooLarge,
+                znpy.array.static.InitError.ShapeSizeOverflow => SearchError.KTooLarge,
                 else => return std.mem.Allocator.Error.OutOfMemory,
             };
             errdefer neighbors.deinit(allocator);
@@ -201,7 +235,7 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
                 .C,
                 allocator,
             ) catch |e| return switch (e) {
-                znpy.array.static.InitError.ShapeSizeOverflow => Error.KTooLarge,
+                znpy.array.static.InitError.ShapeSizeOverflow => SearchError.KTooLarge,
                 else => return std.mem.Allocator.Error.OutOfMemory,
             };
             errdefer distances.deinit(allocator);
@@ -778,6 +812,71 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
 
             for (internal_k..internal_k + new_count * graph_degree) |i| {
                 try std.testing.expect(distances[i] >= 0.0);
+            }
+        }
+
+        test "search returns valid k nearest neighbors" {
+            const TestN: usize = 128;
+            const TestDataset = mod_dataset.Dataset(f32, TestN);
+
+            const num_nodes: usize = 10;
+            const graph_degree: usize = 3;
+            const k: usize = 3;
+
+            var prng = std.Random.DefaultPrng.init(42);
+            const random = prng.random();
+            const dataset = try TestDataset.initRandom(num_nodes, random, std.testing.allocator);
+            defer dataset.deinit(std.testing.allocator);
+
+            var graph = try std.testing.allocator.alloc(usize, num_nodes * graph_degree);
+            defer std.testing.allocator.free(graph);
+            for (0..num_nodes) |i| {
+                for (0..graph_degree) |j| {
+                    graph[i * graph_degree + j] = (i + j + 1) % num_nodes;
+                }
+            }
+
+            const searcher = Searcher(f32, TestN){
+                .graph = graph,
+                .dataset = &dataset,
+                .num_nodes = num_nodes,
+                .num_neighbors_per_node = graph_degree,
+            };
+
+            var query_array = try znpy.array.StaticArray(f32, 2).init(
+                [_]usize{ 1, TestN },
+                .C,
+                std.testing.allocator,
+            );
+            defer query_array.deinit(std.testing.allocator);
+            @memcpy(query_array.data_buffer, dataset.data_buffer[0..TestN]);
+
+            const search_config = SearchConfig{
+                .k = k,
+                .internal_k = k * 2,
+                .max_iterations = 10,
+                .search_width = 1,
+                .num_threads = 1,
+            };
+
+            const result = try searcher.search(
+                &query_array.asConst(),
+                &search_config,
+                123,
+                std.testing.allocator,
+            );
+            defer result.neighbors.deinit(std.testing.allocator);
+            defer result.distances.deinit(std.testing.allocator);
+
+            try std.testing.expectEqual(@as(usize, 1), result.neighbors.shape.dims[0]);
+            try std.testing.expectEqual(k, result.neighbors.shape.dims[1]);
+
+            for (0..k) |i| {
+                try std.testing.expect(result.neighbors.data_buffer[i] < num_nodes);
+            }
+
+            for (0..k) |i| {
+                try std.testing.expect(result.distances.data_buffer[i] >= 0);
             }
         }
     };

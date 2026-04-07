@@ -38,6 +38,7 @@ pub fn Vector(comptime T: type, comptime N: usize) type {
         }
 
         /// Naive implementation (no SIMD)
+        /// Assumes no overflow occurs during calculation
         pub fn sqdistNaive(v1: *const Self, v2: *const Self) T {
             var acc: T = 0;
             for (v1.data, v2.data) |a, b| {
@@ -48,9 +49,11 @@ pub fn Vector(comptime T: type, comptime N: usize) type {
         }
 
         /// Calculate squared distance between two vectors with SIMD optimization
+        /// Assumes no overflow occurs during calculation
         pub fn sqdist(v1: *const Self, v2: *const Self) T {
             // TODO: Handle potential overflow for high-dimensional or large-magnitude data.
             // Consider using a wider accumulator (f64 or u64) or pre-normalizing vectors.
+            // We have the function types.maxAbsValue(elem, dim) which can help.
             const vector_size = std.simd.suggestVectorLength(T) orelse
                 // TODO: Fallback to some default vector size?
                 @compileError("Cannot determine vector size for type");
@@ -89,16 +92,12 @@ test "sqdist max distance has no overflow for all supported types and dims" {
     const DimType = types.DimType;
 
     inline for (std.meta.fields(ElemType)) |elem_tag| {
-        const elem = @field(ElemType, elem_tag.name);
+        const elem: ElemType = @field(ElemType, elem_tag.name);
         const T = elem.toZigType();
 
         inline for (std.meta.fields(DimType)) |dim_tag| {
-            const dim = @field(DimType, dim_tag.name);
-            const N = comptime switch (dim) {
-                .D128 => 128,
-                .D256 => 256,
-                .D512 => 512,
-            };
+            const dim: DimType = @field(DimType, dim_tag.name);
+            const N = comptime dim.toDim();
 
             const V = Vector(T, N);
             var a: V = undefined;

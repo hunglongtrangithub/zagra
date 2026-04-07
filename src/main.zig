@@ -7,10 +7,6 @@ pub const std_options: std.Options = .{
     .log_level = .info,
 };
 
-var stdout_buffer: [1024]u8 = undefined;
-var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
-const stdout = &stdout_writer.interface;
-
 const HELP_TEMPLATE =
     \\Usage: {s} <vector_count> <graph_degree> [intermediate_graph_degree] [--help|-h] [options]
     \\- vector_count (required): Number of vectors in the dataset
@@ -35,6 +31,10 @@ pub fn main() !void {
 
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
+
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
 
     const exe_path = args.next() orelse @src().file;
     const exe_name = std.fs.path.basename(exe_path[0..]);

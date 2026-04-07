@@ -7,19 +7,19 @@ const mod_soa_slice = @import("soa_slice.zig");
 
 pub const IterationTiming = struct {
     iteration: usize,
-    sample_candidates_ns: u64,
-    generate_proposals_ns: u64,
-    apply_updates_ns: u64,
-    total_iteration_ns: u64,
-    updates_count: usize,
+    sample_candidates_ns: u64 = 0,
+    generate_proposals_ns: u64 = 0,
+    apply_updates_ns: u64 = 0,
+    total_iteration_ns: u64 = 0,
+    updates_count: usize = 0,
 };
 
 pub const TrainingTiming = struct {
-    init_random_ns: u64,
-    iterations: std.ArrayList(IterationTiming),
-    total_training_ns: u64,
-    num_iterations_completed: usize,
-    converged: bool,
+    init_random_ns: u64 = 0,
+    iterations: std.ArrayList(IterationTiming) = .empty,
+    total_training_ns: u64 = 0,
+    num_iterations_completed: usize = 0,
+    converged: bool = false,
 
     pub fn deinit(self: *TrainingTiming, allocator: std.mem.Allocator) void {
         self.iterations.deinit(allocator);
@@ -91,6 +91,16 @@ pub const TrainingConfig = struct {
     }
 };
 
+pub const NNDescentError = error{
+    /// The specified maximum number of candidates is too large. Should be no more than i32 max.
+    MaxCandidatesTooLarge,
+    /// Invalid number of neighbors per node. Should be less than the number of vectors in the dataset.
+    /// This error is always returned when the dataset is empty, since in that case there cannot be any neighbor.
+    InvalidNumNeighborsPerNode,
+    /// The specified number of neighbors causes an overflow when multiplied by number of nodes.
+    NumberOfEdgesTooLarge,
+};
+
 /// NN-Descent struct to construct the k-NN graph from a dataset.
 pub fn NNDescent(
     /// Element type of the vectors, supported in `types.ElemType`.
@@ -154,24 +164,14 @@ pub fn NNDescent(
 
         const Self = @This();
 
-        pub const InitError = error{
-            /// The specified maximum number of candidates is too large. Should be no more than i32 max.
-            MaxCandidatesTooLarge,
-            /// Invalid number of neighbors per node. Should be less than the number of vectors in the dataset.
-            /// This error is always returned when the dataset is empty, since in that case there cannot be any neighbor.
-            InvalidNumNeighborsPerNode,
-            /// The specified number of neighbors causes an overflow when multiplied by number of nodes.
-            NumberOfEdgesTooLarge,
-        };
-
         /// Initialize NN-Descent with the given dataset and training configuration.
         pub fn init(
             dataset: *const Dataset,
             training_config: TrainingConfig,
             allocator: std.mem.Allocator,
-        ) (InitError || std.mem.Allocator.Error)!Self {
-            if (training_config.max_candidates > std.math.maxInt(i32)) return InitError.MaxCandidatesTooLarge;
-            if (training_config.num_neighbors_per_node >= dataset.len) return InitError.InvalidNumNeighborsPerNode;
+        ) (NNDescentError || std.mem.Allocator.Error)!Self {
+            if (training_config.max_candidates > std.math.maxInt(i32)) return NNDescentError.MaxCandidatesTooLarge;
+            if (training_config.num_neighbors_per_node >= dataset.len) return NNDescentError.InvalidNumNeighborsPerNode;
 
             var neighbors_list = try NeighborsList.init(
                 dataset.len,
@@ -209,13 +209,13 @@ pub fn NNDescent(
             const n_old = @as(u64, neighbor_candidates_old.num_neighbors_per_node);
             const capacity_per_node_u64: u64 = (n_new * n_new - n_new) / 2 + (n_new * n_old);
             const capacity_per_node = std.math.cast(usize, capacity_per_node_u64) orelse
-                return InitError.MaxCandidatesTooLarge;
+                return NNDescentError.MaxCandidatesTooLarge;
 
             // Cap num_nodes_per_block at num_nodes
             const num_nodes_per_block: usize = @min(training_config.block_size, neighbors_list.num_nodes);
 
             const num_max_graph_updates: usize, const overflow = @mulWithOverflow(capacity_per_node, num_nodes_per_block);
-            if (overflow != 0) return InitError.MaxCandidatesTooLarge;
+            if (overflow != 0) return NNDescentError.MaxCandidatesTooLarge;
 
             const block_graph_updates_buffer = try allocator.alloc(
                 GraphUpdate,
@@ -316,26 +316,37 @@ pub fn NNDescent(
             ) catch 0;
         }
 
-        pub fn trainWithTiming(self: *Self, allocator: std.mem.Allocator) (std.time.Timer.Error || std.mem.Allocator.Error)!TrainingTiming {
-            var timing = TrainingTiming{
-                .init_random_ns = 0,
-                .iterations = std.ArrayList(IterationTiming).empty,
-                .total_training_ns = 0,
-                .num_iterations_completed = 0,
-                .converged = false,
-            };
-            errdefer timing.deinit(allocator);
+        /// Internal training implementation for the k-NN graph using NN-descent.
+        ///
+        /// When `do_timing` is true, returns detailed timing information in `TrainingTiming`.
+        /// When `do_timing` is false, returns void and skips timing overhead.
+        ///
+        /// The algorithm:
+        /// 1. Populates initial random neighbors for all nodes
+        /// 2. Iteratively refines neighbor lists until convergence or max iterations
+        ///
+        /// Arguments:
+        /// - `self`: Self pointer
+        /// - `do_timing`: Compile-time flag to enable/disable timing instrumentation
+        /// - `allocator`: Memory allocator for timing data (unused when timing is disabled)
+        fn trainImpl(
+            self: *Self,
+            comptime do_timing: bool,
+            allocator: if (do_timing) std.mem.Allocator else void,
+        ) if (do_timing) (std.time.Timer.Error || std.mem.Allocator.Error)!TrainingTiming else void {
+            var timing = if (do_timing) TrainingTiming{} else {};
+            errdefer if (do_timing) timing.deinit(allocator);
 
-            var total_timer = try std.time.Timer.start();
-            var timer = try std.time.Timer.start();
+            var total_timer = if (do_timing) try std.time.Timer.start() else {};
+            var timer = if (do_timing) try std.time.Timer.start() else {};
 
             log.debug("Using {} threads", .{self.training_config.num_threads});
             log.info("Populating random neighbors", .{});
 
             // Step 1: Populate initial random neighbors
-            timer.reset();
+            if (do_timing) timer.reset();
             self.populateRandomNeighbors();
-            timing.init_random_ns = timer.read();
+            if (do_timing) timing.init_random_ns = timer.read();
 
             const convergence_threshold = @as(usize, @intFromFloat(
                 self.training_config.delta * @as(f32, @floatFromInt(self.neighbors_list.entries.len)),
@@ -350,21 +361,13 @@ pub fn NNDescent(
                     self.neighbor_candidates_old.reset();
                 }
 
-                var iter_timing = IterationTiming{
-                    .iteration = iteration,
-                    .sample_candidates_ns = 0,
-                    .generate_proposals_ns = 0,
-                    .apply_updates_ns = 0,
-                    .total_iteration_ns = 0,
-                    .updates_count = 0,
-                };
-
-                var iter_timer = try std.time.Timer.start();
+                var iter_timing = if (do_timing) IterationTiming{ .iteration = iteration } else {};
+                var iter_timer = if (do_timing) try std.time.Timer.start() else {};
 
                 // Sample neighbor candidates into new and old candidate lists
-                timer.reset();
+                if (do_timing) timer.reset();
                 self.sampleNeighborCandidates();
-                iter_timing.sample_candidates_ns = timer.read();
+                if (do_timing) iter_timing.sample_candidates_ns = timer.read();
 
                 var updates_count: usize = 0;
                 const num_blocks = self.numBlocks();
@@ -381,93 +384,59 @@ pub fn NNDescent(
 
                     log.debug("NN-Descent iteration {d} - block {d}", .{ iteration, block_id });
 
-                    timer.reset();
+                    if (do_timing) timer.reset();
                     self.generateBlockGraphUpdateProposals(block_id);
-                    gen_total_ns += timer.read();
+                    if (do_timing) gen_total_ns += timer.read();
 
-                    timer.reset();
+                    if (do_timing) timer.reset();
                     const count = self.applyBlockGraphUpdatesProposals(block_id);
-                    apply_total_ns += timer.read();
+                    if (do_timing) apply_total_ns += timer.read();
 
                     updates_count += count;
                 }
 
-                iter_timing.generate_proposals_ns = gen_total_ns;
-                iter_timing.apply_updates_ns = apply_total_ns;
-                iter_timing.updates_count = updates_count;
-                iter_timing.total_iteration_ns = iter_timer.read();
+                if (do_timing) {
+                    iter_timing.generate_proposals_ns = gen_total_ns;
+                    iter_timing.apply_updates_ns = apply_total_ns;
+                    iter_timing.updates_count = updates_count;
+                    iter_timing.total_iteration_ns = iter_timer.read();
 
-                try timing.iterations.append(allocator, iter_timing);
-                timing.num_iterations_completed = iteration + 1;
+                    try timing.iterations.append(allocator, iter_timing);
+                    timing.num_iterations_completed = iteration + 1;
+                }
 
                 log.debug("Applied {d} graph updates", .{updates_count});
 
                 if (updates_count <= convergence_threshold) {
                     log.info("Converged after {d} iterations", .{iteration + 1});
-                    timing.converged = true;
+                    if (do_timing) timing.converged = true;
                     break;
                 }
             }
 
-            timing.total_training_ns = total_timer.read();
+            if (do_timing) timing.total_training_ns = total_timer.read();
             log.info("NN-Descent training completed", .{});
 
             return timing;
+        }
+
+        /// Train the k-NN graph using NN-descent with detailed timing information.
+        ///
+        /// Returns a `TrainingTiming` struct containing:
+        /// - Time spent initializing random neighbors
+        /// - Per-iteration timing breakdown
+        /// - Total training time
+        ///
+        /// The neighbors list is updated in-place and accessible after return.
+        pub fn trainWithTiming(self: *Self, allocator: std.mem.Allocator) (std.time.Timer.Error || std.mem.Allocator.Error)!TrainingTiming {
+            return self.trainImpl(true, allocator);
         }
 
         /// Train the k-NN graph using the NN-descent algorithm.
         /// Iteratively refines the neighbor lists until convergence or reaching the maximum number of iterations.
         /// The neighbors list is updated in-place during training, and can be accessed after this function returns.
         pub fn train(self: *Self) void {
-            log.debug("Using {} threads", .{self.training_config.num_threads});
-            log.info("Populating random neighbors", .{});
-            // Step 1: Populate initial random neighbors
-            self.populateRandomNeighbors();
-
-            const convergence_threshold = @as(usize, @intFromFloat(
-                self.training_config.delta * @as(f32, @floatFromInt(self.neighbors_list.entries.len)),
-            ));
-            log.info("Convergence threshold: {}", .{convergence_threshold});
-
-            // Step 2: Iteratively refine the neighbor lists
-            for (0..self.training_config.max_iterations) |iteration| {
-                log.info("NN-Descent iteration {d}", .{iteration});
-                defer {
-                    // TODO: Do we need to reset candidate lists, or just overwrite them in the next iteration?
-                    self.neighbor_candidates_new.reset();
-                    self.neighbor_candidates_old.reset();
-                }
-
-                // Sample neighbor candidates into new and old candidate lists
-                self.sampleNeighborCandidates();
-
-                // 1. generate new neighbor proposals from candidates
-                // 2. update neighbor lists and track changes
-                // 3. check for convergence based on delta
-
-                var updates_count: usize = 0;
-                const num_blocks = self.numBlocks();
-                for (0..num_blocks) |block_id| {
-                    defer {
-                        for (self.block_graph_updates_lists) |*list| {
-                            list.clearRetainingCapacity();
-                        }
-                    }
-                    log.debug("NN-Descent iteration {d} - block {d}", .{ iteration, block_id });
-                    self.generateBlockGraphUpdateProposals(block_id);
-                    const count = self.applyBlockGraphUpdatesProposals(block_id);
-                    updates_count += count;
-                }
-
-                log.debug("Applied {d} graph updates", .{updates_count});
-
-                if (updates_count <= convergence_threshold) {
-                    log.info("Converged after {d} iterations", .{iteration + 1});
-                    break;
-                }
-            }
-
-            log.info("NN-Descent training completed", .{});
+            self.trainImpl(false, {});
         }
 
         /// Populate all nodes with random neighbors.
@@ -1350,9 +1319,49 @@ test "NNDescent - single-threaded and multi-threaded produce similar results" {
     }
 }
 
-pub const NeighborHeapListInitError = error{
-    NumberOfEdgesTooLarge,
-};
+test "NNDescent - train() and trainWithTiming() produce identical results" {
+    const T = f32;
+    const N = 128;
+    const Dataset = mod_dataset.Dataset(T, N);
+    const NND = NNDescent(T, N);
+
+    const num_vectors = 100;
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+    const dataset = try Dataset.initRandom(
+        num_vectors,
+        random,
+        std.testing.allocator,
+    );
+    defer dataset.deinit(std.testing.allocator);
+
+    const config = TrainingConfig.init(10, dataset.len, 1, 42);
+
+    // Run train()
+    var nn_train = try NND.init(&dataset, config, std.testing.allocator);
+    defer nn_train.deinit(std.testing.allocator);
+    nn_train.train();
+
+    // Run trainWithTiming()
+    var nn_timing = try NND.init(&dataset, config, std.testing.allocator);
+    defer nn_timing.deinit(std.testing.allocator);
+    var timing = try nn_timing.trainWithTiming(std.testing.allocator);
+    defer timing.deinit(std.testing.allocator);
+
+    // Verify timing data is reasonable
+    try std.testing.expect(timing.init_random_ns > 0);
+    try std.testing.expect(timing.total_training_ns > 0);
+    try std.testing.expect(timing.iterations.items.len > 0);
+    try std.testing.expect(timing.num_iterations_completed > 0);
+
+    // Compare all fields of neighbors list
+    const entries_train = nn_train.neighbors_list.entries;
+    const entries_timing = nn_timing.neighbors_list.entries;
+
+    try std.testing.expectEqualSlices(usize, entries_train.items(.neighbor_id), entries_timing.items(.neighbor_id));
+    try std.testing.expectEqualSlices(bool, entries_train.items(.is_new), entries_timing.items(.is_new));
+    try std.testing.expectEqualSlices(T, entries_train.items(.distance), entries_timing.items(.distance));
+}
 
 /// A cache-friendly list of max heaps for storing k-nearest neighbors.
 /// One heap per node, with a fixed capacity of neighbors. Each heap is organized by distance,

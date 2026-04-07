@@ -48,7 +48,8 @@ pub fn SoaSlice(comptime T: type) type {
         /// Fills the slice with the values from the given element.
         pub fn fill(self: *Self, elem: T) void {
             inline for (fields, 0..) |field, i| {
-                if (@sizeOf(field.type) == 0) continue; // Skip zero-sized fields. Otherwise LLVM cannot generate code for the pointer arithmetic.
+                // Skip zero-sized fields. Otherwise LLVM cannot generate code for the pointer arithmetic.
+                if (@sizeOf(field.type) == 0) continue;
                 const field_enum = @as(Field, @enumFromInt(i));
                 const field_value = @field(elem, field.name);
                 @memset(self.items(field_enum), field_value);

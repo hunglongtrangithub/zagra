@@ -5,19 +5,21 @@ const log = std.log.scoped(.index);
 const znpy = @import("znpy");
 
 const mod_types = @import("types.zig");
-pub const NodeIdType = mod_types.NodeIdType;
 const mod_dataset = @import("dataset.zig");
 const mod_soa_slice = @import("index/soa_slice.zig");
 const mod_optimizer = @import("index/optimizer.zig");
 const mod_nn_descent = @import("index/nn_descent.zig");
 const mod_searcher = @import("index/searcher.zig");
 
+pub const NodeIdType = mod_types.NodeIdType;
 pub const NNDescent = mod_nn_descent.NNDescent;
 pub const NNDTrainingConfig = mod_nn_descent.TrainingConfig;
 pub const NNDTrainingTiming = mod_nn_descent.TrainingTiming;
+pub const NNDescentError = mod_nn_descent.NNDescentError;
 pub const SoaSlice = mod_soa_slice.SoaSlice;
 pub const Optimizer = mod_optimizer.Optimizer;
 pub const SearchConfig = mod_searcher.SearchConfig;
+pub const SearchError = mod_searcher.SearchError;
 
 /// Check that the graph is valid:
 /// - The length of neighbor_ids must equal number of nodes * number of neighbors per node
@@ -28,45 +30,51 @@ pub fn isValidGraph(
     neighbor_ids: []const usize,
     num_nodes: usize,
     num_neighbors_per_node: usize,
+    allocator: std.mem.Allocator,
 ) bool {
     if (neighbor_ids.len != num_nodes * num_neighbors_per_node) {
-        log.err(
-            "Graph length {} does not match expected size {}",
-            .{ neighbor_ids.len, num_nodes * num_neighbors_per_node },
-        );
+        // Graph size does not match expected size
         return false;
     }
 
+    var set: ?std.AutoArrayHashMapUnmanaged(usize, void) = .empty;
+    set.?.ensureTotalCapacity(allocator, num_neighbors_per_node) catch {
+        set = null;
+    };
+    defer if (set) |*s| s.deinit(allocator);
+
     for (0..num_nodes) |node_id| {
+        defer if (set) |*s| s.clearRetainingCapacity();
+
         const start = node_id * num_neighbors_per_node;
         const end = start + num_neighbors_per_node;
         const slice = neighbor_ids[start..end];
 
         for (slice, 0..) |neighbor_id, neighbor_idx| {
             if (neighbor_id >= num_nodes) {
-                log.err(
-                    "Invalid neighbor ID {} found for node {} in neighbor IDs {any}",
-                    .{ neighbor_id, node_id, slice },
-                );
+                // Invalid neighbor ID found
                 return false;
             }
 
             if (neighbor_id == node_id) {
-                log.err(
-                    "Node {} has itself as a neighbor in neighbor IDs {any}",
-                    .{ node_id, slice },
-                );
+                // Node has itself as a neighbor
                 return false;
             }
 
-            for (slice[0..neighbor_idx]) |prev_neighbor_id| {
-                if (neighbor_id == prev_neighbor_id) {
-                    log.err(
-                        "Duplicate neighbor ID {} found for node {} in neighbor IDs {any}",
-                        .{ neighbor_id, node_id, slice },
-                    );
-                    return false;
+            // Find duplicate neighbors in the node's neighbors
+            // Use the set for O(1) lookup if set is available, otherwise do O(n) scan
+            const duplicate_found = blk: {
+                if (set) |*s| {
+                    if (s.contains(neighbor_id)) break :blk true else s.putAssumeCapacity(neighbor_id, {});
+                } else for (slice[0..neighbor_idx]) |prev_neighbor_id| {
+                    if (neighbor_id == prev_neighbor_id) break :blk true;
                 }
+                break :blk false;
+            };
+
+            if (duplicate_found) {
+                // Duplicate neighbor found
+                return false;
             }
         }
     }
@@ -74,10 +82,45 @@ pub fn isValidGraph(
     return true;
 }
 
+test "isValidGraph basic valid and invalid cases" {
+    const allocator = std.testing.allocator;
+
+    // Valid: 3 nodes, each with 2 neighbors, no self or duplicates, all in range
+    const valid_neighbors = [_]usize{ 1, 2, 0, 2, 0, 1 };
+    try std.testing.expect(isValidGraph(&valid_neighbors, 3, 2, allocator));
+
+    // Invalid: wrong length
+    const wrong_length = [_]usize{ 1, 2, 0, 2, 0 };
+    try std.testing.expect(!isValidGraph(&wrong_length, 3, 2, allocator));
+
+    // Invalid: neighbor out of range
+    const out_of_range = [_]usize{ 1, 3, 0, 2, 0, 1 };
+    try std.testing.expect(!isValidGraph(&out_of_range, 3, 2, allocator));
+
+    // Invalid: self as neighbor
+    const self_neighbor = [_]usize{ 0, 2, 0, 2, 0, 1 };
+    try std.testing.expect(!isValidGraph(&self_neighbor, 3, 2, allocator));
+
+    // Invalid: duplicate neighbor
+    const duplicate_neighbor = [_]usize{ 1, 1, 0, 2, 0, 1 };
+    try std.testing.expect(!isValidGraph(&duplicate_neighbor, 3, 2, allocator));
+}
+
 /// Configuration for building the index.
-/// This includes parameters for both the initial graph construction and the subsequent optimization step.
+///
+/// This includes parameters for both the initial graph construction (via NN-Descent)
+/// and the subsequent graph optimization step.
+///
+/// The build process works as follows:
+/// 1. NN-Descent constructs an initial k-NN graph using `nn_descent_config`
+/// 2. The graph is pruned to the target `graph_degree`
 pub const BuildConfig = struct {
+    /// The target degree of the final k-NN graph (k).
+    /// This is the number of nearest neighbors each node will have.
     graph_degree: usize,
+
+    /// Configuration for the NN-Descent initial graph construction phase.
+    /// Its `num_neighbors_per_node` must be >= `graph_degree`.
     nn_descent_config: mod_nn_descent.TrainingConfig,
 
     const Self = @This();
@@ -88,7 +131,7 @@ pub const BuildConfig = struct {
         num_vectors: usize,
         num_threads: ?usize,
         seed: ?u64,
-        block_size: usize,
+        block_size: ?usize,
     ) Self {
         return initExtended(
             graph_degree,
@@ -108,7 +151,7 @@ pub const BuildConfig = struct {
         num_vectors: usize,
         num_threads: ?usize,
         seed: ?u64,
-        block_size: usize,
+        block_size: ?usize,
         max_iterations: ?usize,
         max_candidates: ?usize,
     ) Self {
@@ -120,15 +163,26 @@ pub const BuildConfig = struct {
         );
         if (max_iterations) |mi| nn_descent_config.max_iterations = mi;
         if (max_candidates) |mc| nn_descent_config.max_candidates = mc;
-        var config = Self{
+        if (block_size) |bs| nn_descent_config.block_size = bs;
+
+        return Self{
             .graph_degree = graph_degree,
             .nn_descent_config = nn_descent_config,
         };
-        config.nn_descent_config.block_size = block_size;
-        return config;
     }
 };
 
+pub const BuildError = error{InvalidBuildConfig} || NNDescentError || Optimizer.Error || std.mem.Allocator.Error;
+
+/// A generic ANN index combining a vector dataset with a k-NN graph.
+///
+/// Type parameters:
+/// - `T`: Element type of vectors (e.g., f32, i32, f16). Must be in `ElemType`.
+/// - `N`: Vector dimensionality. Must be in `DimType` (128, 256, or 512).
+///
+/// The index stores:
+/// - A dataset of N-dimensional vectors with element type T
+/// - A k-NN graph where each node has `num_neighbors_per_node` edges to nearest neighbors
 pub fn Index(comptime T: type, comptime N: usize) type {
     return struct {
         /// The dataset of vectors. Owned by this struct.
@@ -149,6 +203,8 @@ pub fn Index(comptime T: type, comptime N: usize) type {
 
         const Self = @This();
 
+        /// Frees all memory owned by this index.
+        /// Does not free the dataset's backing memory if it was borrowed.
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             allocator.free(self.graph);
             self.dataset.deinit(allocator);
@@ -159,7 +215,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
         fn loadDataset(
             reader: *std.Io.Reader,
             allocator: std.mem.Allocator,
-        ) !Dataset {
+        ) (error{InvalidDatasetDimension} || znpy.array.static.FromFileReaderError)!Dataset {
             const array = try znpy.array.static.StaticArray(T, 2).fromFileAllocAligned(
                 reader,
                 std.mem.Alignment.@"64",
@@ -190,7 +246,13 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             reader: *std.Io.Reader,
             allocator: std.mem.Allocator,
             expected_num_nodes: usize,
-        ) !struct { []usize, usize } {
+        ) (error{
+            InvalidGraphShape,
+            GraphDatasetMismatch,
+            InvalidGraphDtype,
+            GraphDtypeTooLarge,
+            InvalidGraph,
+        } || znpy.header.ReadHeaderError || std.mem.Allocator.Error)!struct { []usize, usize } {
             // Read header first to get dtype
             const header = try znpy.header.Header.fromReader(reader, allocator);
             defer header.deinit(allocator);
@@ -267,6 +329,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
                 graph_data,
                 num_nodes,
                 degree,
+                allocator,
             )) return error.InvalidGraph;
 
             return .{ graph_data, degree };
@@ -385,7 +448,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             self: *const Self,
             writer: *std.Io.Writer,
             allocator: std.mem.Allocator,
-        ) !void {
+        ) (error{ UnsupportedUsizeSize, WriteFailed } || znpy.header.WriteHeaderError)!void {
             const element_type = znpy.ElementType.fromZigType(NodeIdType) catch {
                 return error.UnsupportedUsizeSize;
             };
@@ -400,10 +463,31 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             try writer.writeAll(std.mem.sliceAsBytes(self.graph));
         }
 
-        pub fn build(dataset: Dataset, config: BuildConfig, allocator: std.mem.Allocator) !Self {
+        /// Internal build implementation for the ANN index.
+        ///
+        /// When `do_timing` is true, logs timing for NN-Descent training and graph optimization.
+        /// When `do_timing` is false, skips timing overhead.
+        ///
+        /// The build process:
+        /// 1. NN-Descent constructs initial k-NN graph
+        /// 2. Graph optimization prunes to target degree
+        ///
+        /// Arguments:
+        /// - `dataset`: The vector dataset to build the index from (consumed)
+        /// - `config`: Build configuration
+        /// - `do_timing`: Compile-time flag to enable/disable timing
+        /// - `allocator`: Memory allocator for building the index and timing data
+        fn buildImpl(
+            comptime do_timing: bool,
+            dataset: Dataset,
+            config: BuildConfig,
+            allocator: std.mem.Allocator,
+        ) (if (do_timing) (std.time.Timer.Error || BuildError) else BuildError)!Self {
             if (config.nn_descent_config.num_neighbors_per_node < config.graph_degree) {
                 return error.InvalidBuildConfig;
             }
+
+            var timer = if (do_timing) try std.time.Timer.start() else {};
 
             log.info("Training initial graph with degree {d} using NN-Descent...", .{config.nn_descent_config.num_neighbors_per_node});
             var nn_descent = try NNDescent(T, N).init(
@@ -411,15 +495,17 @@ pub fn Index(comptime T: type, comptime N: usize) type {
                 config.nn_descent_config,
                 allocator,
             );
-            var timer = try std.time.Timer.start();
+
+            if (do_timing) timer.reset();
             nn_descent.train();
             nn_descent.sortNeighbors();
-            const training_time = timer.read();
-            log.info("NN Descent training time: {}ms\n", .{training_time / std.time.ns_per_ms});
+            if (do_timing) {
+                const training_time = timer.read();
+                log.info("NN Descent training time: {}ms\n", .{training_time / std.time.ns_per_ms});
+            }
 
             const neighbor_entries = nn_descent.neighbors_list.entries;
 
-            // Free everything except the neighbor ids and the thread pool (which the optimizer will borrow)
             log.info("Freeing NN-Descent resources...", .{});
             allocator.free(neighbor_entries.items(.distance));
             allocator.free(neighbor_entries.items(.is_new));
@@ -433,9 +519,13 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             const num_nodes = nn_descent.neighbors_list.num_nodes;
             const num_neighbors_per_node = nn_descent.neighbors_list.num_neighbors_per_node;
 
-            // We need to keep the neighbor IDs and the thread pool alive for the optimizer, so defer their cleanup
             const neighbor_ids: []usize = neighbor_entries.items(.neighbor_id);
-            std.debug.assert(isValidGraph(neighbor_ids, num_nodes, num_neighbors_per_node));
+            std.debug.assert(isValidGraph(
+                neighbor_ids,
+                num_nodes,
+                num_neighbors_per_node,
+                allocator,
+            ));
             defer allocator.free(neighbor_ids);
 
             const thread_pool = nn_descent.thread_pool;
@@ -447,9 +537,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             const detour_counts: []usize = try allocator.alloc(usize, neighbor_entries.len);
             defer allocator.free(detour_counts);
 
-            // We let the optimizer borrow the entries and thread pool
             var optimizer = mod_optimizer.Optimizer.init(
-                // Craft the optimizer entries by borrowing the neighbor IDs and detourable counts
                 NeighborsList(true){
                     .entries = mod_soa_slice.SoaSlice(NeighborsList(true).Entry){
                         .ptrs = [_][*]u8{
@@ -466,13 +554,20 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             );
 
             log.info("Optimizing graph with degree {d}...", .{config.graph_degree});
-            timer.reset();
+            if (do_timing) timer.reset();
             const optimized_graph = try optimizer.optimize(config.graph_degree, allocator);
-            const optimization_time = timer.read();
-            log.info("Optimization time: {}ms\n", .{optimization_time / std.time.ns_per_ms});
+            if (do_timing) {
+                const optimization_time = timer.read();
+                log.info("Optimization time: {}ms\n", .{optimization_time / std.time.ns_per_ms});
+            }
 
             const graph_data: []const usize = optimized_graph.entries.items(.neighbor_id);
-            std.debug.assert(isValidGraph(graph_data, num_nodes, config.graph_degree));
+            std.debug.assert(isValidGraph(
+                graph_data,
+                num_nodes,
+                config.graph_degree,
+                allocator,
+            ));
 
             return Self{
                 .dataset = dataset,
@@ -482,13 +577,40 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             };
         }
 
+        /// Builds an index from a dataset.
+        ///
+        /// The build process consists of two phases:
+        /// 1. NN-Descent constructs an initial k-NN graph using the provided config
+        /// 2. Graph optimization prunes and refines the graph to the target degree
+        pub fn build(dataset: Dataset, config: BuildConfig, allocator: std.mem.Allocator) BuildError!Self {
+            return buildImpl(false, dataset, config, allocator);
+        }
+
+        /// Builds an index from a dataset, logging timing information.
+        ///
+        /// Same as `build`, but also logs timing for:
+        /// - NN-Descent training
+        /// - Graph optimization
+        pub fn buildWithTiming(dataset: Dataset, config: BuildConfig, allocator: std.mem.Allocator) (std.time.Timer.Error || BuildError)!Self {
+            return buildImpl(true, dataset, config, allocator);
+        }
+
+        /// Searches the index for the k nearest neighbors of the given query vectors.
+        ///
+        /// Arguments:
+        /// - `queries`: A 2D array of query vectors (shape: (num_queries, N))
+        /// - `config`: Search configuration (ef construction, k for k-NN, etc.)
+        /// - `seed`: Optional random seed for tie-breaking. If null, a random seed is used.
+        /// - `allocator`: Memory allocator for the result
+        ///
+        /// Returns the search results containing distances and indices of nearest neighbors.
         pub fn search(
             self: *const Self,
             queries: znpy.array.static.ConstStaticArray(T, 2),
             config: mod_searcher.SearchConfig,
             seed: ?u64,
             allocator: std.mem.Allocator,
-        ) !Searcher.SearchResult {
+        ) (SearchError || std.mem.Allocator.Error)!Searcher.SearchResult {
             const searcher = Searcher{
                 .graph = self.graph,
                 .dataset = &self.dataset,
@@ -513,8 +635,10 @@ test {
     _ = mod_searcher;
 }
 
-// Integration test: build an index from a generated dataset, save it to disk, load it back,
-// and assert the loaded index matches the original exactly.
+/// Integration test for index save/load round-trip.
+///
+/// Builds an index from a generated dataset, saves it to disk, loads it back,
+/// and asserts the loaded index matches the original exactly.
 fn testIndexRoundTrip(comptime T: type, comptime N: usize) !void {
     const Dataset = mod_dataset.Dataset(T, N);
     const IDX = Index(T, N);
@@ -587,4 +711,44 @@ test "index round-trip" {
     try testIndexRoundTrip(f16, 128);
     try testIndexRoundTrip(f16, 256);
     try testIndexRoundTrip(f16, 512);
+}
+
+test "Index - build() and buildWithTiming() produce identical results" {
+    const T = f32;
+    const N = 128;
+    const Dataset = mod_dataset.Dataset(T, N);
+    const Idx = Index(T, N);
+
+    const num_vectors: usize = 50;
+
+    const graph_degree: usize = 4;
+    const intermediate_degree: usize = 8;
+    const block_size: usize = 16;
+    const config = BuildConfig.init(
+        graph_degree,
+        intermediate_degree,
+        num_vectors,
+        1,
+        42,
+        block_size,
+    );
+
+    var prng = std.Random.DefaultPrng.init(42);
+    const dataset = try Dataset.initRandom(
+        num_vectors,
+        prng.random(),
+        std.testing.allocator,
+    );
+    defer dataset.deinit(std.testing.allocator);
+
+    const idx_build = try Idx.build(dataset, config, std.testing.allocator);
+    defer std.testing.allocator.free(idx_build.graph);
+
+    const idx_timing = try Idx.buildWithTiming(dataset, config, std.testing.allocator);
+    defer std.testing.allocator.free(idx_timing.graph);
+
+    try std.testing.expectEqualSlices(T, idx_build.dataset.data_buffer, idx_timing.dataset.data_buffer);
+    try std.testing.expectEqual(idx_build.num_nodes, idx_timing.num_nodes);
+    try std.testing.expectEqual(idx_build.num_neighbors_per_node, idx_timing.num_neighbors_per_node);
+    try std.testing.expectEqualSlices(usize, idx_build.graph, idx_timing.graph);
 }
