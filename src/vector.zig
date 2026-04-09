@@ -17,7 +17,13 @@ pub fn Vector(comptime T: type, comptime N: usize) type {
         }
         /// Aligned storage for the vector elements.
         /// 64 bytes alignment for SIMD performance.
-        // Alignment of 64 bytes satisfies all natural alignments of types we support.
+        /// N must be a multiple of 64 elements for optimal SIMD.
+        ///
+        /// Rationale:
+        /// 1. Alignment: 64 bytes aligns with the largest SIMD register returned by `std.cpu.suggestVectorLength` (AVX-512, 512 bits).
+        ///    This ensures proper load/store for all element types (i32, f32, f16).
+        /// 2. Element count: 64 bytes holds 16 i32/f32 or 32 f16 elements.
+        ///    Supported dimensions (128, 256, 512) all divide by 32, eliminating remainder handling.
         data: [N]T align(64),
 
         const Self = @This();
