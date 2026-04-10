@@ -32,6 +32,7 @@ const ZagraConfig = struct {
     search_width: usize,
     max_iterations: usize,
     num_threads: usize,
+    block_size: usize,
 };
 
 const ZagraResult = struct {
@@ -42,15 +43,21 @@ const ZagraResult = struct {
 };
 
 const BenchmarkResult = struct {
-    dataset_name: []const u8,
-    num_base: usize,
-    num_query: usize,
-    dimensions: usize,
+    dataset: struct {
+        name: []const u8,
+        num_base: usize,
+        num_query: usize,
+        dimensions: usize,
+    },
     k: usize,
-    hnsw_config: HnswConfig,
-    hnsw: HnswResult,
-    zagra_config: ZagraConfig,
-    zagra: ZagraResult,
+    hnsw: struct {
+        config: HnswConfig,
+        result: HnswResult,
+    },
+    zagra: struct {
+        config: ZagraConfig,
+        result: ZagraResult,
+    },
     timestamp: i64,
 };
 
@@ -378,7 +385,7 @@ fn runZagraBenchmark(
         num_base,
         cfg.num_threads,
         42,
-        16,
+        cfg.block_size,
     );
 
     var timer = try std.time.Timer.start();
@@ -436,94 +443,6 @@ fn runZagraBenchmark(
         .throughput_qps = throughput_qps,
         .recall = recall,
     };
-}
-
-fn writeResults(result: *const BenchmarkResult, output_path: []const u8) !void {
-    const output_file = try std.fs.cwd().createFile(output_path, .{});
-    defer output_file.close();
-
-    var file_buffer: [4096]u8 = undefined;
-    var file_writer = output_file.writer(&file_buffer);
-
-    var json_s = std.json.Stringify{
-        .writer = &file_writer.interface,
-        .options = .{ .whitespace = .indent_2 },
-    };
-
-    try json_s.beginObject();
-
-    try json_s.objectField("dataset");
-    try json_s.beginObject();
-    try json_s.objectField("name");
-    try json_s.write(result.dataset_name);
-    try json_s.objectField("num_base");
-    try json_s.write(result.num_base);
-    try json_s.objectField("num_query");
-    try json_s.write(result.num_query);
-    try json_s.objectField("dimensions");
-    try json_s.write(result.dimensions);
-    try json_s.endObject();
-
-    try json_s.objectField("k");
-    try json_s.write(result.k);
-
-    try json_s.objectField("hnsw");
-    try json_s.beginObject();
-    try json_s.objectField("config");
-    try json_s.beginObject();
-    try json_s.objectField("M");
-    try json_s.write(result.hnsw_config.M);
-    try json_s.objectField("ef_construction");
-    try json_s.write(result.hnsw_config.ef_construction);
-    try json_s.objectField("ef_search");
-    try json_s.write(result.hnsw_config.ef_search);
-    try json_s.objectField("num_threads");
-    try json_s.write(result.hnsw_config.num_threads);
-    try json_s.endObject();
-    try json_s.objectField("construction_time_ns");
-    try json_s.write(result.hnsw.construction_ns);
-    try json_s.objectField("avg_query_time_ns");
-    try json_s.write(result.hnsw.avg_query_ns);
-    try json_s.objectField("throughput_qps");
-    try json_s.write(result.hnsw.throughput_qps);
-    try json_s.objectField("recall");
-    try json_s.write(result.hnsw.recall);
-    try json_s.endObject();
-
-    try json_s.objectField("zagra");
-    try json_s.beginObject();
-    try json_s.objectField("config");
-    try json_s.beginObject();
-    try json_s.objectField("graph_degree");
-    try json_s.write(result.zagra_config.graph_degree);
-    try json_s.objectField("intermediate_graph_degree");
-    try json_s.write(result.zagra_config.intermediate_degree);
-    try json_s.objectField("internal_k");
-    try json_s.write(result.zagra_config.internal_k);
-    try json_s.objectField("search_width");
-    try json_s.write(result.zagra_config.search_width);
-    try json_s.objectField("max_iterations");
-    try json_s.write(result.zagra_config.max_iterations);
-    try json_s.objectField("num_threads");
-    try json_s.write(result.zagra_config.num_threads);
-    try json_s.endObject();
-    try json_s.objectField("construction_time_ns");
-    try json_s.write(result.zagra.construction_ns);
-    try json_s.objectField("avg_query_time_ns");
-    try json_s.write(result.zagra.avg_query_ns);
-    try json_s.objectField("throughput_qps");
-    try json_s.write(result.zagra.throughput_qps);
-    try json_s.objectField("recall");
-    try json_s.write(result.zagra.recall);
-    try json_s.endObject();
-
-    try json_s.objectField("timestamp");
-    try json_s.write(result.timestamp);
-    try json_s.endObject();
-
-    try json_s.writer.flush();
-
-    log.info("Results written to: {s}", .{output_path});
 }
 
 const USAGE =
@@ -597,46 +516,53 @@ pub fn main() !void {
     );
     defer dataset.deinit(allocator);
 
-    const hnsw_cfg = HnswConfig{
+    const hnsw_config = HnswConfig{
         .M = 16,
         .ef_construction = 200,
         .ef_search = 100,
         .num_threads = std.Thread.getCpuCount() catch 1,
     };
 
-    const zagra_cfg = ZagraConfig{
+    const zagra_config = ZagraConfig{
         .graph_degree = 128,
         .intermediate_degree = 256,
         .internal_k = 256,
         .search_width = 256,
         .max_iterations = 100,
         .num_threads = std.Thread.getCpuCount() catch 1,
+        .block_size = 16384,
     };
 
     const hnsw_result = try runHnswBenchmark(
         &dataset,
         allocator,
-        hnsw_cfg,
+        hnsw_config,
         k,
     );
     const zagra_result = try runZagraBenchmark(
         &dataset,
         allocator,
-        zagra_cfg,
+        zagra_config,
         k,
     );
 
     const timestamp = std.time.timestamp();
     const bench_result = BenchmarkResult{
-        .dataset_name = dataset.name,
-        .num_base = dataset.base_array.len,
-        .num_query = dataset.numQueries(),
-        .dimensions = AnnDataset.DIM,
+        .dataset = .{
+            .name = dataset.name,
+            .num_base = dataset.base_array.len,
+            .num_query = dataset.numQueries(),
+            .dimensions = AnnDataset.DIM,
+        },
         .k = k,
-        .hnsw_config = hnsw_cfg,
-        .hnsw = hnsw_result,
-        .zagra_config = zagra_cfg,
-        .zagra = zagra_result,
+        .hnsw = .{
+            .config = hnsw_config,
+            .result = hnsw_result,
+        },
+        .zagra = .{
+            .config = zagra_config,
+            .result = zagra_result,
+        },
         .timestamp = timestamp,
     };
 
@@ -646,15 +572,22 @@ pub fn main() !void {
         else => return e,
     };
 
+    // Write the whole bench result to JSON
     const output_path = if (result_id) |id|
         try std.fmt.allocPrint(allocator, results_dir ++ "/hnsw_vs_zagra_{s}.json", .{id})
     else
         try std.fmt.allocPrint(allocator, results_dir ++ "/hnsw_vs_zagra_{d}.json", .{timestamp});
     defer allocator.free(output_path);
-    try writeResults(&bench_result, output_path);
+    const output_file = try std.fs.cwd().createFile(output_path, .{});
+    defer output_file.close();
+    var file_buffer: [4096]u8 = undefined;
+    var file_writer = output_file.writer(&file_buffer);
+    try std.json.Stringify.value(
+        bench_result,
+        .{ .whitespace = .indent_2 },
+        &file_writer.interface,
+    );
+    try file_writer.interface.flush();
     try stdout.print("Benchmark completed successfully.\n", .{});
     try stdout.flush();
-
-    // For some reason, the program hangs here. Force quit the process for now.
-    std.process.exit(0);
 }
