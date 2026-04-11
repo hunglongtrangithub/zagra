@@ -46,7 +46,7 @@ pub const Optimizer = struct {
             num_neighbors_per_node: usize,
             /// Row-major storage of all entries.
             /// Indexing: i * num_neighbors_per_node + j
-            entries: mod_soa_slice.SoaSlice(Entry),
+            entries: std.MultiArrayList(Entry).Slice,
 
             pub fn init(
                 num_nodes: usize,
@@ -56,10 +56,14 @@ pub const Optimizer = struct {
                 const total_edges = std.math.mul(usize, num_nodes, num_neighbors_per_node) catch return error.NumberOfEdgesTooLarge;
                 const total_size = std.math.mul(usize, total_edges, @sizeOf(Entry)) catch return error.NumberOfEdgesTooLarge;
                 if (total_size > std.math.maxInt(isize)) return error.NumberOfEdgesTooLarge;
+
+                var entries = std.MultiArrayList(Entry).empty;
+                try entries.ensureTotalCapacity(allocator, total_edges);
+                entries.len = total_edges;
                 return .{
                     .num_nodes = num_nodes,
                     .num_neighbors_per_node = num_neighbors_per_node,
-                    .entries = try mod_soa_slice.SoaSlice(Entry).init(total_edges, allocator),
+                    .entries = entries.slice(),
                 };
             }
 
@@ -763,24 +767,26 @@ test "count detours" {
     // Node 1: neighbors 0, 2, 3
     // Node 2: neighbors 0, 1, 3
     // Node 3: neighbors 0, 1, 2
-    var neighbor_ids = [_]usize{
+    const neighbor_ids_data = [_]usize{
         1, 2, 3,
         0, 2, 3,
         0, 1, 3,
         0, 1, 2,
     };
-    var detour_counts = [_]usize{undefined} ** 12;
+    const detour_counts_data = [_]usize{0} ** 12;
+
+    var entries = std.MultiArrayList(Optimizer.NeighborsList(true).Entry).empty;
+    defer entries.deinit(std.testing.allocator);
+    try entries.ensureTotalCapacity(std.testing.allocator, 12);
+    entries.len = 12;
+
+    @memcpy(entries.items(.neighbor_id), &neighbor_ids_data);
+    @memcpy(entries.items(.detour_count), &detour_counts_data);
 
     const neighbors_list = Optimizer.NeighborsList(true){
         .num_nodes = 4,
         .num_neighbors_per_node = 3,
-        .entries = mod_soa_slice.SoaSlice(Optimizer.NeighborsList(true).Entry){
-            .ptrs = [_][*]u8{
-                @ptrCast(&neighbor_ids),
-                @ptrCast(&detour_counts),
-            },
-            .len = 12,
-        },
+        .entries = entries.slice(),
     };
 
     var optimizer = Optimizer.init(
@@ -801,16 +807,16 @@ test "count detours" {
 
     try std.testing.expectEqualSlices(
         usize,
+        // 0-1: 0-2-1, 0-3-1
+        // 0-2: 0-3-2
+        // 1-2: 1-3-2
         &[_]usize{
-            // 0-1: 0-2-1, 0-3-1
-            // 0-2: 0-3-2
-            // 1-2: 1-3-2
             2, 1, 0,
             0, 1, 0,
             0, 0, 0,
             0, 0, 0,
         },
-        &detour_counts,
+        entries.items(.detour_count),
     );
 }
 
@@ -821,31 +827,34 @@ test "prune - output degree" {
     // Node 2: neighbors 0, 1, 3 with detour counts 1, 2, 5
     // Node 3: neighbors 0, 1, 2 with detour counts 3, 1, 4
     // The detour counts don't have to be valid for this test since we're just testing the pruning logic.
-    var neighbor_ids = [_]usize{
+    const neighbor_ids_data = [_]usize{
         1, 2, 3,
         0, 2, 3,
         0, 1, 3,
         0, 1, 2,
     };
-    var detour_counts = [_]usize{
+    const detour_counts_data = [_]usize{
         5, 1, 3,
         2, 4, 1,
         1, 2, 5,
         3, 1, 4,
     };
 
+    var entries = std.MultiArrayList(Optimizer.NeighborsList(true).Entry).empty;
+    defer entries.deinit(std.testing.allocator);
+    try entries.ensureTotalCapacity(std.testing.allocator, 12);
+    entries.len = 12;
+
+    @memcpy(entries.items(.neighbor_id), &neighbor_ids_data);
+    @memcpy(entries.items(.detour_count), &detour_counts_data);
+
     const input_graph = Optimizer.NeighborsList(true){
         .num_nodes = 4,
         .num_neighbors_per_node = 3,
-        .entries = mod_soa_slice.SoaSlice(Optimizer.NeighborsList(true).Entry){
-            .ptrs = [_][*]u8{
-                @ptrCast(&neighbor_ids),
-                @ptrCast(&detour_counts),
-            },
-            .len = 12,
-        },
+        .entries = entries.slice(),
     };
 
+    // Verify output has correct degree
     var optimizer = Optimizer.init(input_graph, null, 2);
 
     // Prune to output degree 2
@@ -854,7 +863,6 @@ test "prune - output degree" {
 
     optimizer.prune(&output_graph);
 
-    // Verify output has correct degree
     try std.testing.expectEqual(@as(usize, 2), output_graph.num_neighbors_per_node);
 
     // Verify neighbors are sorted by detour count (ascending)
@@ -874,7 +882,7 @@ test "prune - output degree" {
 
 test "combine - correct degree" {
     // Create a pruned graph with 4 neighbors per node for 6 nodes.
-    var neighbor_ids = [_]usize{
+    const neighbor_ids_data = [_]usize{
         1, 2, 3, 4, // node 0
         0, 2, 3, 4, // node 1
         0, 1, 3, 4, // node 2
@@ -882,18 +890,18 @@ test "combine - correct degree" {
         0, 1, 2, 3, // node 4
         0, 1, 2, 3, // node 5
     };
-    var detour_counts_void = [_]void{undefined} ** 24;
+
+    var entries = std.MultiArrayList(Optimizer.NeighborsList(false).Entry).empty;
+    defer entries.deinit(std.testing.allocator);
+    try entries.ensureTotalCapacity(std.testing.allocator, 24);
+    entries.len = 24;
+
+    @memcpy(entries.items(.neighbor_id), &neighbor_ids_data);
 
     var pruned_graph = Optimizer.NeighborsList(false){
         .num_nodes = 6,
         .num_neighbors_per_node = 4,
-        .entries = mod_soa_slice.SoaSlice(Optimizer.NeighborsList(false).Entry){
-            .ptrs = [2][*]u8{
-                @ptrCast(&neighbor_ids),
-                @ptrCast(&detour_counts_void),
-            },
-            .len = 24,
-        },
+        .entries = entries.slice(),
     };
 
     // The input graph for the Optimizer instance doesn't matter for combine(),
@@ -944,19 +952,21 @@ test "edge case - single node graph" {
     const input_degree: usize = 1;
     const output_degree: usize = 1;
 
-    var neighbor_ids = [_]usize{0}; // Node 0's neighbor (itself)
-    var detour_counts = [_]usize{0};
+    const neighbor_ids_data = [_]usize{0}; // Node 0's neighbor (itself)
+    const detour_counts_data = [_]usize{0};
+
+    var entries = std.MultiArrayList(Optimizer.NeighborsList(true).Entry).empty;
+    defer entries.deinit(std.testing.allocator);
+    try entries.ensureTotalCapacity(std.testing.allocator, 1);
+    entries.len = 1;
+
+    @memcpy(entries.items(.neighbor_id), &neighbor_ids_data);
+    @memcpy(entries.items(.detour_count), &detour_counts_data);
 
     const input_graph = Optimizer.NeighborsList(true){
         .num_nodes = num_nodes,
         .num_neighbors_per_node = input_degree,
-        .entries = mod_soa_slice.SoaSlice(Optimizer.NeighborsList(true).Entry){
-            .ptrs = [2][*]u8{
-                @ptrCast(&neighbor_ids),
-                @ptrCast(&detour_counts),
-            },
-            .len = num_nodes * input_degree,
-        },
+        .entries = entries.slice(),
     };
 
     var optimizer = Optimizer.init(input_graph, null, 1);
@@ -969,29 +979,31 @@ test "edge case - single node graph" {
 }
 
 test "optimize and optimizeWithTiming produce identical results" {
-    var neighbor_ids = [_]usize{
+    const neighbor_ids_data = [_]usize{
         1, 2, 3,
         0, 2, 3,
         0, 1, 3,
         0, 1, 2,
     };
-    var detour_counts = [_]usize{
+    const detour_counts_data = [_]usize{
         2, 1, 0,
         0, 1, 0,
         0, 0, 0,
         0, 0, 0,
     };
 
+    var entries = std.MultiArrayList(Optimizer.NeighborsList(true).Entry).empty;
+    defer entries.deinit(std.testing.allocator);
+    try entries.ensureTotalCapacity(std.testing.allocator, 12);
+    entries.len = 12;
+
+    @memcpy(entries.items(.neighbor_id), &neighbor_ids_data);
+    @memcpy(entries.items(.detour_count), &detour_counts_data);
+
     const neighbors_list = Optimizer.NeighborsList(true){
         .num_nodes = 4,
         .num_neighbors_per_node = 3,
-        .entries = mod_soa_slice.SoaSlice(Optimizer.NeighborsList(true).Entry){
-            .ptrs = [_][*]u8{
-                @ptrCast(&neighbor_ids),
-                @ptrCast(&detour_counts),
-            },
-            .len = 12,
-        },
+        .entries = entries.slice(),
     };
 
     var optimizer = Optimizer.init(neighbors_list, null, 2);
