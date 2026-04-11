@@ -517,9 +517,9 @@ pub fn main() !void {
     defer dataset.deinit(allocator);
 
     const hnsw_config = HnswConfig{
-        .M = 16,
-        .ef_construction = 200,
-        .ef_search = 100,
+        .M = 128,
+        .ef_construction = 256,
+        .ef_search = 128,
         .num_threads = std.Thread.getCpuCount() catch 1,
     };
     const hnsw_result = try runHnswBenchmark(
