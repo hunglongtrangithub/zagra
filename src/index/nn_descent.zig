@@ -372,8 +372,8 @@ pub fn NNDescent(
                 var updates_count: usize = 0;
                 const num_blocks = self.numBlocks();
 
-                var gen_total_ns = if (do_timing) 0 else {};
-                var apply_total_ns = if (do_timing) 0 else {};
+                var gen_total_ns = if (do_timing) @as(u64, 0) else {};
+                var apply_total_ns = if (do_timing) @as(u64, 0) else {};
 
                 for (0..num_blocks) |block_id| {
                     defer {
