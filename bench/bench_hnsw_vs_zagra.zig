@@ -403,7 +403,7 @@ fn runZagraBenchmark(
         .internal_k = cfg.internal_k,
         .max_iterations = cfg.max_iterations,
         .search_width = cfg.search_width,
-        .num_threads = std.Thread.getCpuCount() catch 1,
+        .num_threads = cfg.num_threads,
     };
 
     log.info("Running ZAGRA search ({d} queries, k={d})...", .{ num_query, k_val });
@@ -522,6 +522,12 @@ pub fn main() !void {
         .ef_search = 100,
         .num_threads = std.Thread.getCpuCount() catch 1,
     };
+    const hnsw_result = try runHnswBenchmark(
+        &dataset,
+        allocator,
+        hnsw_config,
+        k,
+    );
 
     const zagra_config = ZagraConfig{
         .graph_degree = 128,
@@ -530,15 +536,8 @@ pub fn main() !void {
         .search_width = 256,
         .max_iterations = 100,
         .num_threads = std.Thread.getCpuCount() catch 1,
-        .block_size = 16384,
+        .block_size = 65536,
     };
-
-    const hnsw_result = try runHnswBenchmark(
-        &dataset,
-        allocator,
-        hnsw_config,
-        k,
-    );
     const zagra_result = try runZagraBenchmark(
         &dataset,
         allocator,
