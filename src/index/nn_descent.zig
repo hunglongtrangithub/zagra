@@ -1414,7 +1414,7 @@ fn NeighborHeapList(
 
         /// Row-major storage of all heap entries.
         /// Indexing: i * num_neighbors_per_node + j
-        entries: mod_soa_slice.SoaSlice(Entry),
+        entries: std.MultiArrayList(Entry).Slice,
 
         /// Total number of points (number of heaps).
         num_nodes: usize,
@@ -1435,7 +1435,10 @@ fn NeighborHeapList(
             const total_size = std.math.mul(usize, total_edges, @sizeOf(Entry)) catch return error.NumberOfEdgesTooLarge;
             if (total_size > std.math.maxInt(isize)) return error.NumberOfEdgesTooLarge;
 
-            var entries_slice = try mod_soa_slice.SoaSlice(Entry).init(total_edges, allocator);
+            var entries = std.MultiArrayList(Entry).empty;
+            try entries.ensureTotalCapacity(allocator, total_edges);
+            entries.len = total_edges;
+            var entries_slice = entries.slice();
             memsetBuffers(&entries_slice, num_nodes);
 
             return Self{
@@ -1455,18 +1458,14 @@ fn NeighborHeapList(
         /// neighbor_id = num_nodes (invalid)
         /// distance = max value
         /// is_new = true (if store_flags)
-        fn memsetBuffers(entries: *mod_soa_slice.SoaSlice(Entry), num_nodes: usize) void {
+        fn memsetBuffers(entries: *std.MultiArrayList(Entry).Slice, num_nodes: usize) void {
             const max_dist = switch (elem_type) {
                 .Int32 => std.math.maxInt(T),
                 .Float, .Half => std.math.floatMax(T),
             };
-
-            const entry = Entry{
-                .neighbor_id = num_nodes,
-                .distance = max_dist,
-                .is_new = if (store_flags) true else {},
-            };
-            entries.fill(entry);
+            @memset(entries.items(.distance), max_dist);
+            @memset(entries.items(.neighbor_id), num_nodes);
+            if (store_flags) @memset(entries.items(.is_new), true);
         }
 
         /// Deinitializes the HeapList, freeing its allocated memory.

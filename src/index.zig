@@ -520,12 +520,22 @@ pub fn Index(comptime T: type, comptime N: usize) type {
                 log.info("NN Descent time: {}ms\n", .{timing.nn_descent_ns / std.time.ns_per_ms});
             }
 
-            const neighbor_entries = nn_descent.neighbors_list.entries;
+            const num_neighbor_entries = nn_descent.neighbors_list.entries.len;
 
             log.info("Freeing NN-Descent resources...", .{});
             if (do_timing) timer.reset();
-            allocator.free(neighbor_entries.items(.distance));
-            allocator.free(neighbor_entries.items(.is_new));
+
+            // Allocate optimizer entries first.
+            // We copy neighbor IDs from nn_descent to optimizer_entries's neighbor_id slice.
+            // optimizer_entries's detour_count slice will be initialized during optimization.
+            var optimizer_entries = std.MultiArrayList(NeighborsList(true).Entry).empty;
+            defer optimizer_entries.deinit(allocator);
+            try optimizer_entries.ensureTotalCapacity(allocator, num_neighbor_entries);
+            optimizer_entries.len = num_neighbor_entries;
+
+            @memcpy(optimizer_entries.items(.neighbor_id), nn_descent.neighbors_list.entries.items(.neighbor_id));
+            // Free everything in nn_descent except the thread pool. Optimizer will reuse the thread pool.
+            nn_descent.neighbors_list.deinit(allocator);
             nn_descent.neighbor_candidates_new.deinit(allocator);
             nn_descent.neighbor_candidates_old.deinit(allocator);
             allocator.free(nn_descent.block_graph_updates_lists);
@@ -540,14 +550,12 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             const num_nodes = nn_descent.neighbors_list.num_nodes;
             const num_neighbors_per_node = nn_descent.neighbors_list.num_neighbors_per_node;
 
-            const neighbor_ids: []usize = neighbor_entries.items(.neighbor_id);
             std.debug.assert(isValidGraph(
-                neighbor_ids,
+                optimizer_entries.items(.neighbor_id),
                 num_nodes,
                 num_neighbors_per_node,
                 allocator,
             ));
-            defer allocator.free(neighbor_ids);
 
             const thread_pool = nn_descent.thread_pool;
             defer if (thread_pool) |pool| {
@@ -555,33 +563,25 @@ pub fn Index(comptime T: type, comptime N: usize) type {
                 allocator.destroy(pool);
             };
 
-            const detour_counts: []usize = try allocator.alloc(usize, neighbor_entries.len);
-            defer allocator.free(detour_counts);
-
             log.info("Optimizing graph with degree {d}...", .{config.graph_degree});
             if (do_timing) timer.reset();
             var optimizer = mod_optimizer.Optimizer.init(
                 NeighborsList(true){
-                    .entries = mod_soa_slice.SoaSlice(NeighborsList(true).Entry){
-                        .ptrs = [_][*]u8{
-                            @ptrCast(neighbor_ids.ptr),
-                            @ptrCast(detour_counts.ptr),
-                        },
-                        .len = neighbor_entries.len,
-                    },
+                    .entries = optimizer_entries.slice(),
                     .num_neighbors_per_node = num_neighbors_per_node,
                     .num_nodes = num_nodes,
                 },
                 thread_pool,
                 nn_descent.num_nodes_per_block,
             );
-            const optimized_graph = try optimizer.optimize(config.graph_degree, allocator);
+            var optimized_graph = try optimizer.optimize(config.graph_degree, allocator);
+            defer optimized_graph.deinit(allocator);
             if (do_timing) {
                 timing.optimizer_ns = timer.read();
                 log.info("Optimizer time: {}ms\n", .{timing.optimizer_ns / std.time.ns_per_ms});
             }
 
-            const graph_data: []const usize = optimized_graph.entries.items(.neighbor_id);
+            const graph_data: []const usize = try allocator.dupe(usize, optimized_graph.entries.items(.neighbor_id));
             std.debug.assert(isValidGraph(
                 graph_data,
                 num_nodes,
@@ -782,11 +782,18 @@ test "Index - build() and buildWithTiming() produce identical results" {
     );
     defer dataset.deinit(std.testing.allocator);
 
-    const idx_build = try Idx.build(dataset, config, std.testing.allocator);
+    const idx_build = try Idx.build(
+        dataset,
+        config,
+        std.testing.allocator,
+    );
     defer std.testing.allocator.free(idx_build.graph);
 
-    const idx_timing, const __ = try Idx.buildWithTiming(dataset, config, std.testing.allocator);
-    _ = __;
+    const idx_timing, _ = try Idx.buildWithTiming(
+        dataset,
+        config,
+        std.testing.allocator,
+    );
     defer std.testing.allocator.free(idx_timing.graph);
 
     try std.testing.expectEqualSlices(T, idx_build.dataset.data_buffer, idx_timing.dataset.data_buffer);
