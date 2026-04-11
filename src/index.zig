@@ -174,6 +174,18 @@ pub const BuildConfig = struct {
 
 pub const BuildError = error{InvalidBuildConfig} || NNDescentError || Optimizer.Error || std.mem.Allocator.Error;
 
+/// Timing information for the index build process.
+pub const BuildTiming = struct {
+    /// NN-Descent init + train time in nanoseconds.
+    nn_descent_ns: u64,
+    /// Resource freeing time in nanoseconds.
+    resource_free_ns: u64,
+    /// Optimizer init + optimize time in nanoseconds.
+    optimizer_ns: u64,
+    /// Total build time in nanoseconds.
+    total_ns: u64,
+};
+
 /// A generic ANN index combining a vector dataset with a k-NN graph.
 ///
 /// Type parameters:
@@ -465,8 +477,8 @@ pub fn Index(comptime T: type, comptime N: usize) type {
 
         /// Internal build implementation for the ANN index.
         ///
-        /// When `do_timing` is true, logs timing for NN-Descent training and graph optimization.
-        /// When `do_timing` is false, skips timing overhead.
+        /// When `do_timing` is true, returns timing information.
+        /// When `do_timing` is false, returns only the index.
         ///
         /// The build process:
         /// 1. NN-Descent constructs initial k-NN graph
@@ -482,31 +494,36 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             dataset: Dataset,
             config: BuildConfig,
             allocator: std.mem.Allocator,
-        ) (if (do_timing) (std.time.Timer.Error || BuildError) else BuildError)!Self {
+        ) (if (do_timing) (std.time.Timer.Error || BuildError) else BuildError)!struct {
+            Self,
+            if (do_timing) BuildTiming else void,
+        } {
             if (config.nn_descent_config.num_neighbors_per_node < config.graph_degree) {
                 return error.InvalidBuildConfig;
             }
 
+            var timing: if (do_timing) BuildTiming else void = undefined;
+            var timer_total = if (do_timing) try std.time.Timer.start() else {};
             var timer = if (do_timing) try std.time.Timer.start() else {};
 
             log.info("Training initial graph with degree {d} using NN-Descent...", .{config.nn_descent_config.num_neighbors_per_node});
+            if (do_timing) timer.reset();
             var nn_descent = try NNDescent(T, N).init(
                 &dataset,
                 config.nn_descent_config,
                 allocator,
             );
-
-            if (do_timing) timer.reset();
             nn_descent.train();
             nn_descent.sortNeighbors();
             if (do_timing) {
-                const training_time = timer.read();
-                log.info("NN Descent training time: {}ms\n", .{training_time / std.time.ns_per_ms});
+                timing.nn_descent_ns = timer.read();
+                log.info("NN Descent time: {}ms\n", .{timing.nn_descent_ns / std.time.ns_per_ms});
             }
 
             const neighbor_entries = nn_descent.neighbors_list.entries;
 
             log.info("Freeing NN-Descent resources...", .{});
+            if (do_timing) timer.reset();
             allocator.free(neighbor_entries.items(.distance));
             allocator.free(neighbor_entries.items(.is_new));
             nn_descent.neighbor_candidates_new.deinit(allocator);
@@ -515,6 +532,10 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             allocator.free(nn_descent.block_graph_updates_buffer);
             allocator.free(nn_descent.graph_update_counts_buffer);
             allocator.free(nn_descent.node_ids_random);
+            if (do_timing) {
+                timing.resource_free_ns = timer.read();
+                log.info("Resource free time: {}ms\n", .{timing.resource_free_ns / std.time.ns_per_ms});
+            }
 
             const num_nodes = nn_descent.neighbors_list.num_nodes;
             const num_neighbors_per_node = nn_descent.neighbors_list.num_neighbors_per_node;
@@ -537,6 +558,8 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             const detour_counts: []usize = try allocator.alloc(usize, neighbor_entries.len);
             defer allocator.free(detour_counts);
 
+            log.info("Optimizing graph with degree {d}...", .{config.graph_degree});
+            if (do_timing) timer.reset();
             var optimizer = mod_optimizer.Optimizer.init(
                 NeighborsList(true){
                     .entries = mod_soa_slice.SoaSlice(NeighborsList(true).Entry){
@@ -552,13 +575,10 @@ pub fn Index(comptime T: type, comptime N: usize) type {
                 thread_pool,
                 nn_descent.num_nodes_per_block,
             );
-
-            log.info("Optimizing graph with degree {d}...", .{config.graph_degree});
-            if (do_timing) timer.reset();
             const optimized_graph = try optimizer.optimize(config.graph_degree, allocator);
             if (do_timing) {
-                const optimization_time = timer.read();
-                log.info("Optimization time: {}ms\n", .{optimization_time / std.time.ns_per_ms});
+                timing.optimizer_ns = timer.read();
+                log.info("Optimizer time: {}ms\n", .{timing.optimizer_ns / std.time.ns_per_ms});
             }
 
             const graph_data: []const usize = optimized_graph.entries.items(.neighbor_id);
@@ -569,11 +589,15 @@ pub fn Index(comptime T: type, comptime N: usize) type {
                 allocator,
             ));
 
-            return Self{
-                .dataset = dataset,
-                .graph = graph_data,
-                .num_nodes = num_nodes,
-                .num_neighbors_per_node = config.graph_degree,
+            if (do_timing) timing.total_ns = timer_total.read();
+            return .{
+                Self{
+                    .dataset = dataset,
+                    .graph = graph_data,
+                    .num_nodes = num_nodes,
+                    .num_neighbors_per_node = config.graph_degree,
+                },
+                timing,
             };
         }
 
@@ -582,17 +606,34 @@ pub fn Index(comptime T: type, comptime N: usize) type {
         /// The build process consists of two phases:
         /// 1. NN-Descent constructs an initial k-NN graph using the provided config
         /// 2. Graph optimization prunes and refines the graph to the target degree
-        pub fn build(dataset: Dataset, config: BuildConfig, allocator: std.mem.Allocator) BuildError!Self {
-            return buildImpl(false, dataset, config, allocator);
+        pub fn build(
+            dataset: Dataset,
+            config: BuildConfig,
+            allocator: std.mem.Allocator,
+        ) BuildError!Self {
+            const index, _ = try buildImpl(
+                false,
+                dataset,
+                config,
+                allocator,
+            );
+            return index;
         }
 
         /// Builds an index from a dataset, logging timing information.
         ///
-        /// Same as `build`, but also logs timing for:
-        /// - NN-Descent training
-        /// - Graph optimization
-        pub fn buildWithTiming(dataset: Dataset, config: BuildConfig, allocator: std.mem.Allocator) (std.time.Timer.Error || BuildError)!Self {
-            return buildImpl(true, dataset, config, allocator);
+        /// Same as `build`, but also returns timing information for each phase.
+        pub fn buildWithTiming(
+            dataset: Dataset,
+            config: BuildConfig,
+            allocator: std.mem.Allocator,
+        ) (std.time.Timer.Error || BuildError)!struct { Self, BuildTiming } {
+            return buildImpl(
+                true,
+                dataset,
+                config,
+                allocator,
+            );
         }
 
         /// Searches the index for the k nearest neighbors of the given query vectors.
@@ -744,7 +785,8 @@ test "Index - build() and buildWithTiming() produce identical results" {
     const idx_build = try Idx.build(dataset, config, std.testing.allocator);
     defer std.testing.allocator.free(idx_build.graph);
 
-    const idx_timing = try Idx.buildWithTiming(dataset, config, std.testing.allocator);
+    const idx_timing, const __ = try Idx.buildWithTiming(dataset, config, std.testing.allocator);
+    _ = __;
     defer std.testing.allocator.free(idx_timing.graph);
 
     try std.testing.expectEqualSlices(T, idx_build.dataset.data_buffer, idx_timing.dataset.data_buffer);

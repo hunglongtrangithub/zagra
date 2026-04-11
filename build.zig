@@ -5,6 +5,7 @@ const benchmarks = [_][]const u8{
     "bench_vector_simd",
     "bench_nn_descent",
     "bench_optimizer",
+    "bench_zagra_index",
     "bench_hnsw_vs_zagra",
 };
 
