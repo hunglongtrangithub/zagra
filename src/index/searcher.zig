@@ -18,9 +18,18 @@ pub const SearchConfig = struct {
     /// Number of nearest neighbors to return for each query.
     k: usize,
     /// Number of intermediate search results retained during the search.
+    /// Must be >= k and >= search_width.
     internal_k: usize,
+    /// Maximum number of iterations for the iterative graph search.
+    /// Each iteration expands candidates and sorts to find the best internal_k.
+    /// The search terminates early if no new candidates are found.
     max_iterations: usize,
+    /// Number of top candidates to expand to their neighbors in each iteration.
+    /// Higher values explore more of the graph but increase computation.
+    /// Must be <= internal_k.
     search_width: usize = 1,
+    /// Number of threads for parallel query processing. One thread takes one query.
+    /// Uses a thread pool if > 1, otherwise processes queries sequentially.
     num_threads: usize = 1,
 
     /// Computes the maximum number of iterations for the search using CAGRA heuristic.
