@@ -6,7 +6,6 @@ const znpy = @import("znpy");
 
 const mod_types = @import("types.zig");
 const mod_dataset = @import("dataset.zig");
-const mod_soa_slice = @import("index/soa_slice.zig");
 const mod_optimizer = @import("index/optimizer.zig");
 const mod_nn_descent = @import("index/nn_descent.zig");
 const mod_searcher = @import("index/searcher.zig");
@@ -16,7 +15,6 @@ pub const NNDescent = mod_nn_descent.NNDescent;
 pub const NNDTrainingConfig = mod_nn_descent.TrainingConfig;
 pub const NNDTrainingTiming = mod_nn_descent.TrainingTiming;
 pub const NNDescentError = mod_nn_descent.NNDescentError;
-pub const SoaSlice = mod_soa_slice.SoaSlice;
 pub const Optimizer = mod_optimizer.Optimizer;
 pub const SearchConfig = mod_searcher.SearchConfig;
 pub const SearchError = mod_searcher.SearchError;
@@ -672,7 +670,6 @@ test {
     _ = mod_nn_descent;
     _ = mod_optimizer;
     _ = mod_dataset;
-    _ = mod_soa_slice;
     _ = mod_searcher;
 }
 

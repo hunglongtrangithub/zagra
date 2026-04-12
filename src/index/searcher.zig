@@ -6,7 +6,7 @@ const mod_index = @import("../index.zig");
 const mod_types = @import("../types.zig");
 const mod_dataset = @import("../dataset.zig");
 const mod_vector = @import("../vector.zig");
-const mod_soa_slice = @import("./soa_slice.zig");
+const mod_soa_slice = @import("soa_slice.zig");
 
 const ConstStaticArray = znpy.array.static.ConstStaticArray;
 const StaticArray = znpy.array.static.StaticArray;

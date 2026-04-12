@@ -3,7 +3,6 @@ const log = std.log.scoped(.nn_descent);
 
 const mod_dataset = @import("../dataset.zig");
 const mod_types = @import("../types.zig");
-const mod_soa_slice = @import("soa_slice.zig");
 
 pub const IterationTiming = struct {
     iteration: usize,

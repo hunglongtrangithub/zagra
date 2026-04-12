@@ -71,17 +71,14 @@ fn runBenchmark(
     const detour_counts: []usize = try allocator.alloc(usize, neighbor_entries.len);
     defer allocator.free(detour_counts);
 
-    const optimizer_entries = zagra.index.SoaSlice(zagra.index.Optimizer.NeighborsList(true).Entry){
-        .ptrs = [_][*]u8{
-            @ptrCast(neighbor_ids.ptr),
-            @ptrCast(detour_counts.ptr),
-        },
-        .len = neighbor_entries.len,
-    };
+    const OptimizerNeighborsList = zagra.index.Optimizer.NeighborsList(true);
+    var optimizer_entries = std.MultiArrayList(OptimizerNeighborsList.Entry).empty;
+    try optimizer_entries.ensureTotalCapacity(allocator, neighbor_entries.len);
+    optimizer_entries.len = neighbor_entries.len;
 
     var optimizer = zagra.index.Optimizer.init(
-        zagra.index.Optimizer.NeighborsList(true){
-            .entries = optimizer_entries,
+        OptimizerNeighborsList{
+            .entries = optimizer_entries.slice(),
             .num_neighbors_per_node = num_neighbors_per_node,
             .num_nodes = num_nodes,
         },
