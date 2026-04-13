@@ -19,7 +19,7 @@ To achieve this, I chose Zig to leverages Zig's unique capabilities, such as **c
 - [x] Vector dataset loading and vector access
   - [x] Support for `.npy` file loading via **buffered I/O** (`std.io.Reader`) or via **memory-mapping** `std.posix.mmap` for large datasets
 
-### Phase 2: NN-Descent (Finished)
+### Phase 2: NN-Descent (Ongoing)
 
 - [x] Struct-of-Arrays (SoA) data layout for heaps in graph
 - [x] NN-Descent algorithm implementation:
@@ -30,6 +30,7 @@ To achieve this, I chose Zig to leverages Zig's unique capabilities, such as **c
   5. [x] Iterative refinement until convergence
 - [x] Lock-free, multi-threaded graph operations
 - [x] Unit tests for correctness verification
+- [ ] Optimize using patterns from cuvs
 
 ### Phase 3: Graph Optimization (Finished)
 
@@ -43,15 +44,15 @@ To achieve this, I chose Zig to leverages Zig's unique capabilities, such as **c
 ### Phase 4: Search Algorithm (Ongoing)
 
 - [x] Implement basic search algorithm
-- [ ] Optimize search for CPU
+- [ ] Optimize using patterns from cuvs
 
-### Phase 5: Benchmarking & Evaluation (Planned)
+### Phase 5: Benchmarking & Evaluation
 
 - [x] Benchmark against HNSW
 
 ## Benchmark details
 
-HNSW code is from [hnswlib](https://github.com/nmslib/hnswlib/tree/c1b9b79af3d10c6ee7b5d0afa1ce851ae975254c).
+HNSW code is from [hnswlib](https://github.com/nmslib/hnswlib/tree/c1b9b79af3d10c6ee7b5d0afa1ce851ae975254c), although there is a bug in the code. I proposed the fix in [this PR](https://github.com/nmslib/hnswlib/pull/665), but it's not merged yet, so I made a local copy of hnswlib in this repository with the fix.
 
 ## Acknowledgements
 
