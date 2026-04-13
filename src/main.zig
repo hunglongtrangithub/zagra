@@ -183,8 +183,6 @@ pub fn main() !void {
         .len = vector_count,
     };
 
-    std.debug.assert(dataset.len == vector_count);
-
     // Build config
     const build_config = zagra.index.BuildConfig.init(
         graph_degree,

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// A struct that represents a slice of data in a structure-of-arrays (SoA) format.
 /// This struct owns the slice data and allocates memory for each field of the struct T separately,
@@ -73,7 +74,7 @@ pub fn SoaSlice(comptime T: type) type {
         /// Set the element at the specified index to the given value.
         /// Index has to be less than the length of the slice.
         pub fn set(self: *const Self, index: usize, elem: T) void {
-            std.debug.assert(index < self.len);
+            if (builtin.mode != .ReleaseFast) std.debug.assert(index < self.len);
             inline for (fields, 0..) |field, i| {
                 self.items(@as(Field, @enumFromInt(i)))[index] = @field(elem, field.name);
             }
@@ -82,7 +83,7 @@ pub fn SoaSlice(comptime T: type) type {
         /// Get the element at the specified index.
         /// Index has to be less than the length of the slice.
         pub fn get(self: *const Self, index: usize) T {
-            std.debug.assert(index < self.len);
+            if (builtin.mode != .ReleaseFast) std.debug.assert(index < self.len);
             var elem: T = undefined;
             inline for (fields, 0..) |field, i| {
                 @field(elem, field.name) = self.items(@as(Field, @enumFromInt(i)))[index];
@@ -93,7 +94,7 @@ pub fn SoaSlice(comptime T: type) type {
         /// Returns a subslice of the original slice starting at the specified offset and with the specified length.
         /// off + len must be less than or equal to the length of the original slice.
         pub fn subslice(self: *const Self, off: usize, len: usize) Self {
-            std.debug.assert(off + len <= self.len);
+            if (builtin.mode != .ReleaseFast) std.debug.assert(off + len <= self.len);
             var ptrs = self.ptrs;
             inline for (fields, 0..) |field, i| {
                 ptrs[i] += off * @sizeOf(field.type);

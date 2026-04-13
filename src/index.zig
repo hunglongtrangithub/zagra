@@ -548,7 +548,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             const num_nodes = nn_descent.neighbors_list.num_nodes;
             const num_neighbors_per_node = nn_descent.neighbors_list.num_neighbors_per_node;
 
-            std.debug.assert(isValidGraph(
+            if (builtin.mode != .ReleaseFast) std.debug.assert(isValidGraph(
                 optimizer_entries.items(.neighbor_id),
                 num_nodes,
                 num_neighbors_per_node,
@@ -580,7 +580,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             }
 
             const graph_data: []const usize = try allocator.dupe(usize, optimized_graph.entries.items(.neighbor_id));
-            std.debug.assert(isValidGraph(
+            if (builtin.mode != .ReleaseFast) std.debug.assert(isValidGraph(
                 graph_data,
                 num_nodes,
                 config.graph_degree,

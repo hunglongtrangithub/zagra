@@ -160,7 +160,7 @@ pub fn Dataset(comptime T: type, comptime N: usize) type {
         /// Get a const pointer to the vector at the specified index without bounds checking.
         /// SAFETY: Caller must ensure index is valid (i.e., less than `len`).
         pub fn getUnchecked(self: *const Self, index: usize) *const Vec {
-            std.debug.assert(index < self.len);
+            if (builtin.mode != .ReleaseFast) std.debug.assert(index < self.len);
             // We return the address of the data already living in the data buffer.
             // No new struct is created; no data is moved.
             // SAFETY: This cast works because:

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const log = std.log.scoped(.nn_descent);
 
 const mod_dataset = @import("../dataset.zig");
@@ -473,7 +474,7 @@ pub fn NNDescent(
             }
 
             // There should be no empty neighbor IDs left for all node IDs
-            std.debug.assert(std.mem.indexOfScalar(
+            if (builtin.mode != .ReleaseFast) std.debug.assert(std.mem.indexOfScalar(
                 usize,
                 self.neighbors_list.entries.items(.neighbor_id),
                 self.neighbors_list.num_nodes,
@@ -489,10 +490,12 @@ pub fn NNDescent(
             node_id_end: usize,
             node_ids_random: []const usize,
         ) void {
-            std.debug.assert(dataset.len == neighbors_list.num_nodes);
-            std.debug.assert(dataset.len == node_ids_random.len);
-            // NOTE: When node_id_start == node_id_end, the loop beblow never executes
-            std.debug.assert(node_id_start <= node_id_end and node_id_end <= neighbors_list.num_nodes);
+            if (builtin.mode != .ReleaseFast) {
+                std.debug.assert(dataset.len == neighbors_list.num_nodes);
+                std.debug.assert(dataset.len == node_ids_random.len);
+                // NOTE: When node_id_start == node_id_end, the loop beblow never executes
+                std.debug.assert(node_id_start <= node_id_end and node_id_end <= neighbors_list.num_nodes);
+            }
             log.debug("node_id_start: {}, node_id_end: {}", .{ node_id_start, node_id_end });
 
             for (node_id_start..node_id_end) |node_id| {
@@ -525,26 +528,29 @@ pub fn NNDescent(
                             .is_new = true,
                         },
                     );
-                    if (!added) {
-                        log.err(
-                            \\Failed to add random neighbor for node_id: {} - neighbor_id: {} - distance: {}.
-                            \\num_nodes: {} node's neighbors: {any}
-                            \\node's distances: {any}
-                        ,
-                            .{
-                                node_id,
-                                neighbor_id,
-                                distance,
-                                neighbors_list.num_nodes,
-                                neighbors_list.getEntryFieldSlice(node_id, .neighbor_id),
-                                neighbors_list.getEntryFieldSlice(node_id, .distance),
-                            },
-                        );
+
+                    if (builtin.mode != .ReleaseFast) {
+                        if (!added) {
+                            log.err(
+                                \\Failed to add random neighbor for node_id: {} - neighbor_id: {} - distance: {}.
+                                \\num_nodes: {} node's neighbors: {any}
+                                \\node's distances: {any}
+                            ,
+                                .{
+                                    node_id,
+                                    neighbor_id,
+                                    distance,
+                                    neighbors_list.num_nodes,
+                                    neighbors_list.getEntryFieldSlice(node_id, .neighbor_id),
+                                    neighbors_list.getEntryFieldSlice(node_id, .distance),
+                                },
+                            );
+                        }
+                        // Neighbor must have been added successfully since
+                        // the neighbors do not have duplicates and the initial
+                        // distances in the neighbor heap are set to infinity.
+                        std.debug.assert(added);
                     }
-                    // Neighbor must have been added successfully since
-                    // the neighbors do not have duplicates and the initial
-                    // distances in the neighbor heap are set to infinity.
-                    std.debug.assert(added);
                 }
             }
         }
@@ -552,8 +558,10 @@ pub fn NNDescent(
         /// Sample neighbor candidates from the `neighbors_list` into `neighbor_candidates_new` and `neighbor_candidates_old`.
         /// Use multi-threading if configured.
         fn sampleNeighborCandidates(self: *Self) void {
-            std.debug.assert(self.neighbor_candidates_new.num_nodes == self.neighbor_candidates_old.num_nodes);
-            std.debug.assert(self.neighbor_candidates_new.num_nodes == self.neighbors_list.num_nodes);
+            if (builtin.mode != .ReleaseFast) {
+                std.debug.assert(self.neighbor_candidates_new.num_nodes == self.neighbor_candidates_old.num_nodes);
+                std.debug.assert(self.neighbor_candidates_new.num_nodes == self.neighbors_list.num_nodes);
+            }
 
             if (self.thread_pool) |pool| {
                 self.wait_group.reset();
@@ -632,7 +640,7 @@ pub fn NNDescent(
             seed: u64,
         ) void {
             // NOTE: When node_id_start == node_id_end, nothing gets added to the candidate lists
-            std.debug.assert(node_id_start <= node_id_end and node_id_end <= neighbors_list.num_nodes);
+            if (builtin.mode != .ReleaseFast) std.debug.assert(node_id_start <= node_id_end and node_id_end <= neighbors_list.num_nodes);
 
             // Initialize PRNG with thread-specific seed
             var prng = std.Random.DefaultPrng.init(seed);
@@ -694,7 +702,7 @@ pub fn NNDescent(
             node_id_end: usize,
         ) void {
             // NOTE: When node_id_start == node_id_end, the loop below never executes
-            std.debug.assert(node_id_start <= node_id_end and node_id_end <= neighbors_list.num_nodes);
+            if (builtin.mode != .ReleaseFast) std.debug.assert(node_id_start <= node_id_end and node_id_end <= neighbors_list.num_nodes);
 
             for (node_id_start..node_id_end) |node_id| {
                 const neighbor_id_slice: []const usize = neighbors_list.getEntryFieldSlice(node_id, .neighbor_id);
@@ -703,7 +711,7 @@ pub fn NNDescent(
 
                 for (0..neighbors_list.num_neighbors_per_node) |neighbor_idx| {
                     const neighbor_id = neighbor_id_slice[neighbor_idx];
-                    std.debug.assert(neighbor_id < neighbors_list.num_nodes);
+                    if (builtin.mode != .ReleaseFast) std.debug.assert(neighbor_id < neighbors_list.num_nodes);
 
                     if (std.mem.indexOfScalar(
                         usize,
@@ -719,7 +727,7 @@ pub fn NNDescent(
 
         /// Generate graph updates for all graph update lists for a block of nodes at a block ID.
         fn generateBlockGraphUpdateProposals(self: *Self, block_id: usize) void {
-            std.debug.assert(self.block_graph_updates_lists.len == self.training_config.num_threads);
+            if (builtin.mode != .ReleaseFast) std.debug.assert(self.block_graph_updates_lists.len == self.training_config.num_threads);
 
             const block_start = @min(block_id * self.num_nodes_per_block, self.neighbors_list.num_nodes);
             const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
@@ -749,7 +757,6 @@ pub fn NNDescent(
                 }
                 pool.waitAndWork(&self.wait_group);
             } else {
-                std.debug.assert(self.training_config.num_threads == 1);
                 generateGraphUpdateProposalsThread(
                     self.dataset,
                     &self.neighbors_list,
@@ -776,9 +783,11 @@ pub fn NNDescent(
             local_join_id_end: usize,
         ) void {
             const num_nodes = neighbors_list.num_nodes;
-            std.debug.assert(dataset.len == num_nodes);
-            // NOTE: When local_join_id_start == local_join_id_end, the loop below never executes
-            std.debug.assert(local_join_id_start <= local_join_id_end and local_join_id_end <= num_nodes);
+            if (builtin.mode != .ReleaseFast) {
+                std.debug.assert(dataset.len == num_nodes);
+                // NOTE: When local_join_id_start == local_join_id_end, the loop below never executes
+                std.debug.assert(local_join_id_start <= local_join_id_end and local_join_id_end <= num_nodes);
+            }
 
             // Go through all local joins in the given range
             for (local_join_id_start..local_join_id_end) |local_join_id| {
@@ -833,14 +842,16 @@ pub fn NNDescent(
             }
 
             // Graph update list should not exceed its designated capacity
-            std.debug.assert(graph_updates_list.items.len <= graph_updates_list.capacity);
+            if (builtin.mode != .ReleaseFast) std.debug.assert(graph_updates_list.items.len <= graph_updates_list.capacity);
         }
 
         /// Apply graph updates from all threads' graph updates lists for a block of nodes at block ID to the `neighbors_list`.
         /// Return the total number of successful updates applied.
         fn applyBlockGraphUpdatesProposals(self: *Self, block_id: usize) usize {
-            std.debug.assert(self.graph_update_counts_buffer.len == self.training_config.num_threads);
-            std.debug.assert(self.block_graph_updates_lists.len == self.training_config.num_threads);
+            if (builtin.mode != .ReleaseFast) {
+                std.debug.assert(self.graph_update_counts_buffer.len == self.training_config.num_threads);
+                std.debug.assert(self.block_graph_updates_lists.len == self.training_config.num_threads);
+            }
 
             const block_start = @min(block_id * self.num_nodes_per_block, self.neighbors_list.num_nodes);
             const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
@@ -871,7 +882,6 @@ pub fn NNDescent(
                 // Reduce the counts from all threads with SIMD
                 return sumUpGraphUpdateCountsSIMD(self.graph_update_counts_buffer);
             } else {
-                std.debug.assert(self.training_config.num_threads == 1);
                 applyGraphUpdatesProposalsThread(
                     &self.neighbors_list,
                     &self.block_graph_updates_lists[0],
@@ -895,7 +905,7 @@ pub fn NNDescent(
             node_id_end: usize,
         ) void {
             // NOTE: When node_id_start == node_id_end, updates_count remains 0 after the loop
-            std.debug.assert(node_id_start <= node_id_end and node_id_end <= neighbors_list.num_nodes);
+            if (builtin.mode != .ReleaseFast) std.debug.assert(node_id_start <= node_id_end and node_id_end <= neighbors_list.num_nodes);
 
             var updates_count: usize = 0;
 
@@ -1481,7 +1491,7 @@ fn NeighborHeapList(
             node_id: usize,
             neighbor_entry: Entry,
         ) bool {
-            std.debug.assert(node_id < self.num_nodes);
+            if (builtin.mode != .ReleaseFast) std.debug.assert(node_id < self.num_nodes);
 
             // Calculate the start index for the heaps of the specified node
             const heap_start = node_id * self.num_neighbors_per_node;
@@ -1506,8 +1516,10 @@ fn NeighborHeapList(
         /// Replaces the maximum entry in the heap for the specified node with a new entry,
         /// and restores the max-heap property for that heap.
         fn replaceMaxEntry(self: *Self, node_id: usize, new_entry: Entry) void {
-            std.debug.assert(node_id < self.num_nodes);
-            std.debug.assert(new_entry.neighbor_id < self.num_nodes);
+            if (builtin.mode != .ReleaseFast) {
+                std.debug.assert(node_id < self.num_nodes);
+                std.debug.assert(new_entry.neighbor_id < self.num_nodes);
+            }
 
             // Get the start index for the heap of the specified node
             const heap_start = node_id * self.num_neighbors_per_node;
@@ -1563,21 +1575,21 @@ fn NeighborHeapList(
             node_id: usize,
             comptime field: std.meta.FieldEnum(Entry),
         ) []std.meta.fieldInfo(Entry, field).type {
-            std.debug.assert(node_id < self.num_nodes);
+            if (builtin.mode != .ReleaseFast) std.debug.assert(node_id < self.num_nodes);
             const start = node_id * self.num_neighbors_per_node;
             return self.entries.items(field)[start .. start + self.num_neighbors_per_node];
         }
 
         /// Retrieves the maximum distance (the root of the max heap) for the specified node.
         pub fn getMaxDistance(self: *const Self, node_id: usize) T {
-            std.debug.assert(node_id < self.num_nodes);
+            if (builtin.mode != .ReleaseFast) std.debug.assert(node_id < self.num_nodes);
             return self.entries.items(.distance)[node_id * self.num_neighbors_per_node];
         }
 
         /// Sorts a node's neighbor entries in descending order by distance.
         /// The max heap property is still maintained after this operation.
         pub fn sortNeighbors(self: *const Self, node_id: usize) void {
-            std.debug.assert(node_id < self.num_nodes);
+            if (builtin.mode != .ReleaseFast) std.debug.assert(node_id < self.num_nodes);
 
             // Get the valid slice of entries for this node
             const entry_base_offset = node_id * self.num_neighbors_per_node;
