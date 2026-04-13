@@ -99,6 +99,7 @@ pub const NNDescentError = error{
     InvalidNumNeighborsPerNode,
     /// The specified number of neighbors causes an overflow when multiplied by number of nodes.
     NumberOfEdgesTooLarge,
+    SeedOverflow,
 };
 
 /// NN-Descent struct to construct the k-NN graph from a dataset.
@@ -172,6 +173,11 @@ pub fn NNDescent(
         ) (NNDescentError || std.mem.Allocator.Error)!Self {
             if (training_config.max_candidates > std.math.maxInt(i32)) return NNDescentError.MaxCandidatesTooLarge;
             if (training_config.num_neighbors_per_node >= dataset.len) return NNDescentError.InvalidNumNeighborsPerNode;
+            _ = std.math.add(
+                u64,
+                training_config.seed,
+                std.math.cast(u64, training_config.num_threads -| 1) orelse return NNDescentError.SeedOverflow,
+            ) catch return NNDescentError.SeedOverflow;
 
             var neighbors_list = try NeighborsList.init(
                 dataset.len,

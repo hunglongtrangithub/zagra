@@ -73,7 +73,7 @@ pub const SearchError = error{
     /// The number of threads times nodes would overflow buffer size calculation.
     NumThreadsTooLarge,
     /// The number of queries would cause seed overflow.
-    NumQueriesTooLarge,
+    SeedOverflow,
     /// The requested k value is too large for the output array.
     KTooLarge,
 };
@@ -176,8 +176,8 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
             _ = std.math.add(
                 u64,
                 seed,
-                std.math.cast(u64, num_queries -| 1) orelse return SearchError.NumQueriesTooLarge,
-            ) catch return SearchError.NumQueriesTooLarge;
+                std.math.cast(u64, num_queries -| 1) orelse return SearchError.SeedOverflow,
+            ) catch return SearchError.SeedOverflow;
 
             // Number of queries per block. 0 when number of queries or threads is 0.
             const num_queries_per_block: usize = @min(config.num_threads, num_queries);
