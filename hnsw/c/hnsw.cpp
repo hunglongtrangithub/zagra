@@ -11,7 +11,9 @@
 #include <thread>
 #include <mutex>
 #include <vector>
+#include <cstring>
 #include <exception>
+#include <functional>
 
 using namespace hnswlib;
 

@@ -10,6 +10,7 @@
 
 #include "bruteforce.h"
 #include "../hnswlib/hnswlib.h"
+#include <functional>
 
 using namespace hnswlib;
 
