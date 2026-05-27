@@ -200,9 +200,9 @@ pub fn build(b: *std.Build) void {
 
     // Add a step to list all benchmarks
     b.step("bench", "List all benchmarks").makeFn = struct {
-        fn make(_: *std.Build.Step, _: std.Build.Step.MakeOptions) anyerror!void {
+        fn make(bs: *std.Build.Step, _: std.Build.Step.MakeOptions) anyerror!void {
             var stdout_buffer: [1024]u8 = undefined;
-            var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+            var stdout_writer = std.Io.File.stdout().writerStreaming(bs.owner.graph.io, &stdout_buffer);
             const stdout = &stdout_writer.interface;
             try stdout.print("Available benchmarks:\n", .{});
             inline for (benchmarks) |bench_name| {
