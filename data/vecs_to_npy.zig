@@ -50,7 +50,7 @@ pub const VecsFileError = error{
     VecsDimExceedsUsize,
     NumVecsExceedsUsize,
     VecSizeExceedsUsize,
-} || std.fs.File.GetEndPosError;
+} || std.Io.File.LengthError;
 
 /// Read the first 4 bytes of the vecs file to get the vector dimension,
 /// and check that the file size is consistent with the vector dimension to get the number of vectors.
@@ -58,11 +58,12 @@ pub const VecsFileError = error{
 /// 1. number of vectors (usize)
 /// 2. vector dimension (usize)
 fn getNumVecsAndVecsDim(
+    io: std.Io,
     vecs_type: VecsType,
-    vecs_file: std.fs.File,
+    vecs_file: std.Io.File,
 ) VecsFileError!struct { usize, usize } {
     var vecs_buffer: [4]u8 = undefined;
-    var vecs_reader = vecs_file.reader(&vecs_buffer);
+    var vecs_reader = vecs_file.reader(io, &vecs_buffer);
     const reader = &vecs_reader.interface;
 
     const vecs_dim_i32 = reader.takeInt(i32, .little) catch |err|
@@ -71,7 +72,7 @@ fn getNumVecsAndVecsDim(
             error.ReadFailed => error.ReadFailed,
         };
 
-    const vecs_file_size = try vecs_file.getEndPos();
+    const vecs_file_size = try vecs_file.length(io);
 
     const vecs_dim_u64 = std.math.cast(u64, vecs_dim_i32) orelse return error.VecsDimIsNegative;
     const vec_size_u64 = std.math.add(
@@ -95,13 +96,14 @@ fn getNumVecsAndVecsDim(
 }
 
 fn convert(
+    io: std.Io,
     vecs_type: VecsType,
-    vecs_file: std.fs.File,
-    npy_file: std.fs.File,
+    vecs_file: std.Io.File,
+    npy_file: std.Io.File,
 ) (std.Io.Reader.Error || std.Io.Writer.Error || VecsFileError)!void {
-    const num_vecs, const vecs_dim = try getNumVecsAndVecsDim(vecs_type, vecs_file);
+    const num_vecs, const vecs_dim = try getNumVecsAndVecsDim(io, vecs_type, vecs_file);
     var npy_buffer: [8192]u8 = undefined;
-    var npy_writer = npy_file.writer(&npy_buffer);
+    var npy_writer = npy_file.writer(io, &npy_buffer);
     const writer = &npy_writer.interface;
 
     // Npy header for a 2D array of 2 usizes should not exceed 98 bytes, so 1024 bytes is more than enough for the header.
@@ -131,7 +133,7 @@ fn convert(
     };
 
     var vecs_buffer: [8192]u8 = undefined;
-    var vecs_reader = vecs_file.reader(&vecs_buffer);
+    var vecs_reader = vecs_file.reader(io, &vecs_buffer);
     const reader = &vecs_reader.interface;
 
     var elem_buffer_scratch: [4]u8 = undefined; // big enough for one element of any type
@@ -155,15 +157,15 @@ fn convert(
 }
 
 /// Convert all .fvecs, .ivecs, and .bvecs files in the given directory to .npy format.
-pub fn convertVecsToNpy(dataset_dir: std.fs.Dir) void {
+pub fn convertVecsToNpy(io: std.Io, dataset_dir: std.Io.Dir) void {
     var name_buffer_scratch: [std.fs.max_name_bytes]u8 = undefined;
 
     var iter = dataset_dir.iterate();
-    while (iter.next() catch |err| {
+    while (iter.next(io) catch |err| {
         log.err("Error iterating directory, stopping: {}", .{err});
         return;
     }) |e| {
-        const entry: std.fs.Dir.Entry = e;
+        const entry: std.Io.Dir.Entry = e;
         if (entry.kind != .file) continue;
         const ext = std.fs.path.extension(entry.name);
         const vecs_type = VecsType.fromExtension(ext) orelse continue;
@@ -175,19 +177,20 @@ pub fn convertVecsToNpy(dataset_dir: std.fs.Dir) void {
         const npy_name = name_buffer_scratch[0 .. filename.len + ".npy".len];
 
         // Open the vecs file for reading and the npy file for writing
-        const vecs_file = dataset_dir.openFile(entry.name, .{}) catch |err| {
+        const vecs_file = dataset_dir.openFile(io, entry.name, .{}) catch |err| {
             log.err("Error opening vecs file {s} for reading, skipping: {}", .{ entry.name, err });
             continue;
         };
-        defer vecs_file.close();
-        const npy_file = dataset_dir.createFile(npy_name, .{}) catch |err| {
+        defer vecs_file.close(io);
+        const npy_file = dataset_dir.createFile(io, npy_name, .{}) catch |err| {
             log.err("Error creating npy file {s} for writing, skipping: {}", .{ npy_name, err });
             continue;
         };
-        defer npy_file.close();
+        defer npy_file.close(io);
 
         log.info("Converting {s} to {s}", .{ entry.name, npy_name });
         convert(
+            io,
             vecs_type,
             vecs_file,
             npy_file,
@@ -198,7 +201,7 @@ pub fn convertVecsToNpy(dataset_dir: std.fs.Dir) void {
                 else => |conv_err| log.err("Error converting vecs file {s}: {}", .{ entry.name, conv_err }),
             }
             // Clear the npy file if we failed to convert, to avoid leaving a corrupted npy file.
-            dataset_dir.deleteFile(npy_name) catch |delete_err|
+            dataset_dir.deleteFile(io, npy_name) catch |delete_err|
                 log.err("Error deleting npy file {s} after failed conversion, manual cleanup may be needed: {}", .{ npy_name, delete_err });
         };
         log.info("Successfully converted {s} to {s}", .{ entry.name, npy_name });
@@ -206,6 +209,7 @@ pub fn convertVecsToNpy(dataset_dir: std.fs.Dir) void {
 }
 
 pub fn testConversion(comptime T: type, num_vecs: usize, dim: usize) !void {
+    const io = std.testing.io;
     const vecs_type = comptime VecsType.fromZigType(T);
 
     // Prepare the original data buffer that we will write to the vecs file and expect to read back from the npy file.
@@ -254,8 +258,8 @@ pub fn testConversion(comptime T: type, num_vecs: usize, dim: usize) !void {
     // Write the vecs bytes to a vecs file.
     const vecs_file_name = "test.fvecs";
     {
-        const vecs_file = try tmp_dir.dir.createFile(vecs_file_name, .{});
-        defer vecs_file.close();
+        const vecs_file = try tmp_dir.dir.createFile(io, vecs_file_name, .{});
+        defer vecs_file.close(io);
 
         var vecs_writer = vecs_file.writer(&.{});
         const writer = &vecs_writer.interface;
@@ -266,11 +270,11 @@ pub fn testConversion(comptime T: type, num_vecs: usize, dim: usize) !void {
     // Convert the vecs file to npy format using our convert function, and write to a npy file.
     const npy_file_name = "test.npy";
     {
-        const vecs_file = try tmp_dir.dir.openFile(vecs_file_name, .{});
-        defer vecs_file.close();
-        const npy_file = try tmp_dir.dir.createFile(npy_file_name, .{});
-        defer npy_file.close();
-        try convert(vecs_type, vecs_file, npy_file);
+        const vecs_file = try tmp_dir.dir.openFile(io, vecs_file_name, .{});
+        defer vecs_file.close(io);
+        const npy_file = try tmp_dir.dir.createFile(io, npy_file_name, .{});
+        defer npy_file.close(io);
+        try convert(io, vecs_type, vecs_file, npy_file);
     }
 
     // Read the npy file content back and check that it matches the original data.

@@ -12,9 +12,8 @@ pub const VectorSet = enum {
 
     const URL_PREFIX = "ftp://ftp.irisa.fr/local/texmex/corpus/";
 
-    fn checkExecutable(name: []const u8, allocator: std.mem.Allocator) void {
-        const run_result = std.process.Child.run(.{
-            .allocator = allocator,
+    fn checkExecutable(name: []const u8, io: std.Io, allocator: std.mem.Allocator) void {
+        const run_result = std.process.run(allocator, io, .{
             .argv = &[_][]const u8{ "which", name },
         }) catch |e| {
             std.debug.print("Error starting 'which {s}': {}\n", .{ name, e });
@@ -22,65 +21,19 @@ pub const VectorSet = enum {
         };
         allocator.free(run_result.stdout);
         allocator.free(run_result.stderr);
-        if (run_result.term.Exited != 0) {
+        if (run_result.term.exited != 0) {
             std.debug.print("Error: '{s}' is not installed or not in PATH.\n", .{name});
             std.process.exit(1);
         }
     }
 
-    fn spawn(
-        argv: []const []const u8,
-        allocator: std.mem.Allocator,
-    ) std.process.Child {
-        var cmd = std.process.Child.init(argv, allocator);
-        cmd.spawn() catch |e| {
-            std.debug.print("Error starting process: {}\n", .{e});
-            std.debug.print("Argv: ", .{});
-            for (argv) |arg| std.debug.print("{s} ", .{arg});
-            std.debug.print("\n", .{});
-            std.process.exit(1);
-        };
-        return cmd;
-    }
-
-    fn wait(cmd: *std.process.Child) void {
-        const term = cmd.wait() catch |e| {
-            std.debug.print("Error waiting for process: {}\n", .{e});
-            std.debug.print("Argv: ", .{});
-            for (cmd.argv) |arg| std.debug.print("{s} ", .{arg});
-            std.debug.print("\n", .{});
-            std.process.exit(1);
-        };
-        if (term.Exited != 0) {
-            std.debug.print("Error: Process exited with code {d}.\n", .{term.Exited});
-            std.debug.print("Argv: ", .{});
-            for (cmd.argv) |arg| std.debug.print("{s} ", .{arg});
-            std.debug.print("\n", .{});
-            std.process.exit(1);
-        }
-    }
-
-    fn makeDatasetDir(dataset_dir_str: []const u8) std.fs.Dir {
-        if (std.fs.path.isAbsolute(dataset_dir_str)) {
-            std.fs.makeDirAbsolute(dataset_dir_str) catch |e| switch (e) {
-                error.PathAlreadyExists => {},
-                else => {
-                    std.debug.print("Error creating dataset directory: {}\n", .{e});
-                    std.process.exit(1);
-                },
-            };
-        } else {
-            std.fs.cwd().makeDir(dataset_dir_str) catch |e| switch (e) {
-                error.PathAlreadyExists => {},
-                else => {
-                    std.debug.print("Error creating dataset directory: {}\n", .{e});
-                    std.process.exit(1);
-                },
-            };
-        }
-
-        return std.fs.cwd().openDir(dataset_dir_str, .{ .iterate = true }) catch |e| {
-            std.debug.print("Error opening dataset directory: {}\n", .{e});
+    fn spawn(io: std.Io, args: []const []const u8) std.process.Child {
+        return std.process.spawn(io, .{
+            .argv = args,
+        }) catch |e| {
+            std.debug.print("Error starting process: ", .{});
+            for (args) |arg| std.debug.print("{s} ", .{arg});
+            std.debug.print("\n{}\n", .{e});
             std.process.exit(1);
         };
     }
@@ -88,35 +41,34 @@ pub const VectorSet = enum {
     pub fn install(
         self: VectorSet,
         allocator: std.mem.Allocator,
+        io: std.Io,
         data_dir: []const u8,
     ) std.mem.Allocator.Error!void {
         const executables = [_][]const u8{ "tar", "gzip" };
         for (executables) |exe| {
-            checkExecutable(exe, allocator);
+            checkExecutable(exe, io, allocator);
         }
 
-        if (std.fs.path.isAbsolute(data_dir)) {
-            std.fs.makeDirAbsolute(data_dir) catch |e| switch (e) {
-                error.PathAlreadyExists => log.info("Data directory already exists: {s}", .{data_dir}),
-                else => {
-                    std.debug.print("Error creating data directory: {}\n", .{e});
-                    std.process.exit(1);
-                },
-            };
-        } else {
-            std.fs.cwd().makePath(data_dir) catch |e| switch (e) {
-                error.PathAlreadyExists => log.info("Data directory already exists: {s}", .{data_dir}),
-                else => {
-                    std.debug.print("Error creating data directory: {}\n", .{e});
-                    std.process.exit(1);
-                },
-            };
-        }
+        const cwd = std.Io.Dir.cwd();
+
+        cwd.createDir(io, data_dir, .default_dir) catch |e| switch (e) {
+            error.PathAlreadyExists => log.info("Data directory already exists: {s}", .{data_dir}),
+            else => {
+                std.debug.print("Error creating data directory: {}\n", .{e});
+                std.process.exit(1);
+            },
+        };
+
         const dataset_dir_str = std.fs.path.join(allocator, &[_][]const u8{ data_dir, @tagName(self) }) catch
             return std.mem.Allocator.Error.OutOfMemory;
         defer allocator.free(dataset_dir_str);
-        var dataset_dir = makeDatasetDir(dataset_dir_str);
-        defer dataset_dir.close();
+        cwd.createDir(io, dataset_dir_str, .default_dir) catch |e| switch (e) {
+            error.PathAlreadyExists => log.warn("Vector set directory {s} already exists", .{@tagName(self)}),
+            else => {
+                std.debug.print("Error creating dataset directory: {}\n", .{e});
+                std.process.exit(1);
+            },
+        };
 
         switch (self) {
             .ANN_SIFT10K, .ANN_SIFT1M, .ANN_GIST1M => {
@@ -136,13 +88,18 @@ pub const VectorSet = enum {
 
                 log.info("Downloading {s}...", .{file_name});
                 const results = ftp.downloadFiles(
+                    io,
                     allocator,
                     &[_]ftp.DownloadItem{.{
                         .url = tar_file_url,
                         .output_path = tar_file_path,
                     }},
-                ) orelse {
-                    std.debug.print("Download failed (out of memory). Exiting.\n", .{});
+                ) catch |e| {
+                    switch (e) {
+                        error.OutOfMemory => std.debug.print("Out of memory.", .{}),
+                        error.TooManyFiles => std.debug.print("Too many files to download (max 255).", .{}),
+                    }
+                    std.debug.print(" Exiting.\n", .{});
                     std.process.exit(1);
                 };
                 defer allocator.free(results);
@@ -155,14 +112,26 @@ pub const VectorSet = enum {
                 }
 
                 log.info("Extracting...", .{});
-                var cmd = spawn(&[_][]const u8{
+                const extract_cmd = &[_][]const u8{
                     "tar",
                     "-xzf",
                     tar_file_path,
                     "-C",
                     dataset_dir_str,
-                }, allocator);
-                wait(&cmd);
+                };
+                var child_process = spawn(io, extract_cmd);
+                const wait_result = child_process.wait(io) catch |e| {
+                    std.debug.print("Error waiting for process: ", .{});
+                    for (extract_cmd) |arg| std.debug.print("{s} ", .{arg});
+                    std.debug.print("\n{}\n", .{e});
+                    std.process.exit(1);
+                };
+                if (wait_result.exited != 0) {
+                    std.debug.print("Process exited with code {}: ", .{wait_result.exited});
+                    for (extract_cmd) |arg| std.debug.print("{s} ", .{arg});
+                    std.debug.print("\n", .{});
+                    std.process.exit(1);
+                }
             },
             .ANN_SIFT1B => {
                 const file_names = [_][]const u8{
@@ -188,8 +157,16 @@ pub const VectorSet = enum {
                     };
                 }
 
-                const results = ftp.downloadFiles(allocator, &download_items) orelse {
-                    std.debug.print("Download failed (out of memory). Exiting.\n", .{});
+                const results = ftp.downloadFiles(
+                    io,
+                    allocator,
+                    &download_items,
+                ) catch |e| {
+                    switch (e) {
+                        error.OutOfMemory => std.debug.print("Out of memory.", .{}),
+                        error.TooManyFiles => std.debug.print("Too many files to download (max 255).", .{}),
+                    }
+                    std.debug.print(" Exiting.\n", .{});
                     std.process.exit(1);
                 };
                 defer allocator.free(results);
@@ -201,38 +178,72 @@ pub const VectorSet = enum {
                     };
                 }
 
-                var cmds: [4]std.process.Child = undefined;
-                for (file_names, file_paths, &cmds) |name, file_path, *cmd| {
+                var child_processes: [4]std.process.Child = undefined;
+                for (file_names, file_paths, &child_processes) |name, file_path, *child| {
                     log.info("Extracting {s}...", .{name});
-                    cmd.* = if (std.mem.endsWith(u8, name, ".tar.gz"))
-                        spawn(&[_][]const u8{
+                    const cmd = if (std.mem.endsWith(u8, name, ".tar.gz"))
+                        &[_][]const u8{
                             "tar",
                             "-xzf",
                             file_path,
                             "-C",
                             dataset_dir_str,
-                        }, allocator)
+                        }
                     else if (std.mem.endsWith(u8, name, ".gz"))
-                        spawn(&[_][]const u8{
+                        &[_][]const u8{
                             "gzip",
                             "-df",
                             file_path,
-                        }, allocator)
+                        }
                     else {
                         log.warn("Unknown file type for {s}, skipping extraction", .{name});
                         continue;
                     };
+                    child.* = spawn(io, cmd);
                 }
-                for (&cmds) |*cmd| wait(cmd);
+
+                var all_success = true;
+                for (&child_processes, 0..) |*child, i| {
+                    const result = child.wait(io);
+                    if (result) |wait_result| {
+                        if (wait_result.exited == 0) {
+                            std.debug.print("Extract success: {s}\n", .{file_names[i]});
+                        } else {
+                            std.debug.print("Non-zero return code for {s}: {d}\n", .{ file_names[i], wait_result.exited });
+                            all_success = false;
+                            break;
+                        }
+                    } else |err| {
+                        std.debug.print("Error waiting for extraction on {s}: {}\n", .{ file_names[i], err });
+                        all_success = false;
+                        break;
+                    }
+                }
+
+                if (!all_success) {
+                    std.debug.print("Some files failed to extract. Stopping process.\n", .{});
+                    std.process.exit(1);
+                } else {
+                    std.debug.print("All files extracted successfully.\n", .{});
+                }
             },
         }
 
         log.info("Moving vector files to dataset root directory", .{});
 
+        var dataset_dir = cwd.openDir(
+            io,
+            dataset_dir_str,
+            .{ .iterate = true },
+        ) catch |e| {
+            std.debug.print("Error opening dataset directory: {}\n", .{e});
+            std.process.exit(1);
+        };
+        defer dataset_dir.close(io);
         var walker = try dataset_dir.walk(allocator);
         defer walker.deinit();
 
-        while (walker.next() catch |e| {
+        while (walker.next(io) catch |e| {
             std.debug.print("Error walking dataset directory, you can try moving the vector files yourself: {}\n", .{e});
             std.process.exit(0);
         }) |entry| {
@@ -243,7 +254,12 @@ pub const VectorSet = enum {
 
             const file_name = std.fs.path.basename(entry.path);
             log.info("Moving {s} to {s}", .{ entry.path, file_name });
-            dataset_dir.rename(entry.path, file_name) catch |e| {
+            dataset_dir.rename(
+                entry.path,
+                dataset_dir,
+                file_name,
+                io,
+            ) catch |e| {
                 std.debug.print("Error moving file, trying to move other files: {}\n", .{e});
                 continue;
             };
