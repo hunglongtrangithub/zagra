@@ -30,22 +30,23 @@ fn checkHelp(stdout: *std.Io.Writer, arg: [:0]const u8, exe_name: []const u8) st
     }
 }
 
-pub fn main() (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    var args = try std.process.argsWithAllocator(allocator);
+    var args = try init.minimal.args.iterateAllocator(allocator);
     defer args.deinit();
+
     const exe_path = args.next() orelse @src().file;
     const exe_name = std.fs.path.basename(exe_path);
+    const cwd = std.Io.Dir.cwd();
 
     var stdin_buffer: [1024]u8 = undefined;
-    var stdin_reader = std.fs.File.stdin().reader(&stdin_buffer);
+    var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buffer);
     const stdin = &stdin_reader.interface;
 
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     if (args.next()) |dataset_name| {
@@ -72,19 +73,19 @@ pub fn main() (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
             }
         } else true;
 
-        try vector_set.install(allocator, final_data_dir);
+        try vector_set.install(allocator, io, final_data_dir);
 
         if (do_convert) {
             const dataset_dir_str = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ final_data_dir, @tagName(vector_set) });
             defer allocator.free(dataset_dir_str);
-            var dataset_dir = std.fs.cwd().openDir(dataset_dir_str, .{ .iterate = true }) catch |e| {
+            var dataset_dir = cwd.openDir(io, dataset_dir_str, .{ .iterate = true }) catch |e| {
                 std.debug.print("Error opening dataset directory {s}: {}\n", .{ dataset_dir_str, e });
                 std.process.exit(1);
             };
-            defer dataset_dir.close();
+            defer dataset_dir.close(io);
 
             log.info("Converting vector files to .npy format...", .{});
-            vecs_to_npy_mod.convertVecsToNpy(dataset_dir);
+            vecs_to_npy_mod.convertVecsToNpy(io, dataset_dir);
         } else {
             log.info("Skipping conversion to .npy format as per --no-convert flag.", .{});
         }
@@ -172,7 +173,7 @@ pub fn main() (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
     // Install the dataset
     const trimmed_data_dir = std.mem.trim(u8, data_dir_input, " \t\r\n");
     const final_data_dir = if (trimmed_data_dir.len == 0) config.DATA_DIR else trimmed_data_dir;
-    try vector_set.install(allocator, final_data_dir);
+    try vector_set.install(allocator, io, final_data_dir);
 
     // Convert to .npy format if user agreed
     const do_convert = response.len == 0;
@@ -182,12 +183,12 @@ pub fn main() (std.mem.Allocator.Error || std.Io.Writer.Error)!void {
     }
     const dataset_dir_str = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ final_data_dir, @tagName(vector_set) });
     defer allocator.free(dataset_dir_str);
-    var dataset_dir = std.fs.cwd().openDir(dataset_dir_str, .{ .iterate = true }) catch |e| {
+    var dataset_dir = cwd.openDir(io, dataset_dir_str, .{ .iterate = true }) catch |e| {
         std.debug.print("Error opening dataset directory {s}: {}\n", .{ dataset_dir_str, e });
         std.process.exit(1);
     };
-    defer dataset_dir.close();
+    defer dataset_dir.close(io);
 
     log.info("Converting vector files to .npy format...", .{});
-    vecs_to_npy_mod.convertVecsToNpy(dataset_dir);
+    vecs_to_npy_mod.convertVecsToNpy(io, dataset_dir);
 }
