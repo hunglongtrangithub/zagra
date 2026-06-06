@@ -1,10 +1,8 @@
 const std = @import("std");
 const root = @import("root.zig");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
     const dim: usize = 8;
     const maxElements: usize = 1024;
