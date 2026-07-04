@@ -73,13 +73,18 @@ pub fn downloadFiles(io: std.Io, allocator: std.mem.Allocator, items: []const Do
     return results;
 }
 
+const kernel32 = struct {
+    extern "kernel32" fn GetConsoleMode(hConsoleHandle: std.os.windows.HANDLE, lpMode: *std.os.windows.DWORD) callconv(.winapi) c_int;
+    extern "kernel32" fn SetConsoleMode(hConsoleHandle: std.os.windows.HANDLE, dwMode: std.os.windows.DWORD) callconv(.winapi) c_int;
+};
+
 /// Enable ANSI escape code processing on Windows 10+ to allow cursor movement and line clearing
 /// Note: haven't tested this on Winddows yet
 fn enableWindowsAnsi() void {
-    const handle = std.os.windows.GetStdHandle(std.os.windows.STD_ERROR_HANDLE) catch return;
+    const handle = std.os.windows.peb().ProcessParameters.hStdError;
     var mode: std.os.windows.DWORD = 0;
-    if (std.os.windows.kernel32.GetConsoleMode(handle, &mode) == 0) return;
-    _ = std.os.windows.kernel32.SetConsoleMode(handle, mode | 0x0004); // ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    if (kernel32.GetConsoleMode(handle, &mode) == 0) return;
+    _ = kernel32.SetConsoleMode(handle, mode | std.os.windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 }
 
 fn getFilename(url: []const u8) []const u8 {
