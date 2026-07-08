@@ -35,7 +35,7 @@ pub fn isValidGraph(
         return false;
     }
 
-    var set: ?std.AutoArrayHashMapUnmanaged(usize, void) = .empty;
+    var set: ?std.array_hash_map.Auto(usize, void) = .empty;
     set.?.ensureTotalCapacity(allocator, num_neighbors_per_node) catch {
         set = null;
     };
@@ -128,7 +128,7 @@ pub const BuildConfig = struct {
         intermediate_graph_degree: usize,
         num_vectors: usize,
         num_threads: ?usize,
-        seed: ?u64,
+        seed: u64,
         block_size: ?usize,
     ) Self {
         return initExtended(
@@ -148,7 +148,7 @@ pub const BuildConfig = struct {
         intermediate_graph_degree: usize,
         num_vectors: usize,
         num_threads: ?usize,
-        seed: ?u64,
+        seed: u64,
         block_size: ?usize,
         max_iterations: ?usize,
         max_candidates: ?usize,
@@ -175,13 +175,13 @@ pub const BuildError = error{InvalidBuildConfig} || NNDescentError || Optimizer.
 /// Timing information for the index build process.
 pub const BuildTiming = struct {
     /// NN-Descent init + train time in nanoseconds.
-    nn_descent_ns: u64,
+    nn_descent_ns: i96,
     /// Resource freeing time in nanoseconds.
-    resource_free_ns: u64,
+    resource_free_ns: i96,
     /// Optimizer init + optimize time in nanoseconds.
-    optimizer_ns: u64,
+    optimizer_ns: i96,
     /// Total build time in nanoseconds.
-    total_ns: u64,
+    total_ns: i96,
 };
 
 /// A generic ANN index combining a vector dataset with a k-NN graph.
@@ -359,27 +359,28 @@ pub fn Index(comptime T: type, comptime N: usize) type {
         /// Returns an error if validation fails.
         pub fn load(
             dir_path: []const u8,
+            io: std.Io,
             allocator: std.mem.Allocator,
         ) !Self {
             var read_buffer: [4096]u8 = undefined;
 
             // Validate directory exists
-            var dir = try std.fs.cwd().openDir(dir_path, .{});
-            defer dir.close();
+            var dir = try std.Io.Dir.cwd().openDir(io, dir_path, .{});
+            defer dir.close(io);
 
             // Load dataset.npy
-            const dataset_file = try dir.openFile(DATASET_FILENAME, .{});
-            defer dataset_file.close();
+            const dataset_file = try dir.openFile(io, DATASET_FILENAME, .{});
+            defer dataset_file.close(io);
 
-            var dataset_reader = dataset_file.reader(&read_buffer);
+            var dataset_reader = dataset_file.reader(io, &read_buffer);
             const dataset = try loadDataset(&dataset_reader.interface, allocator);
             errdefer dataset.deinit(allocator);
 
             // Load graph.npy
-            const graph_file = try dir.openFile(GRAPH_FILENAME, .{});
-            defer graph_file.close();
+            const graph_file = try dir.openFile(io, GRAPH_FILENAME, .{});
+            defer graph_file.close(io);
 
-            var graph_reader = graph_file.reader(&read_buffer);
+            var graph_reader = graph_file.reader(io, &read_buffer);
             const graph_data, const graph_degree = try loadGraph(
                 &graph_reader.interface,
                 allocator,
@@ -415,11 +416,13 @@ pub fn Index(comptime T: type, comptime N: usize) type {
         pub fn save(
             self: *const Self,
             dir_path: []const u8,
+            io: std.Io,
             allocator: std.mem.Allocator,
         ) !void {
+            const cwd = std.Io.Dir.cwd();
             // Make sure the directory exists before trying to create the file
-            std.fs.cwd().access(dir_path, .{}) catch |e| switch (e) {
-                error.FileNotFound => try std.fs.cwd().makeDir(dir_path),
+            cwd.access(io, dir_path, .{}) catch |e| switch (e) {
+                error.FileNotFound => try cwd.createDir(io, dir_path, .default_dir),
                 else => return e,
             };
 
@@ -428,9 +431,9 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             // Create the dataset file and writer
             const dataset_file_path = try std.fs.path.join(allocator, &[_][]const u8{ dir_path, DATASET_FILENAME });
             defer allocator.free(dataset_file_path);
-            const dataset_file = try std.fs.cwd().createFile(dataset_file_path, .{});
-            defer dataset_file.close();
-            var dataset_file_writer = dataset_file.writer(&write_buffer);
+            const dataset_file = try cwd.createFile(io, dataset_file_path, .{});
+            defer dataset_file.close(io);
+            var dataset_file_writer = dataset_file.writer(io, &write_buffer);
             // Write the dataset to the file
             try self.dataset.toNpyFile(&dataset_file_writer.interface, allocator);
             try dataset_file_writer.interface.flush();
@@ -438,9 +441,9 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             // Create the graph file and writer
             const graph_file_path = try std.fs.path.join(allocator, &[_][]const u8{ dir_path, GRAPH_FILENAME });
             defer allocator.free(graph_file_path);
-            const graph_file = try std.fs.cwd().createFile(graph_file_path, .{});
-            defer graph_file.close();
-            var graph_file_writer = graph_file.writer(&write_buffer);
+            const graph_file = try cwd.createFile(io, graph_file_path, .{});
+            defer graph_file.close(io);
+            var graph_file_writer = graph_file.writer(io, &write_buffer);
             // Write the graph to the file
             try self.writeGraph(&graph_file_writer.interface, allocator);
             try graph_file_writer.interface.flush();
@@ -492,7 +495,8 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             dataset: Dataset,
             config: BuildConfig,
             allocator: std.mem.Allocator,
-        ) (if (do_timing) (std.time.Timer.Error || BuildError) else BuildError)!struct {
+            io: if (do_timing) std.Io else void,
+        ) (if (do_timing) (std.Io.Clock.ResolutionError || BuildError) else BuildError)!struct {
             Self,
             if (do_timing) BuildTiming else void,
         } {
@@ -500,12 +504,17 @@ pub fn Index(comptime T: type, comptime N: usize) type {
                 return error.InvalidBuildConfig;
             }
 
+            const clock = if (do_timing) std.Io.Clock.awake else {};
+            if (do_timing) {
+                const resolution = try std.Io.Clock.resolution(clock, io);
+                if (resolution.nanoseconds <= 0) return std.Io.Clock.ResolutionError.ClockUnavailable;
+            }
+
             var timing: if (do_timing) BuildTiming else void = undefined;
-            var timer_total = if (do_timing) try std.time.Timer.start() else {};
-            var timer = if (do_timing) try std.time.Timer.start() else {};
+            const start_total = if (do_timing) std.Io.Timestamp.now(io, clock) else {};
 
             log.info("Training initial graph with degree {d} using NN-Descent...", .{config.nn_descent_config.num_neighbors_per_node});
-            if (do_timing) timer.reset();
+            var start = if (do_timing) std.Io.Timestamp.now(io, clock) else {};
             var nn_descent = try NNDescent(T, N).init(
                 &dataset,
                 config.nn_descent_config,
@@ -514,14 +523,15 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             nn_descent.train();
             nn_descent.sortNeighbors();
             if (do_timing) {
-                timing.nn_descent_ns = timer.read();
-                log.info("NN Descent time: {}ms\n", .{timing.nn_descent_ns / std.time.ns_per_ms});
+                const nn_descent_duration = start.untilNow(io, clock);
+                log.info("NN Descent time: {}ms\n", .{nn_descent_duration.toMilliseconds()});
+                timing.nn_descent_ns = nn_descent_duration.nanoseconds;
             }
 
             const num_neighbor_entries = nn_descent.neighbors_list.entries.len;
 
             log.info("Freeing NN-Descent resources...", .{});
-            if (do_timing) timer.reset();
+            if (do_timing) start = std.Io.Timestamp.now(io, clock);
 
             // Allocate optimizer entries first.
             // We copy neighbor IDs from nn_descent to optimizer_entries's neighbor_id slice.
@@ -532,7 +542,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             optimizer_entries.len = num_neighbor_entries;
 
             @memcpy(optimizer_entries.items(.neighbor_id), nn_descent.neighbors_list.entries.items(.neighbor_id));
-            // Free everything in nn_descent except the thread pool. Optimizer will reuse the thread pool.
+            // Free everything in nn_descent except the threaded backend. Optimizer will reuse the threads.
             nn_descent.neighbors_list.deinit(allocator);
             nn_descent.neighbor_candidates_new.deinit(allocator);
             nn_descent.neighbor_candidates_old.deinit(allocator);
@@ -541,8 +551,9 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             allocator.free(nn_descent.graph_update_counts_buffer);
             allocator.free(nn_descent.node_ids_random);
             if (do_timing) {
-                timing.resource_free_ns = timer.read();
-                log.info("Resource free time: {}ms\n", .{timing.resource_free_ns / std.time.ns_per_ms});
+                const resource_free_duration = start.untilNow(io, clock);
+                log.info("Resource free time: {}ms\n", .{resource_free_duration.toMilliseconds()});
+                timing.resource_free_ns = resource_free_duration.nanoseconds;
             }
 
             const num_nodes = nn_descent.neighbors_list.num_nodes;
@@ -555,28 +566,30 @@ pub fn Index(comptime T: type, comptime N: usize) type {
                 allocator,
             ));
 
-            const thread_pool = nn_descent.thread_pool;
-            defer if (thread_pool) |pool| {
-                pool.deinit();
-                allocator.destroy(pool);
-            };
+            const threaded = nn_descent.threaded;
+            defer {
+                threaded.deinit();
+                allocator.destroy(threaded);
+            }
 
             log.info("Optimizing graph with degree {d}...", .{config.graph_degree});
-            if (do_timing) timer.reset();
+            if (do_timing) start = std.Io.Timestamp.now(io, clock);
             var optimizer = mod_optimizer.Optimizer.init(
                 NeighborsList(true){
                     .entries = optimizer_entries.slice(),
                     .num_neighbors_per_node = num_neighbors_per_node,
                     .num_nodes = num_nodes,
                 },
-                thread_pool,
+                nn_descent.effective_num_threads,
+                threaded,
                 nn_descent.num_nodes_per_block,
             );
             var optimized_graph = try optimizer.optimize(config.graph_degree, allocator);
             defer optimized_graph.deinit(allocator);
             if (do_timing) {
-                timing.optimizer_ns = timer.read();
-                log.info("Optimizer time: {}ms\n", .{timing.optimizer_ns / std.time.ns_per_ms});
+                const optimizer_duration = start.untilNow(io, clock);
+                log.info("Optimizer time: {}ms\n", .{optimizer_duration.toMilliseconds()});
+                timing.optimizer_ns = optimizer_duration.nanoseconds;
             }
 
             const graph_data: []const usize = try allocator.dupe(usize, optimized_graph.entries.items(.neighbor_id));
@@ -587,7 +600,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
                 allocator,
             ));
 
-            if (do_timing) timing.total_ns = timer_total.read();
+            if (do_timing) timing.total_ns = start_total.untilNow(io, clock).nanoseconds;
             return .{
                 Self{
                     .dataset = dataset,
@@ -614,6 +627,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
                 dataset,
                 config,
                 allocator,
+                {},
             );
             return index;
         }
@@ -625,12 +639,14 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             dataset: Dataset,
             config: BuildConfig,
             allocator: std.mem.Allocator,
-        ) (std.time.Timer.Error || BuildError)!struct { Self, BuildTiming } {
+            io: std.Io,
+        ) (std.Io.Clock.ResolutionError || BuildError)!struct { Self, BuildTiming } {
             return buildImpl(
                 true,
                 dataset,
                 config,
                 allocator,
+                io,
             );
         }
 
@@ -647,7 +663,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             self: *const Self,
             queries: znpy.array.static.ConstStaticArray(T, 2),
             config: mod_searcher.SearchConfig,
-            seed: ?u64,
+            seed: u64,
             allocator: std.mem.Allocator,
         ) (SearchError || std.mem.Allocator.Error)!Searcher.SearchResult {
             const searcher = Searcher{
@@ -659,7 +675,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             return searcher.search(
                 &queries,
                 &config,
-                if (seed) |s| s else std.crypto.random.int(u64),
+                seed,
                 allocator,
             );
         }
@@ -710,10 +726,10 @@ fn testIndexRoundTrip(comptime T: type, comptime N: usize) !void {
 
     // Directory to write the index to. save() will create it if necessary.
     const dir_path: []const u8 = "test_index_roundtrip";
-    try idx.save(dir_path, std.testing.allocator);
+    try idx.save(dir_path, std.testing.io, std.testing.allocator);
 
     // Load the index back from disk
-    var loaded = try IDX.load(dir_path, std.testing.allocator);
+    var loaded = try IDX.load(dir_path, std.testing.io, std.testing.allocator);
     defer loaded.deinit(std.testing.allocator);
 
     // Compare metadata
@@ -725,18 +741,20 @@ fn testIndexRoundTrip(comptime T: type, comptime N: usize) !void {
     try std.testing.expectEqualSlices(T, idx.dataset.data_buffer, loaded.dataset.data_buffer);
     try std.testing.expectEqualSlices(usize, idx.graph, loaded.graph);
 
+    const cwd = std.Io.Dir.cwd();
+
     // Cleanup files and directory created by the test to avoid leaving artifacts.
     // Remove dataset.npy and graph.npy then remove directory.
     const dataset_file_path = try std.fs.path.join(std.testing.allocator, &[_][]const u8{ dir_path, IDX.DATASET_FILENAME });
     defer std.testing.allocator.free(dataset_file_path);
-    try std.fs.cwd().deleteFile(dataset_file_path);
+    try cwd.deleteFile(std.testing.io, dataset_file_path);
 
     const graph_file_path = try std.fs.path.join(std.testing.allocator, &[_][]const u8{ dir_path, IDX.GRAPH_FILENAME });
     defer std.testing.allocator.free(graph_file_path);
-    try std.fs.cwd().deleteFile(graph_file_path);
+    try cwd.deleteFile(std.testing.io, graph_file_path);
 
     // Remove the now-empty directory
-    try std.fs.cwd().deleteDir(dir_path);
+    try cwd.deleteDir(std.testing.io, dir_path);
 }
 
 test "index round-trip" {
@@ -790,6 +808,7 @@ test "Index - build() and buildWithTiming() produce identical results" {
         dataset,
         config,
         std.testing.allocator,
+        std.testing.io,
     );
     defer std.testing.allocator.free(idx_timing.graph);
 

@@ -82,11 +82,12 @@ fn runBenchmark(
             .num_neighbors_per_node = num_neighbors_per_node,
             .num_nodes = num_nodes,
         },
-        null,
+        nn_descent.num_threads,
+        nn_descent.threaded,
         nn_descent.num_nodes_per_block,
     );
 
-    const result = try optimizer.optimizeWithTiming(output_degree, allocator);
+    const result = try optimizer.optimizeWithTiming(output_degree, io, allocator);
 
     return BenchmarkResult{
         .vector_count = dataset.len,

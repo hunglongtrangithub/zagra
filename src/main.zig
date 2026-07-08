@@ -21,19 +21,15 @@ const HELP_TEMPLATE =
     \\
 ;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
-    defer {
-        const check = gpa.deinit();
-        std.debug.print("Heap check: {}\n", .{check});
-    }
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    var args = try std.process.argsWithAllocator(allocator);
+    var args = try init.minimal.args.iterateAllocator(allocator);
     defer args.deinit();
 
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     const exe_path = args.next() orelse @src().file;
@@ -199,14 +195,28 @@ pub fn main() !void {
     try stdout.print("\nBuilding index...\n", .{});
     try stdout.flush();
 
-    var timer = try std.time.Timer.start();
+    const clock: std.Io.Clock = .awake;
+    const valid_clock = blk: {
+        if (clock.resolution(io)) |r| {
+            if (r.nanoseconds > 0) {
+                break :blk true;
+            } else {
+                std.debug.print("Clock resolution is zero, cannot measure time accurately.\n", .{});
+                break :blk false;
+            }
+        } else |e| {
+            std.debug.print("Failed to get clock resolution: {}\n", .{e});
+            break :blk false;
+        }
+    };
+
+    var build_start = std.Io.Timestamp.now(io, clock);
     var index = try Index.build(dataset, build_config, allocator);
     defer index.deinit(allocator);
-    const build_time_ns = timer.read();
-    const build_time_s: f64 = @as(f64, @floatFromInt(build_time_ns)) / 1_000_000_000.0;
+    const build_time_s = build_start.untilNow(io, clock).toSeconds();
 
     try stdout.print("\n=== Build Complete ===\n", .{});
-    try stdout.print("Total build time: {:.3}s\n", .{build_time_s});
+    if (valid_clock) try stdout.print("Total build time: {}s\n", .{build_time_s});
     try stdout.print("\n=== Index Info ===\n", .{});
     try stdout.print("Number of nodes: {}\n", .{index.num_nodes});
     try stdout.print("Graph degree: {}\n", .{index.num_neighbors_per_node});
@@ -231,14 +241,14 @@ pub fn main() !void {
     if (save_path) |path| {
         try stdout.print("Saving index to {s}\n", .{path});
         try stdout.flush();
-        try index.save(path, allocator);
+        try index.save(path, io, allocator);
         try stdout.print("Index saved.\n", .{});
         try stdout.flush();
 
         // Load the index back from disk to verify
         try stdout.print("Loading index from {s}\n", .{path});
         try stdout.flush();
-        var loaded_index = try Index.load(path, allocator);
+        var loaded_index = try Index.load(path, io, allocator);
         defer loaded_index.deinit(allocator);
         try stdout.print("Index loaded. Verifying...\n", .{});
         try stdout.flush();
@@ -282,7 +292,7 @@ pub fn main() !void {
     try stdout.print("k (nearest neighbors): {}\n", .{k});
     try stdout.flush();
 
-    timer.reset();
+    const search_start = std.Io.Timestamp.now(io, clock);
     const search_result = index.search(
         queries_array.asConst(),
         search_config,
@@ -301,8 +311,8 @@ pub fn main() !void {
             else => return e,
         }
     };
-    const search_time = timer.read();
-    try stdout.print("Search time: {}ms\n", .{search_time / std.time.ns_per_ms});
+    const search_time_ms = search_start.untilNow(io, clock).toMilliseconds();
+    try stdout.print("Search time: {}ms\n", .{search_time_ms});
     defer search_result.neighbors.deinit(allocator);
     defer search_result.distances.deinit(allocator);
 

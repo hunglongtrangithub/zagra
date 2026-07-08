@@ -30,7 +30,8 @@ pub const SearchConfig = struct {
     /// Must be <= internal_k.
     search_width: usize = 1,
     /// Number of threads for parallel query processing. One thread takes one query.
-    /// Uses a thread pool if > 1, otherwise processes queries sequentially.
+    /// 0 or 1 means single-threaded (calling thread only).
+    /// N > 1 means N-1 worker threads + the calling thread = N threads total.
     num_threads: usize = 1,
 
     /// Computes the maximum number of iterations for the search using CAGRA heuristic.
@@ -55,12 +56,6 @@ pub const SearchConfig = struct {
         return max_iterations;
     }
 };
-
-/// Number of threads from an optional thread pool.
-/// Returns 1 if thread_pool is null, otherwise returns the number of threads in the pool.
-inline fn numThreads(thread_pool: ?*std.Thread.Pool) usize {
-    return if (thread_pool) |pool| pool.threads.len else 1;
-}
 
 /// Error set for search operations.
 pub const SearchError = error{
@@ -182,20 +177,21 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
             // Number of queries per block. 0 when number of queries or threads is 0.
             const num_queries_per_block: usize = @min(config.num_threads, num_queries);
 
-            // Thread pool with num_queries_per_block threads if num_queries_per_block > 1, otherwise null.
-            const thread_pool = if (num_queries_per_block != 1) blk: {
-                const pool = try allocator.create(std.Thread.Pool);
-                errdefer allocator.destroy(pool);
-                pool.init(.{
-                    .allocator = allocator,
-                    .n_jobs = num_queries_per_block,
-                }) catch return std.mem.Allocator.Error.OutOfMemory;
-                break :blk pool;
-            } else null;
-            defer if (thread_pool) |pool| {
-                pool.deinit();
-                allocator.destroy(pool);
+            // Always create Threaded. When num_queries_per_block <= 1, async_limit is .nothing
+            // so all tasks run inline on the calling thread.
+            const threaded = blk: {
+                const t = try allocator.create(std.Io.Threaded);
+                errdefer allocator.destroy(t);
+                t.* = std.Io.Threaded.init(allocator, .{
+                    .async_limit = if (num_queries_per_block <= 1) .nothing
+                    else .limited(num_queries_per_block - 1),
+                });
+                break :blk t;
             };
+            defer {
+                threaded.deinit();
+                allocator.destroy(threaded);
+            }
 
             const first_time_parent_flags_buffers = try allocator.alloc(bool, std.math.mul(
                 usize,
@@ -275,7 +271,7 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
                     config,
                     seed,
                     queries,
-                    thread_pool,
+                    threaded,
                     first_time_parent_flags_buffers,
                     first_time_candidate_flags_buffers,
                     node_ids_random,
@@ -300,7 +296,7 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
             config: *const SearchConfig,
             seed: u64,
             queries: *const ConstStaticArray(T, 2),
-            thread_pool: ?*std.Thread.Pool,
+            threaded: *std.Io.Threaded,
             first_time_parent_flags_buffers: []bool,
             first_time_candidate_flags_buffers: []bool,
             node_ids_random: []const usize,
@@ -310,7 +306,6 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
         ) void {
             const num_queries = queries.shape.dims[0];
             const k = config.k;
-            const num_threads = numThreads(thread_pool);
             const num_nodes = self.num_nodes;
             const search_buffer_size = config.internal_k + config.search_width * self.num_neighbors_per_node;
 
@@ -319,46 +314,31 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
                 std.debug.assert(neighbors.shape.dims[0] == num_queries and neighbors.shape.dims[1] == k and neighbors.shape.order == .C);
                 std.debug.assert(distances.shape.dims[0] == num_queries and distances.shape.dims[1] == k and distances.shape.order == .C);
 
-                std.debug.assert(first_time_parent_flags_buffers.len == num_threads * num_nodes);
-                std.debug.assert(first_time_candidate_flags_buffers.len == num_threads * num_nodes);
+                std.debug.assert(first_time_parent_flags_buffers.len == config.num_threads * num_nodes);
+                std.debug.assert(first_time_candidate_flags_buffers.len == config.num_threads * num_nodes);
                 std.debug.assert(node_ids_random.len == self.num_nodes);
 
-                std.debug.assert(search_buffers.len == num_threads * search_buffer_size);
+                std.debug.assert(search_buffers.len == config.num_threads * search_buffer_size);
             }
+
+            const num_threads = config.num_threads;
 
             // Query start is capped by num_queries to guard against out-of-range block_id.
             const query_start = @min(block_id * num_threads, num_queries);
             // num_queries_in_block <= num_threads.
             const num_queries_in_block = @min(query_start + num_threads, num_queries) - query_start;
 
-            if (thread_pool) |pool| {
-                var wait_group: std.Thread.WaitGroup = undefined;
-                wait_group.reset();
+            const io = threaded.io();
+            var group = std.Io.Group.init;
+            defer group.cancel(io);
 
-                for (0..num_queries_in_block) |query_idx| {
-                    const query_id = query_start + query_idx;
-                    pool.spawnWg(
-                        &wait_group,
-                        searchThread,
-                        .{
-                            self,
-                            queries.data_buffer[query_id * N ..][0..N],
-                            config,
-                            seed + @as(u64, @intCast(query_id)),
-                            first_time_parent_flags_buffers[query_idx * num_nodes ..][0..num_nodes],
-                            first_time_candidate_flags_buffers[query_idx * num_nodes ..][0..num_nodes],
-                            node_ids_random,
-                            search_buffers.subslice(query_idx * search_buffer_size, search_buffer_size),
-                            neighbors.data_buffer[query_id * k ..][0..k],
-                            distances.data_buffer[query_id * k ..][0..k],
-                        },
-                    );
-                }
-                pool.waitAndWork(&wait_group);
-            } else {
-                for (0..num_queries_in_block) |query_idx| {
-                    const query_id = query_start + query_idx;
-                    self.searchThread(
+            for (0..num_queries_in_block) |query_idx| {
+                const query_id = query_start + query_idx;
+                group.async(
+                    io,
+                    searchThread,
+                    .{
+                        self,
                         queries.data_buffer[query_id * N ..][0..N],
                         config,
                         seed + @as(u64, @intCast(query_id)),
@@ -368,9 +348,10 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
                         search_buffers.subslice(query_idx * search_buffer_size, search_buffer_size),
                         neighbors.data_buffer[query_id * k ..][0..k],
                         distances.data_buffer[query_id * k ..][0..k],
-                    );
-                }
+                    },
+                );
             }
+            group.await(io) catch {};
         }
 
         /// Initializes the search buffer for a new query search.
@@ -696,12 +677,12 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
             try std.testing.expectEqual(30, node_ids[2]);
             try std.testing.expectEqual(40, node_ids[3]);
 
-            var seen = std.AutoArrayHashMap(usize, void).init(std.testing.allocator);
-            defer seen.deinit();
+            var seen = std.AutoArrayHashMapUnmanaged(usize, void){};
+            defer seen.deinit(std.testing.allocator);
 
             for (0..internal_k) |i| {
                 try std.testing.expect(!seen.contains(node_ids[i]));
-                try seen.put(node_ids[i], {});
+                try seen.put(std.testing.allocator, node_ids[i], {});
             }
         }
 
