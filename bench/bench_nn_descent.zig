@@ -50,7 +50,7 @@ fn runBenchmark(
     var nn_descent = try NNDescent.init(&dataset, training_config, allocator);
     defer nn_descent.deinit(allocator);
 
-    const timing = try nn_descent.trainWithTiming(allocator);
+    const timing = try nn_descent.trainWithTiming(io, allocator);
 
     return BenchmarkResult{
         .vector_count = dataset.len,

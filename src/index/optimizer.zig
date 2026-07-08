@@ -6,12 +6,6 @@ const mod_types = @import("../types.zig");
 const mod_soa_slice = @import("soa_slice.zig");
 const mod_nn_descent = @import("nn_descent.zig");
 
-/// Number of threads from an optional thread pool.
-/// Returns 1 if thread pool is null, otherwise returns the number of threads in the pool.
-fn numThreads(thread_pool: ?*std.Thread.Pool) usize {
-    return if (thread_pool) |pool| pool.threads.len else 1;
-}
-
 pub const Optimizer = struct {
     pub const Error = error{
         /// The number of edges is too large to fit in memory.
@@ -23,11 +17,11 @@ pub const Optimizer = struct {
     };
 
     pub const OptimizationTiming = struct {
-        count_detours_ns: u64 = 0,
-        prune_ns: u64 = 0,
-        build_reverse_graph_ns: u64 = 0,
-        combine_ns: u64 = 0,
-        total_optimization_ns: u64 = 0,
+        count_detours_ns: i96 = 0,
+        prune_ns: i96 = 0,
+        build_reverse_graph_ns: i96 = 0,
+        combine_ns: i96 = 0,
+        total_optimization_ns: i96 = 0,
     };
 
     /// Generic neighbors list container.
@@ -91,12 +85,13 @@ pub const Optimizer = struct {
     /// Number of nodes in one block for block-wise computation. Capped by the total number of nodes.
     num_nodes_per_block: usize,
 
-    /// Thread pool for multi-threaded operations.
-    /// If null, the optimizer will run in single-threaded mode.
-    /// If the thread pool has 0 threads, the optimizer will do nothing.
-    thread_pool: ?*std.Thread.Pool,
-    /// Wait group for synchronizing threads.
-    wait_group: std.Thread.WaitGroup,
+    /// Maximum number of threads participating in task processing.
+    /// 0 or 1 means single-threaded (calling thread only).
+    /// N > 1 means N-1 worker threads + the calling thread = N threads total.
+    num_threads: usize,
+    /// Threaded I/O backend providing the worker thread pool.
+    /// Borrowed from caller (not freed in deinit).
+    threaded: *std.Io.Threaded,
 
     fn OptimizeResult(comptime do_timing: bool) type {
         return struct {
@@ -107,17 +102,18 @@ pub const Optimizer = struct {
 
     const Self = @This();
 
-    /// Initializes the optimizer with the borrowed neighbors list, thread pool, and number of nodes per block.
+    /// Initializes the optimizer with the borrowed neighbors list, threaded backend, and number of nodes per block.
     pub fn init(
         neighbors_list: NeighborsList(true),
-        thread_pool: ?*std.Thread.Pool,
+        num_threads: usize,
+        threaded: *std.Io.Threaded,
         num_nodes_per_block: usize,
     ) Self {
         var optimizer: Self = undefined;
         optimizer.neighbors_list = neighbors_list;
         optimizer.num_nodes_per_block = @min(num_nodes_per_block, neighbors_list.num_nodes);
-        optimizer.thread_pool = thread_pool;
-        optimizer.wait_group.reset();
+        optimizer.num_threads = num_threads;
+        optimizer.threaded = threaded;
 
         return optimizer;
     }
@@ -137,9 +133,11 @@ pub const Optimizer = struct {
         graph_degree: usize,
         allocator: std.mem.Allocator,
         comptime do_timing: bool,
-    ) (Error || std.mem.Allocator.Error || (if (do_timing) std.time.Timer.Error else error{}))!OptimizeResult(do_timing) {
-        var total_timer = if (do_timing) try std.time.Timer.start() else {};
-        var timer = if (do_timing) try std.time.Timer.start() else {};
+        io: if (do_timing) std.Io else void,
+    ) (Error || std.mem.Allocator.Error)!OptimizeResult(do_timing) {
+        const clock: std.Io.Clock = if (do_timing) .awake else undefined;
+        const total_timer = if (do_timing) std.Io.Timestamp.now(io, clock) else {};
+        var timer = if (do_timing) std.Io.Timestamp.now(io, clock) else {};
 
         const num_nodes = self.neighbors_list.num_nodes;
         const input_degree = self.neighbors_list.num_neighbors_per_node;
@@ -161,7 +159,7 @@ pub const Optimizer = struct {
         const two_hop_neighbors_buffer_size =
             std.math.mul(
                 usize,
-                numThreads(self.thread_pool),
+                self.num_threads,
                 num_two_hop_neighbors_per_node,
             ) catch return Error.NumNeighborsPerNodeTooLarge;
         const two_hop_neighbors_buffer = try allocator.alloc(usize, two_hop_neighbors_buffer_size);
@@ -176,37 +174,37 @@ pub const Optimizer = struct {
         var timing = if (do_timing) OptimizationTiming{} else {};
 
         log.info("Counting detours in the input graph...", .{});
-        if (do_timing) timer.reset();
+        if (do_timing) timer = std.Io.Timestamp.now(io, clock);
         self.countDetours(
             two_hop_neighbors_buffer,
             num_two_hop_neighbors_per_node,
         );
-        if (do_timing) timing.count_detours_ns = timer.read();
+        if (do_timing) timing.count_detours_ns = timer.untilNow(io, clock).nanoseconds;
 
         log.info("Pruning edges from the graph...", .{});
-        if (do_timing) timer.reset();
+        if (do_timing) timer = std.Io.Timestamp.now(io, clock);
         self.prune(&output_graph);
-        if (do_timing) timing.prune_ns = timer.read();
+        if (do_timing) timing.prune_ns = timer.untilNow(io, clock).nanoseconds;
 
         log.info("Building reverse graph from pruned graph...", .{});
-        if (do_timing) timer.reset();
+        if (do_timing) timer = std.Io.Timestamp.now(io, clock);
         self.buildReverseGraph(
             &output_graph,
             reverse_neighbor_counts,
             reverse_neighbor_ids,
         );
-        if (do_timing) timing.build_reverse_graph_ns = timer.read();
+        if (do_timing) timing.build_reverse_graph_ns = timer.untilNow(io, clock).nanoseconds;
 
         log.info("Combining edges from pruned graph and reverse graph...", .{});
-        if (do_timing) timer.reset();
+        if (do_timing) timer = std.Io.Timestamp.now(io, clock);
         self.combine(
             &output_graph,
             reverse_neighbor_counts,
             reverse_neighbor_ids,
         );
-        if (do_timing) timing.combine_ns = timer.read();
+        if (do_timing) timing.combine_ns = timer.untilNow(io, clock).nanoseconds;
 
-        if (do_timing) timing.total_optimization_ns = total_timer.read();
+        if (do_timing) timing.total_optimization_ns = total_timer.untilNow(io, clock).nanoseconds;
 
         return .{
             .graph = output_graph,
@@ -225,6 +223,7 @@ pub const Optimizer = struct {
             graph_degree,
             allocator,
             false,
+            {},
         );
         return optimize_result.graph;
     }
@@ -234,8 +233,9 @@ pub const Optimizer = struct {
     pub fn optimizeWithTiming(
         self: *Self,
         graph_degree: usize,
+        io: std.Io,
         allocator: std.mem.Allocator,
-    ) (Error || std.mem.Allocator.Error || std.time.Timer.Error)!struct {
+    ) (Error || std.mem.Allocator.Error)!struct {
         graph: NeighborsList(false),
         timing: OptimizationTiming,
     } {
@@ -243,6 +243,7 @@ pub const Optimizer = struct {
             graph_degree,
             allocator,
             true,
+            io,
         );
         return .{
             .graph = optimize_result.graph,
@@ -261,12 +262,12 @@ pub const Optimizer = struct {
     }
 
     /// Number of nodes each thread should process for one block.
-    /// Zero when `self.num_nodes_per_block` is 0 or when the thread pool has 0 threads.
+    /// Zero when `self.num_nodes_per_block` is 0.
     fn numBlockNodesPerThread(self: *const Self) usize {
         return std.math.divCeil(
             usize,
             self.num_nodes_per_block,
-            numThreads(self.thread_pool),
+            self.num_threads,
         ) catch 0;
     }
 
@@ -297,45 +298,38 @@ pub const Optimizer = struct {
     }
 
     /// Processes a block of nodes for detour counting.
-    /// Splits the block across threads if a thread pool is available.
+    /// Splits the block across threads.
     fn countDetoursBlock(
         self: *Self,
         block_id: usize,
         two_hop_neighbors_buffer: []usize,
         num_two_hop_neighbors_per_node: usize,
     ) void {
-        if (builtin.mode != .ReleaseFast) std.debug.assert(two_hop_neighbors_buffer.len == numThreads(self.thread_pool) * num_two_hop_neighbors_per_node);
+        if (builtin.mode != .ReleaseFast) std.debug.assert(two_hop_neighbors_buffer.len == self.num_threads * num_two_hop_neighbors_per_node);
         const block_start = @min(block_id * self.num_nodes_per_block, self.neighbors_list.num_nodes);
         const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
 
-        if (self.thread_pool) |pool| {
-            self.wait_group.reset();
-            const num_block_nodes_per_thread = self.numBlockNodesPerThread();
-            for (0..pool.threads.len) |thread_id| {
-                const node_id_start = @min(block_start + thread_id * num_block_nodes_per_thread, block_end);
-                const node_id_end = @min(node_id_start + num_block_nodes_per_thread, block_end);
-                const two_hop_neighbors_buffer_start = thread_id * num_two_hop_neighbors_per_node;
-                const two_hop_neighbors_buffer_end = two_hop_neighbors_buffer_start + num_two_hop_neighbors_per_node;
-                pool.spawnWg(
-                    &self.wait_group,
-                    countDetoursThread,
-                    .{
-                        &self.neighbors_list,
-                        node_id_start,
-                        node_id_end,
-                        two_hop_neighbors_buffer[two_hop_neighbors_buffer_start..two_hop_neighbors_buffer_end],
-                    },
-                );
-            }
-            pool.waitAndWork(&self.wait_group);
-        } else {
-            countDetoursThread(
-                &self.neighbors_list,
-                block_start,
-                block_end,
-                two_hop_neighbors_buffer,
+        const io = self.threaded.io();
+        var group = std.Io.Group.init;
+        defer group.cancel(io);
+        const num_block_nodes_per_thread = self.numBlockNodesPerThread();
+        for (0..self.num_threads) |thread_id| {
+            const node_id_start = @min(block_start + thread_id * num_block_nodes_per_thread, block_end);
+            const node_id_end = @min(node_id_start + num_block_nodes_per_thread, block_end);
+            const two_hop_neighbors_buffer_start = thread_id * num_two_hop_neighbors_per_node;
+            const two_hop_neighbors_buffer_end = two_hop_neighbors_buffer_start + num_two_hop_neighbors_per_node;
+            group.async(
+                io,
+                countDetoursThread,
+                .{
+                    &self.neighbors_list,
+                    node_id_start,
+                    node_id_end,
+                    two_hop_neighbors_buffer[two_hop_neighbors_buffer_start..two_hop_neighbors_buffer_end],
+                },
             );
         }
+        group.await(io) catch {};
     }
 
     /// Counts detours for a range of nodes in the range [node_id_start, node_id_end).
@@ -427,7 +421,7 @@ pub const Optimizer = struct {
     }
 
     /// Processes a block of nodes for pruning.
-    /// Splits the block across threads if a thread pool is available.
+    /// Splits the block across threads.
     fn pruneBlock(
         self: *Self,
         block_id: usize,
@@ -436,33 +430,26 @@ pub const Optimizer = struct {
         const block_start = @min(block_id * self.num_nodes_per_block, self.neighbors_list.num_nodes);
         const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
 
-        if (self.thread_pool) |pool| {
-            self.wait_group.reset();
-            const num_nodes_per_thread = self.numBlockNodesPerThread();
-            for (0..pool.threads.len) |thread_id| {
-                const node_id_start = @min(block_start + thread_id * num_nodes_per_thread, block_end);
-                const node_id_end = @min(node_id_start + num_nodes_per_thread, block_end);
-                // SAFETY: Each thread only touches neighbor data for nodes in the range [node_id_start, node_id_end), so no data races.
-                pool.spawnWg(
-                    &self.wait_group,
-                    pruneThread,
-                    .{
-                        &self.neighbors_list,
-                        pruned_graph,
-                        node_id_start,
-                        node_id_end,
-                    },
-                );
-            }
-            pool.waitAndWork(&self.wait_group);
-        } else {
-            pruneThread(
-                &self.neighbors_list,
-                pruned_graph,
-                block_start,
-                block_end,
+        const io = self.threaded.io();
+        var group = std.Io.Group.init;
+        defer group.cancel(io);
+        const num_nodes_per_thread = self.numBlockNodesPerThread();
+        for (0..self.num_threads) |thread_id| {
+            const node_id_start = @min(block_start + thread_id * num_nodes_per_thread, block_end);
+            const node_id_end = @min(node_id_start + num_nodes_per_thread, block_end);
+            // SAFETY: Each thread only touches neighbor data for nodes in the range [node_id_start, node_id_end), so no data races.
+            group.async(
+                io,
+                pruneThread,
+                .{
+                    &self.neighbors_list,
+                    pruned_graph,
+                    node_id_start,
+                    node_id_end,
+                },
             );
         }
+        group.await(io) catch {};
     }
 
     /// Prunes neighbors based on detour counts for a range of nodes using counting-based selection.
@@ -570,7 +557,7 @@ pub const Optimizer = struct {
     }
 
     /// Processes a block of nodes for building the reverse graph.
-    /// Splits the block across threads if a thread pool is available.
+    /// Splits the block across threads.
     fn buildReverseGraphBlock(
         self: *Self,
         block_id: usize,
@@ -581,36 +568,28 @@ pub const Optimizer = struct {
         const block_start = @min(block_id * self.num_nodes_per_block, self.neighbors_list.num_nodes);
         const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
 
-        if (self.thread_pool) |pool| {
-            self.wait_group.reset();
-            const num_nodes_per_thread = self.numBlockNodesPerThread();
-            for (0..pool.threads.len) |thread_id| {
-                const node_id_start = @min(block_start + thread_id * num_nodes_per_thread, block_end);
-                const node_id_end = @min(node_id_start + num_nodes_per_thread, block_end);
-                // SAFETY: Multiple threads can write to the same reverse count/buffer concurrently,
-                // but atomicRmw ensures no data races
-                pool.spawnWg(
-                    &self.wait_group,
-                    buildReverseGraphThread,
-                    .{
-                        pruned_graph,
-                        reverse_neighbor_counts,
-                        reverse_neighbor_ids,
-                        node_id_start,
-                        node_id_end,
-                    },
-                );
-            }
-            pool.waitAndWork(&self.wait_group);
-        } else {
-            buildReverseGraphThread(
-                pruned_graph,
-                reverse_neighbor_counts,
-                reverse_neighbor_ids,
-                block_start,
-                block_end,
+        const io = self.threaded.io();
+        var group = std.Io.Group.init;
+        defer group.cancel(io);
+        const num_nodes_per_thread = self.numBlockNodesPerThread();
+        for (0..self.num_threads) |thread_id| {
+            const node_id_start = @min(block_start + thread_id * num_nodes_per_thread, block_end);
+            const node_id_end = @min(node_id_start + num_nodes_per_thread, block_end);
+            // SAFETY: Multiple threads can write to the same reverse count/buffer concurrently,
+            // but atomicRmw ensures no data races
+            group.async(
+                io,
+                buildReverseGraphThread,
+                .{
+                    pruned_graph,
+                    reverse_neighbor_counts,
+                    reverse_neighbor_ids,
+                    node_id_start,
+                    node_id_end,
+                },
             );
         }
+        group.await(io) catch {};
     }
 
     /// Builds reverse graph for a range of source nodes.
@@ -671,7 +650,7 @@ pub const Optimizer = struct {
     }
 
     /// Processes a block of nodes for combining graphs.
-    /// Splits the block across threads if a thread pool is available.
+    /// Splits the block across threads.
     fn combineBlock(
         self: *Self,
         block_id: usize,
@@ -682,35 +661,27 @@ pub const Optimizer = struct {
         const block_start = @min(block_id * self.num_nodes_per_block, self.neighbors_list.num_nodes);
         const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
 
-        if (self.thread_pool) |pool| {
-            self.wait_group.reset();
-            const num_nodes_per_thread = self.numBlockNodesPerThread();
-            for (0..pool.threads.len) |thread_id| {
-                const node_id_start = @min(block_start + thread_id * num_nodes_per_thread, block_end);
-                const node_id_end = @min(node_id_start + num_nodes_per_thread, block_end);
-                // SAFETY: Each thread only touches neighbor data for nodes in the range [node_id_start, node_id_end), so no data races.
-                pool.spawnWg(
-                    &self.wait_group,
-                    combineThread,
-                    .{
-                        pruned_graph,
-                        reverse_neighbor_counts,
-                        reverse_neighbor_ids,
-                        node_id_start,
-                        node_id_end,
-                    },
-                );
-            }
-            pool.waitAndWork(&self.wait_group);
-        } else {
-            combineThread(
-                pruned_graph,
-                reverse_neighbor_counts,
-                reverse_neighbor_ids,
-                block_start,
-                block_end,
+        const io = self.threaded.io();
+        var group = std.Io.Group.init;
+        defer group.cancel(io);
+        const num_nodes_per_thread = self.numBlockNodesPerThread();
+        for (0..self.num_threads) |thread_id| {
+            const node_id_start = @min(block_start + thread_id * num_nodes_per_thread, block_end);
+            const node_id_end = @min(node_id_start + num_nodes_per_thread, block_end);
+            // SAFETY: Each thread only touches neighbor data for nodes in the range [node_id_start, node_id_end), so no data races.
+            group.async(
+                io,
+                combineThread,
+                .{
+                    pruned_graph,
+                    reverse_neighbor_counts,
+                    reverse_neighbor_ids,
+                    node_id_start,
+                    node_id_end,
+                },
             );
         }
+        group.await(io) catch {};
     }
 
     /// Combines the edges from pruned and reverse graphs for a range of nodes, and store them on the pruned graph.
@@ -805,15 +776,18 @@ test "count detours" {
         .entries = entries.slice(),
     };
 
+    var test_threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer test_threaded.deinit();
     var optimizer = Optimizer.init(
         neighbors_list,
-        null,
+        1,
+        &test_threaded,
         2,
     );
     const num_two_hop_neighbors_per_node = (3 -| 1) * (3 -| 1);
     const two_hop_neighbors_buffer = try std.testing.allocator.alloc(
         usize,
-        num_two_hop_neighbors_per_node * numThreads(optimizer.thread_pool),
+        num_two_hop_neighbors_per_node * optimizer.num_threads,
     );
     defer std.testing.allocator.free(two_hop_neighbors_buffer);
     optimizer.countDetours(
@@ -871,7 +845,9 @@ test "prune - output degree" {
     };
 
     // Verify output has correct degree
-    var optimizer = Optimizer.init(input_graph, null, 2);
+    var test_threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer test_threaded.deinit();
+    var optimizer = Optimizer.init(input_graph, 1, &test_threaded, 2);
 
     // Prune to output degree 2
     var output_graph = try Optimizer.NeighborsList(false).init(4, 2, std.testing.allocator);
@@ -927,7 +903,9 @@ test "combine - correct degree" {
         .num_neighbors_per_node = 4,
         .entries = undefined,
     };
-    var optimizer = Optimizer.init(input_graph, null, 1);
+    var test_threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer test_threaded.deinit();
+    var optimizer = Optimizer.init(input_graph, 1, &test_threaded, 1);
 
     // Reverse neighbor IDs and counts
     const reverse_ids = [_]usize{
@@ -985,7 +963,9 @@ test "edge case - single node graph" {
         .entries = entries.slice(),
     };
 
-    var optimizer = Optimizer.init(input_graph, null, 1);
+    var test_threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer test_threaded.deinit();
+    var optimizer = Optimizer.init(input_graph, 1, &test_threaded, 1);
 
     var output_graph = try optimizer.optimize(output_degree, std.testing.allocator);
     defer output_graph.deinit(std.testing.allocator);
@@ -1022,13 +1002,15 @@ test "optimize and optimizeWithTiming produce identical results" {
         .entries = entries.slice(),
     };
 
-    var optimizer = Optimizer.init(neighbors_list, null, 2);
+    var test_threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer test_threaded.deinit();
+    var optimizer = Optimizer.init(neighbors_list, 1, &test_threaded, 2);
 
     const output_degree: usize = 2;
     var result1 = try optimizer.optimize(output_degree, std.testing.allocator);
     defer result1.deinit(std.testing.allocator);
 
-    var result2 = try optimizer.optimizeWithTiming(output_degree, std.testing.allocator);
+    var result2 = try optimizer.optimizeWithTiming(output_degree, std.testing.io, std.testing.allocator);
     defer result2.graph.deinit(std.testing.allocator);
 
     try std.testing.expectEqualSlices(

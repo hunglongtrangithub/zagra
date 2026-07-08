@@ -238,7 +238,7 @@ pub fn testConversion(comptime T: type, num_vecs: usize, dim: usize) !void {
         defer std.testing.allocator.free(vec_slice);
         for (0..num_vecs) |i| {
             const start = i * vec_size;
-            std.mem.writeInt(i32, @ptrCast(vecs_bytes[start..][0..@sizeOf(i32)]), dim_i32, .little);
+            std.mem.writeInt(i32, @ptrCast(vecs_bytes[start .. start + @sizeOf(i32)]), dim_i32, .little);
             @memcpy(vec_slice, original[i * dim ..][0..dim]);
             std.mem.byteSwapAllElements(T, vec_slice);
             @memcpy(vecs_bytes[start + @sizeOf(i32) .. start + vec_size], std.mem.sliceAsBytes(vec_slice));
@@ -261,7 +261,8 @@ pub fn testConversion(comptime T: type, num_vecs: usize, dim: usize) !void {
         const vecs_file = try tmp_dir.dir.createFile(io, vecs_file_name, .{});
         defer vecs_file.close(io);
 
-        var vecs_writer = vecs_file.writer(&.{});
+        var write_buf: [4096]u8 = undefined;
+        var vecs_writer = vecs_file.writer(io, &write_buf);
         const writer = &vecs_writer.interface;
         try writer.writeAll(vecs_bytes);
         try writer.flush();
@@ -278,7 +279,7 @@ pub fn testConversion(comptime T: type, num_vecs: usize, dim: usize) !void {
     }
 
     // Read the npy file content back and check that it matches the original data.
-    const npy_content = try tmp_dir.dir.readFileAlloc(std.testing.allocator, npy_file_name, std.math.maxInt(usize));
+    const npy_content = try tmp_dir.dir.readFileAlloc(io, npy_file_name, std.testing.allocator, .unlimited);
     defer std.testing.allocator.free(npy_content);
 
     const array = try znpy.array.static.StaticArray(T, 2).fromFileBuffer(npy_content, std.testing.allocator);
