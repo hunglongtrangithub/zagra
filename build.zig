@@ -13,9 +13,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // =========================================================================
     // Dependencies
-    // =========================================================================
 
     // Create znpy dependency
     const znpy_dep = b.dependency("znpy", .{
@@ -24,9 +22,7 @@ pub fn build(b: *std.Build) void {
     });
     const znpy_mod = znpy_dep.module("znpy");
 
-    // =========================================================================
     // Modules
-    // =========================================================================
 
     // Create zagra module
     const zagra_mod = b.addModule("zagra", .{
@@ -66,9 +62,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // =========================================================================
     // HNSW C++ Library
-    // =========================================================================
 
     // Compile C++ source files
     hnsw_mod.addCSourceFile(.{
@@ -81,9 +75,7 @@ pub fn build(b: *std.Build) void {
     });
     hnsw_mod.link_libcpp = true;
 
-    // =========================================================================
     // Executables
-    // =========================================================================
 
     // Create zagra executable
     // Will be automatically installed with `zig build`
@@ -132,9 +124,7 @@ pub fn build(b: *std.Build) void {
     hnsw_exe.root_module.link_libcpp = true;
     b.installArtifact(hnsw_exe);
 
-    // =========================================================================
     // Tests
-    // =========================================================================
 
     // Add test steps for both the zagra module and the executable
     const zagra_mod_tests = b.addTest(.{ .root_module = zagra_mod });
@@ -152,9 +142,7 @@ pub fn build(b: *std.Build) void {
     const hnsw_exe_tests = b.addTest(.{ .root_module = hnsw_exe.root_module });
     const run_hnsw_exe_tests = b.addRunArtifact(hnsw_exe_tests);
 
-    // =========================================================================
     // Run Steps
-    // =========================================================================
 
     // Create run step for the main executable
     // Binary is installed first before running
@@ -213,9 +201,7 @@ pub fn build(b: *std.Build) void {
         }
     }.make;
 
-    // =========================================================================
     // Test Step
-    // =========================================================================
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_zagra_mod_tests.step);

@@ -630,6 +630,12 @@ pub fn NNDescent(
             node_id_end: usize,
             seed: u64,
         ) void {
+            // FIXME: Each thread iterates over ALL nodes (full neighbors_list scan) but only
+            // writes to its own disjoint range [node_id_start, node_id_end). With N threads,
+            // this causes N× redundant reads of the entire neighbors_list per iteration,
+            // wasting memory bandwidth (e.g. 32 threads × 5 GB = 160 GB traffic for 10M nodes).
+            // Consider restructuring to partition work so each thread only reads nodes it owns,
+            // or use a shared read pass with per-thread write buffers.
             // NOTE: When node_id_start == node_id_end, nothing gets added to the candidate lists
             if (builtin.mode != .ReleaseFast) std.debug.assert(node_id_start <= node_id_end and node_id_end <= neighbors_list.num_nodes);
 
@@ -704,6 +710,9 @@ pub fn NNDescent(
                     const neighbor_id = neighbor_id_slice[neighbor_idx];
                     if (builtin.mode != .ReleaseFast) std.debug.assert(neighbor_id < neighbors_list.num_nodes);
 
+                    // FIXME: indexOfScalar is a linear scan of the candidate list (O(degree))
+                    // per neighbor, making this O(degree²) per node. Consider using a hash set
+                    // or bitset for O(1) lookups if degree is large.
                     if (std.mem.indexOfScalar(
                         usize,
                         neighbor_candidate_id_slice,

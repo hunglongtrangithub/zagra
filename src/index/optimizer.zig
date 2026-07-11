@@ -618,6 +618,10 @@ pub const Optimizer = struct {
             for (neighbor_ids) |node_id_dst| {
                 if (builtin.mode != .ReleaseFast) std.debug.assert(node_id_dst < num_nodes);
                 // Atomically increment the counter and get the previous value (position to write)
+                // FIXME: reverse_neighbor_counts and reverse_neighbor_ids lack per-element
+                // cache-line padding. Adjacent 8-byte elements share 64-byte cache lines,
+                // causing false sharing when multiple threads atomically RMW nearby counts
+                // or write to adjacent slots in the same row.
                 const slot = @atomicRmw(usize, &reverse_neighbor_counts[node_id_dst], .Add, 1, .monotonic);
                 // Only write if there's room; silently drop if buffer is full
                 if (slot < degree) {
