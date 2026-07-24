@@ -106,7 +106,6 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    b.installArtifact(texmex_exe);
 
     // Create hnsw demo executable
     // Will be automatically installed with `zig build`
@@ -122,7 +121,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     hnsw_exe.root_module.link_libcpp = true;
-    b.installArtifact(hnsw_exe);
 
     // Tests
 
@@ -142,23 +140,13 @@ pub fn build(b: *std.Build) void {
     const hnsw_exe_tests = b.addTest(.{ .root_module = hnsw_exe.root_module });
     const run_hnsw_exe_tests = b.addRunArtifact(hnsw_exe_tests);
 
-    // Run Steps
+    // Steps
 
-    // Create run step for the main executable
-    // Binary is installed first before running
-    const zagra_run_cmd = b.addRunArtifact(zagra_exe);
-    if (b.args) |args| zagra_run_cmd.addArgs(args);
-    zagra_run_cmd.step.dependOn(b.getInstallStep());
-    b.step("run", "Run the app").dependOn(&zagra_run_cmd.step);
+    const texmex_install = b.addInstallArtifact(texmex_exe, .{});
+    b.step("texmex", "Build the TEXMEX ANN vector set downloader").dependOn(&texmex_install.step);
 
-    const texmex_run_cmd = b.addRunArtifact(texmex_exe);
-    if (b.args) |args| texmex_run_cmd.addArgs(args);
-    b.step("texmex", "Run the TEXMEX ANN vector set downloader").dependOn(&texmex_run_cmd.step);
-
-    const hnsw_run_cmd = b.addRunArtifact(hnsw_exe);
-    if (b.args) |args| hnsw_run_cmd.addArgs(args);
-    hnsw_run_cmd.step.dependOn(b.getInstallStep());
-    b.step("hnsw", "Run the hnsw example").dependOn(&hnsw_run_cmd.step);
+    const hnsw_install = b.addInstallArtifact(hnsw_exe, .{});
+    b.step("hnsw", "Build the hnsw example").dependOn(&hnsw_install.step);
 
     // Create benchmark executables and run steps
     // Binary is installed first before running
