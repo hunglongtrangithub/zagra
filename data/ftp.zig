@@ -58,7 +58,6 @@ pub fn downloadFiles(io: std.Io, allocator: std.mem.Allocator, items: []const Do
     for (0..total_tasks) |_| std.debug.print("\n", .{});
 
     // Hide cursor during downloads
-    if (builtin.os.tag == .windows) enableWindowsAnsi();
     std.debug.print("\x1b[?25l", .{});
     defer std.debug.print("\x1b[?25h\n", .{}); // Show cursor when done
 
@@ -71,20 +70,6 @@ pub fn downloadFiles(io: std.Io, allocator: std.mem.Allocator, items: []const Do
     // Download errors as stored in results already.
     group.await(io) catch {};
     return results;
-}
-
-const kernel32 = struct {
-    extern "kernel32" fn GetConsoleMode(hConsoleHandle: std.os.windows.HANDLE, lpMode: *std.os.windows.DWORD) callconv(.winapi) c_int;
-    extern "kernel32" fn SetConsoleMode(hConsoleHandle: std.os.windows.HANDLE, dwMode: std.os.windows.DWORD) callconv(.winapi) c_int;
-};
-
-/// Enable ANSI escape code processing on Windows 10+ to allow cursor movement and line clearing
-/// Note: haven't tested this on Winddows yet
-fn enableWindowsAnsi() void {
-    const handle = std.os.windows.peb().ProcessParameters.hStdError;
-    var mode: std.os.windows.DWORD = 0;
-    if (kernel32.GetConsoleMode(handle, &mode) == 0) return;
-    _ = kernel32.SetConsoleMode(handle, mode | std.os.windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 }
 
 fn getFilename(url: []const u8) []const u8 {
