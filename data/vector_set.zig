@@ -141,10 +141,9 @@ pub const VectorSet = enum {
                     "bigann_gnd.tar.gz",
                 };
 
-                const file_paths = try allocator.alloc([]const u8, file_names.len);
+                var file_paths: [4][]const u8 = undefined;
                 defer {
                     for (file_paths) |path| allocator.free(path);
-                    allocator.free(file_paths);
                 }
 
                 var download_items: [file_names.len]ftp.DownloadItem = undefined;
