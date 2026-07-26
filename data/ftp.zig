@@ -2,7 +2,6 @@
 //! Supports anonymous login and passive mode transfers
 
 const std = @import("std");
-const builtin = @import("builtin");
 
 pub const FtpError = error{
     InvalidUrl,
@@ -28,16 +27,17 @@ pub const DownloadItem = struct {
 
 /// Downloads multiple files in parallel with progress display.
 /// Returns slice of results for each file, in the same order as input items.
-/// `items` must have <= 255 entries, otherwise `error.TooManyFiles` is returned.
-pub fn downloadFiles(io: std.Io, allocator: std.mem.Allocator, items: []const DownloadItem) error{ TooManyFiles, OutOfMemory }![]DownloadResult {
+pub fn downloadFiles(io: std.Io, allocator: std.mem.Allocator, items: []const DownloadItem) error{ OutOfMemory}![]DownloadResult {
     if (items.len == 0) return &.{};
-
-    const total_tasks = std.math.cast(u8, items.len) orelse return error.TooManyFiles;
 
     // Allocate results and contexts
     const contexts = try allocator.alloc(DownloadContext, items.len);
     defer allocator.free(contexts);
     const results = try allocator.alloc(DownloadResult, items.len);
+
+    // Create progress root and child nodes
+    var progress_root = std.Progress.start(io, .{ .root_name = "Downloading" });
+    defer progress_root.end();
 
     // Initialize contexts
     for (items, 0..) |item, i| {
@@ -48,18 +48,10 @@ pub fn downloadFiles(io: std.Io, allocator: std.mem.Allocator, items: []const Do
             .url = item.url,
             .output_path = item.output_path,
             .filename = getFilename(item.url),
-            .task_id = @intCast(i),
-            .task_count = total_tasks,
+            .progress_node = progress_root.start(getFilename(item.url), 0),
             .result = &results[i],
         };
     }
-
-    // Reserve lines for progress bars
-    for (0..total_tasks) |_| std.debug.print("\n", .{});
-
-    // Hide cursor during downloads
-    std.debug.print("\x1b[?25l", .{});
-    defer std.debug.print("\x1b[?25h\n", .{}); // Show cursor when done
 
     var group = std.Io.Group.init;
     defer group.cancel(io);
@@ -93,8 +85,7 @@ const DownloadContext = struct {
     url: []const u8,
     output_path: []const u8,
     filename: []const u8,
-    task_id: u8,
-    task_count: u8,
+    progress_node: std.Progress.Node,
     result: *DownloadResult,
 
     const DEFAULT_PORT: u16 = 21;
@@ -117,6 +108,7 @@ const DownloadContext = struct {
     /// Thread entry point
     fn run(self: *Self) void {
         self.result.* = self.download();
+        self.progress_node.end();
     }
 
     fn greeting(self: *Self, reader: *std.Io.Reader, arena: std.mem.Allocator) error{ConnectionFailed}!void {
@@ -540,7 +532,7 @@ const DownloadContext = struct {
         var file_writer = file.writer(self.io, &file_buffer);
         const file_writer_interface = &file_writer.interface;
 
-        self.printStatus(.info, "Start downloading...", .{});
+        self.printStatus(.info, "{s}", .{self.filename});
         var downloaded: usize = 0;
         if (file_size_opt) |file_size| {
             // Chunk-based reading with progress updates. We require the server to send exactly file_size bytes, otherwise it's an error.
@@ -625,64 +617,33 @@ const DownloadContext = struct {
         }
     }
 
-    /// Print status on this thread's designated terminal line.
-    /// Just return immediately on any error, since this is just a best-effort status update and shouldn't interfere with the main download logic.
+    /// Update progress node based on download status.
+    /// Just return immediately on any error, since this is just a best-effort status update.
     fn printStatus(self: *const Self, status: Status, comptime fmt: []const u8, args: anytype) void {
-        // Calculate how many lines to move up from current position
-        const lines_up = self.task_count - self.task_id;
-
-        // Lock stderr with a larger buffer for the entire operation
-        var buffer: [512]u8 = undefined;
-        var stderr = std.debug.lockStderr(&buffer);
-        defer std.debug.unlockStderr();
-        const writer = &stderr.file_writer.interface;
-
-        // Move cursor up and clear line
-        // \x1b[nA = move up n lines
-        // \x1b[2K = clear entire line
-        writer.print("\x1b[{d}A\x1b[2K\r{s: <25} ", .{ lines_up, self.filename }) catch return;
-
         switch (status) {
             .info => {
-                writer.print(fmt, args) catch return;
+                var buf: [128]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, fmt, args) catch {
+                    self.progress_node.setName("working...");
+                    return;
+                };
+                self.progress_node.setName(msg);
             },
             .err => {
-                writer.print("error: ", .{}) catch return;
-                writer.print(fmt, args) catch return;
+                var buf: [128]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "error: " ++ fmt, args) catch {
+                    self.progress_node.setName("error");
+                    return;
+                };
+                self.progress_node.setName(msg);
             },
             .progress => |p| {
-                const percent: f64 = if (p.total > 0)
-                    @as(f64, @floatFromInt(p.downloaded)) / @as(f64, @floatFromInt(p.total)) * 100
-                else
-                    0;
-
-                // Build progress bar string
-                const bar_width: usize = 25;
-                const filled: usize = @intFromFloat(percent / 100 * @as(f64, @floatFromInt(bar_width)));
-
-                var bar: [bar_width]u8 = undefined;
-                for (0..bar_width) |i| {
-                    if (i < filled) {
-                        bar[i] = '=';
-                    } else if (i == filled) {
-                        bar[i] = '>';
-                    } else {
-                        bar[i] = ' ';
-                    }
+                self.progress_node.setCompletedItems(p.downloaded);
+                if (p.total > 0) {
+                    self.progress_node.setEstimatedTotalItems(p.total);
                 }
-
-                const downloaded_mb = @as(f64, @floatFromInt(p.downloaded)) / (1024 * 1024);
-                const total_mb = @as(f64, @floatFromInt(p.total)) / (1024 * 1024);
-                writer.print("[{s}] {d:>5.1}% ({d:.1}/{d:.1} MB)", .{ &bar, percent, downloaded_mb, total_mb }) catch return;
             },
-            .done => |bytes| {
-                const mb = @as(f64, @floatFromInt(bytes)) / (1024 * 1024);
-                writer.print("[=========================] Done! {d} bytes ({d:.1} MB)", .{ bytes, mb }) catch return;
-            },
+            .done => {},
         }
-
-        // Move cursor back down
-        // \x1b[nB = move down n lines
-        writer.print("\x1b[{d}B\r", .{lines_up}) catch return;
     }
 };
