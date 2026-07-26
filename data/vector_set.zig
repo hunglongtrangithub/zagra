@@ -95,11 +95,7 @@ pub const VectorSet = enum {
                         .output_path = tar_file_path,
                     }},
                 ) catch |e| {
-                    switch (e) {
-                        error.OutOfMemory => std.debug.print("Out of memory.", .{}),
-                        error.TooManyFiles => std.debug.print("Too many files to download (max 255).", .{}),
-                    }
-                    std.debug.print(" Exiting.\n", .{});
+                    std.debug.print("{s}: {s}\n", .{ @errorName(e), "Downloading failed." });
                     std.process.exit(1);
                 };
                 defer allocator.free(results);
@@ -161,11 +157,7 @@ pub const VectorSet = enum {
                     allocator,
                     &download_items,
                 ) catch |e| {
-                    switch (e) {
-                        error.OutOfMemory => std.debug.print("Out of memory.", .{}),
-                        error.TooManyFiles => std.debug.print("Too many files to download (max 255).", .{}),
-                    }
-                    std.debug.print(" Exiting.\n", .{});
+                    std.debug.print("{s}: {s}\n", .{ @errorName(e), "Downloading failed." });
                     std.process.exit(1);
                 };
                 defer allocator.free(results);
