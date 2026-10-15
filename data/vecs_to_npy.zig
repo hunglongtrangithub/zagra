@@ -167,7 +167,7 @@ pub fn convertVecsToNpy(io: std.Io, dataset_dir: std.Io.Dir) void {
     }) |e| {
         const entry: std.Io.Dir.Entry = e;
         if (entry.kind != .file) continue;
-        const ext = std.fs.path.extension(entry.name);
+        const ext = std.Io.Dir.path.extension(entry.name);
         const vecs_type = VecsType.fromExtension(ext) orelse continue;
 
         // Make new file name with .npy extension.

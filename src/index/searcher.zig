@@ -183,8 +183,7 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
                 const t = try allocator.create(std.Io.Threaded);
                 errdefer allocator.destroy(t);
                 t.* = std.Io.Threaded.init(allocator, .{
-                    .async_limit = if (num_queries_per_block <= 1) .nothing
-                    else .limited(num_queries_per_block - 1),
+                    .async_limit = if (num_queries_per_block <= 1) .nothing else .limited(num_queries_per_block - 1),
                 });
                 break :blk t;
             };
@@ -309,7 +308,7 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
             const num_nodes = self.num_nodes;
             const search_buffer_size = config.internal_k + config.search_width * self.num_neighbors_per_node;
 
-            if (builtin.mode != .ReleaseFast) {
+            if (builtin.mode != .fast) {
                 std.debug.assert(verifyQueriesArray(queries) != null);
                 std.debug.assert(neighbors.shape.dims[0] == num_queries and neighbors.shape.dims[1] == k and neighbors.shape.order == .C);
                 std.debug.assert(distances.shape.dims[0] == num_queries and distances.shape.dims[1] == k and distances.shape.order == .C);
@@ -368,7 +367,7 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
             internal_k: usize,
         ) void {
             const num_nodes = self.num_nodes;
-            if (builtin.mode != .ReleaseFast) std.debug.assert(search_buffer.len >= internal_k);
+            if (builtin.mode != .fast) std.debug.assert(search_buffer.len >= internal_k);
 
             for (0..internal_k) |top_k_idx| {
                 search_buffer.set(top_k_idx, .{
@@ -447,7 +446,7 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
         ) usize {
             const num_nodes = self.num_nodes;
             const graph_degree = self.num_neighbors_per_node;
-            if (builtin.mode != .ReleaseFast) {
+            if (builtin.mode != .fast) {
                 std.debug.assert(first_time_parent_flags.len == num_nodes);
                 std.debug.assert(first_time_candidate_flags.len == num_nodes);
                 std.debug.assert(search_buffer.len >= internal_k + search_width * graph_degree);
@@ -496,7 +495,7 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
             const num_nodes = self.num_nodes;
             const k = config.k;
 
-            if (builtin.mode != .ReleaseFast) {
+            if (builtin.mode != .fast) {
                 std.debug.assert(first_time_parent_flags.len == num_nodes);
                 std.debug.assert(first_time_candidate_flags.len == num_nodes);
                 std.debug.assert(node_ids_random.len == num_nodes);
@@ -542,7 +541,7 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
                     internal_k,
                     candidate_count,
                 );
-                if (builtin.mode != .ReleaseFast) std.debug.assert(new_candidate_count <= candidate_count);
+                if (builtin.mode != .fast) std.debug.assert(new_candidate_count <= candidate_count);
                 log.debug("New candidate count: {}", .{new_candidate_count});
 
                 if (new_candidate_count == 0) {
@@ -842,9 +841,10 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
                 .num_neighbors_per_node = graph_degree,
             };
 
-            var query_array = try znpy.array.StaticArray(f32, 2).init(
+            var query_array = try znpy.array.StaticArray(f32, 2).initAligned(
                 [_]usize{ 1, TestN },
                 .C,
+                .@"64",
                 std.testing.allocator,
             );
             defer query_array.deinit(std.testing.allocator);

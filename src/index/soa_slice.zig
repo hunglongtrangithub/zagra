@@ -10,11 +10,13 @@ pub fn SoaSlice(comptime T: type) type {
         .@"struct" => {},
         else => @compileError("T must be a struct type"),
     }
-    const fields: []const std.builtin.Type.StructField = std.meta.fields(T);
+    const struct_info = @typeInfo(T).@"struct";
+    const field_names = struct_info.field_names;
+    const field_types = struct_info.field_types;
 
     return struct {
         /// Byte pointers to the data for each field.
-        ptrs: [fields.len][*]u8,
+        ptrs: [field_names.len][*]u8,
         /// Number of elements in the slice.
         len: usize,
 
@@ -24,12 +26,12 @@ pub fn SoaSlice(comptime T: type) type {
 
         /// Initializes a new SoaSlice with the specified length.
         pub fn init(len: usize, allocator: std.mem.Allocator) std.mem.Allocator.Error!Self {
-            var ptrs: [fields.len][*]u8 = undefined;
-            inline for (fields, 0..) |field, i| {
+            var ptrs: [field_names.len][*]u8 = undefined;
+            inline for (field_types, 0..) |F, i| {
                 const bytes = try allocator.alignedAlloc(
                     u8,
-                    .of(field.type),
-                    len * @sizeOf(field.type),
+                    .of(F),
+                    len * @sizeOf(F),
                 );
                 ptrs[i] = bytes.ptr;
             }
@@ -41,18 +43,18 @@ pub fn SoaSlice(comptime T: type) type {
 
         /// Deinitializes the SoaSlice by freeing the allocated memory for each field.
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-            inline for (0..fields.len) |i| {
-                allocator.free(self.items(@enumFromInt(i)));
+            inline for (0..field_names.len) |i| {
+                allocator.free(self.items(@fromBackingInt(@intCast(i))));
             }
         }
 
         /// Fills the slice with the values from the given element.
         pub fn fill(self: *Self, elem: T) void {
-            inline for (fields, 0..) |field, i| {
+            inline for (field_types, 0..) |F, i| {
                 // Skip zero-sized fields. Otherwise LLVM cannot generate code for the pointer arithmetic.
-                if (@sizeOf(field.type) == 0) continue;
-                const field_enum = @as(Field, @enumFromInt(i));
-                const field_value = @field(elem, field.name);
+                if (@sizeOf(F) == 0) continue;
+                const field_enum = @as(Field, @fromBackingInt(@intCast(i)));
+                const field_value = @field(elem, field_names[i]);
                 @memset(self.items(field_enum), field_value);
             }
         }
@@ -66,7 +68,7 @@ pub fn SoaSlice(comptime T: type) type {
         pub fn items(self: *const Self, comptime field: Field) []FieldType(field) {
             const F = FieldType(field);
             if (self.len == 0) return &[_]F{};
-            const byte_slice = self.ptrs[@intFromEnum(field)];
+            const byte_slice = self.ptrs[@backingInt(field)];
             const casted_slice: [*]F = if (@sizeOf(F) == 0) undefined else @ptrCast(@alignCast(byte_slice));
             return casted_slice[0..self.len];
         }
@@ -74,19 +76,19 @@ pub fn SoaSlice(comptime T: type) type {
         /// Set the element at the specified index to the given value.
         /// Index has to be less than the length of the slice.
         pub fn set(self: *const Self, index: usize, elem: T) void {
-            if (builtin.mode != .ReleaseFast) std.debug.assert(index < self.len);
-            inline for (fields, 0..) |field, i| {
-                self.items(@as(Field, @enumFromInt(i)))[index] = @field(elem, field.name);
+            if (builtin.mode != .fast) std.debug.assert(index < self.len);
+            inline for (field_types, 0..) |_, i| {
+                self.items(@as(Field, @fromBackingInt(@intCast(i))))[index] = @field(elem, field_names[i]);
             }
         }
 
         /// Get the element at the specified index.
         /// Index has to be less than the length of the slice.
         pub fn get(self: *const Self, index: usize) T {
-            if (builtin.mode != .ReleaseFast) std.debug.assert(index < self.len);
+            if (builtin.mode != .fast) std.debug.assert(index < self.len);
             var elem: T = undefined;
-            inline for (fields, 0..) |field, i| {
-                @field(elem, field.name) = self.items(@as(Field, @enumFromInt(i)))[index];
+            inline for (field_types, 0..) |_, i| {
+                @field(elem, field_names[i]) = self.items(@as(Field, @fromBackingInt(@intCast(i))))[index];
             }
             return elem;
         }
@@ -94,10 +96,10 @@ pub fn SoaSlice(comptime T: type) type {
         /// Returns a subslice of the original slice starting at the specified offset and with the specified length.
         /// off + len must be less than or equal to the length of the original slice.
         pub fn subslice(self: *const Self, off: usize, len: usize) Self {
-            if (builtin.mode != .ReleaseFast) std.debug.assert(off + len <= self.len);
+            if (builtin.mode != .fast) std.debug.assert(off + len <= self.len);
             var ptrs = self.ptrs;
-            inline for (fields, 0..) |field, i| {
-                ptrs[i] += off * @sizeOf(field.type);
+            inline for (field_types, 0..) |F, i| {
+                ptrs[i] += off * @sizeOf(F);
             }
             return .{
                 .ptrs = ptrs,

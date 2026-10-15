@@ -2,11 +2,11 @@
     .name = .zagra,
     .version = "0.0.0",
     .fingerprint = 0x9cfe080a9b55909b, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.15.1",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .znpy = .{
             .url = "https://github.com/hunglongtrangithub/znpy/archive/refs/heads/main.tar.gz",
-            .hash = "znpy-0.0.0-QOH-rGxABAC5LvdJWxGFPjKukWJCLXYrvkEv4nDVU7up",
+            .hash = "znpy-0.0.0-QOH-rGlMBABFsnh5cvqolF-QqD-rraU6dNU-e9OumgEs",
         },
     },
     .paths = .{

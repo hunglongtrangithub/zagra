@@ -27,7 +27,7 @@ pub const DownloadItem = struct {
 
 /// Downloads multiple files in parallel with progress display.
 /// Returns slice of results for each file, in the same order as input items.
-pub fn downloadFiles(io: std.Io, allocator: std.mem.Allocator, items: []const DownloadItem) error{ OutOfMemory}![]DownloadResult {
+pub fn downloadFiles(io: std.Io, allocator: std.mem.Allocator, items: []const DownloadItem) error{OutOfMemory}![]DownloadResult {
     if (items.len == 0) return &.{};
 
     // Allocate results and contexts
@@ -454,7 +454,7 @@ const DownloadContext = struct {
             return error.InvalidUrl;
         }
         var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
-        const host = uri.getHost(&host_buf) catch |e| {
+        const host = std.Io.net.HostName.fromUri(uri, &host_buf) catch |e| {
             self.printStatus(.err, "{}: Host name missing from URL", .{e});
             return error.InvalidUrl;
         };
@@ -508,7 +508,7 @@ const DownloadContext = struct {
 
         // Open output file
         const file = blk: {
-            if (std.fs.path.isAbsolute(self.output_path)) {
+            if (std.Io.Dir.path.isAbsolute(self.output_path)) {
                 break :blk std.Io.Dir.createFileAbsolute(self.io, self.output_path, .{}) catch |e| {
                     self.printStatus(.err, "{}: Cannot create file", .{e});
                     return error.FileCreateFailed;

@@ -59,7 +59,7 @@ pub const VectorSet = enum {
             },
         };
 
-        const dataset_dir_str = std.fs.path.join(allocator, &[_][]const u8{ data_dir, @tagName(self) }) catch
+        const dataset_dir_str = std.Io.Dir.path.join(allocator, &[_][]const u8{ data_dir, @tagName(self) }) catch
             return std.mem.Allocator.Error.OutOfMemory;
         defer allocator.free(dataset_dir_str);
         cwd.createDir(io, dataset_dir_str, .default_dir) catch |e| switch (e) {
@@ -79,11 +79,11 @@ pub const VectorSet = enum {
                     else => unreachable,
                 };
 
-                const tar_file_path = std.fs.path.join(allocator, &[_][]const u8{ dataset_dir_str, file_name }) catch
+                const tar_file_path = std.Io.Dir.path.join(allocator, &[_][]const u8{ dataset_dir_str, file_name }) catch
                     return std.mem.Allocator.Error.OutOfMemory;
                 defer allocator.free(tar_file_path);
 
-                const tar_file_url = try std.fmt.allocPrint(allocator, "{s}{s}", .{ URL_PREFIX, file_name });
+                const tar_file_url = try allocator.print("{s}{s}", .{ URL_PREFIX, file_name });
                 defer allocator.free(tar_file_url);
 
                 log.info("Downloading {s}...", .{file_name});
@@ -144,7 +144,7 @@ pub const VectorSet = enum {
 
                 var download_items: [file_names.len]ftp.DownloadItem = undefined;
                 inline for (file_names, 0..) |name, i| {
-                    file_paths[i] = std.fs.path.join(allocator, &[_][]const u8{ dataset_dir_str, name }) catch
+                    file_paths[i] = std.Io.Dir.path.join(allocator, &[_][]const u8{ dataset_dir_str, name }) catch
                         return std.mem.Allocator.Error.OutOfMemory;
                     download_items[i] = .{
                         .url = URL_PREFIX ++ name,
@@ -239,11 +239,11 @@ pub const VectorSet = enum {
             std.process.exit(0);
         }) |entry| {
             if (entry.kind != .file) continue;
-            const ext = std.fs.path.extension(entry.path);
+            const ext = std.Io.Dir.path.extension(entry.path);
             const vecs_type = vecs_to_npy.VecsType.fromExtension(ext) orelse continue;
             log.debug("Found valid file with vecs type {}: {s}", .{ vecs_type, entry.path });
 
-            const file_name = std.fs.path.basename(entry.path);
+            const file_name = std.Io.Dir.path.basename(entry.path);
             log.info("Moving {s} to {s}", .{ entry.path, file_name });
             dataset_dir.rename(
                 entry.path,

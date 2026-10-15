@@ -13,7 +13,7 @@ fn usage(stdout: *std.Io.Writer, exe_name: []const u8) std.Io.Writer.Error!void 
     try stdout.print("If custom_data_dir is not provided, default to ./{s}\n", .{config.DATA_DIR});
     try stdout.print("If --no-convert is provided, do not convert fvecs/bvecs/ivecs files to npy files.\n", .{});
     try stdout.print("Available datasets:\n", .{});
-    inline for (std.meta.fieldNames(VectorSet)) |name| {
+    inline for (@typeInfo(VectorSet).@"enum".field_names) |name| {
         try stdout.print("  {s}\n", .{name});
     }
     try stdout.flush();
@@ -38,7 +38,7 @@ pub fn main(init: std.process.Init) (std.mem.Allocator.Error || std.Io.Writer.Er
     defer args.deinit();
 
     const exe_path = args.next() orelse @src().file;
-    const exe_name = std.fs.path.basename(exe_path);
+    const exe_name = std.Io.Dir.path.basename(exe_path);
     const cwd = std.Io.Dir.cwd();
 
     var stdin_buffer: [1024]u8 = undefined;
@@ -76,7 +76,7 @@ pub fn main(init: std.process.Init) (std.mem.Allocator.Error || std.Io.Writer.Er
         try vector_set.install(allocator, io, final_data_dir);
 
         if (do_convert) {
-            const dataset_dir_str = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ final_data_dir, @tagName(vector_set) });
+            const dataset_dir_str = try allocator.print("{s}/{s}", .{ final_data_dir, @tagName(vector_set) });
             defer allocator.free(dataset_dir_str);
             var dataset_dir = cwd.openDir(io, dataset_dir_str, .{ .iterate = true }) catch |e| {
                 std.debug.print("Error opening dataset directory {s}: {}\n", .{ dataset_dir_str, e });
@@ -95,7 +95,7 @@ pub fn main(init: std.process.Init) (std.mem.Allocator.Error || std.Io.Writer.Er
     // Ask for vector set
     try stdout.print("Welcome to TEXMEXSTEAL!\n", .{});
     try stdout.print("Install the vector set of your choosing (send end-of-file signal to exit):\n", .{});
-    inline for (std.meta.fieldNames(VectorSet), 1..) |name, i| {
+    inline for (@typeInfo(VectorSet).@"enum".field_names, 1..) |name, i| {
         try stdout.print("  {d}: {s}\n", .{ i, name });
     }
     try stdout.flush();
@@ -181,7 +181,7 @@ pub fn main(init: std.process.Init) (std.mem.Allocator.Error || std.Io.Writer.Er
         log.info("Skipping conversion to .npy format as per user choice.", .{});
         return;
     }
-    const dataset_dir_str = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ final_data_dir, @tagName(vector_set) });
+    const dataset_dir_str = try allocator.print("{s}/{s}", .{ final_data_dir, @tagName(vector_set) });
     defer allocator.free(dataset_dir_str);
     var dataset_dir = cwd.openDir(io, dataset_dir_str, .{ .iterate = true }) catch |e| {
         std.debug.print("Error opening dataset directory {s}: {}\n", .{ dataset_dir_str, e });

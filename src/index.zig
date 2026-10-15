@@ -429,7 +429,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             var write_buffer: [4096]u8 = undefined;
 
             // Create the dataset file and writer
-            const dataset_file_path = try std.fs.path.join(allocator, &[_][]const u8{ dir_path, DATASET_FILENAME });
+            const dataset_file_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ dir_path, DATASET_FILENAME });
             defer allocator.free(dataset_file_path);
             const dataset_file = try cwd.createFile(io, dataset_file_path, .{});
             defer dataset_file.close(io);
@@ -439,7 +439,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             try dataset_file_writer.interface.flush();
 
             // Create the graph file and writer
-            const graph_file_path = try std.fs.path.join(allocator, &[_][]const u8{ dir_path, GRAPH_FILENAME });
+            const graph_file_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ dir_path, GRAPH_FILENAME });
             defer allocator.free(graph_file_path);
             const graph_file = try cwd.createFile(io, graph_file_path, .{});
             defer graph_file.close(io);
@@ -559,7 +559,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             const num_nodes = nn_descent.neighbors_list.num_nodes;
             const num_neighbors_per_node = nn_descent.neighbors_list.num_neighbors_per_node;
 
-            if (builtin.mode != .ReleaseFast) std.debug.assert(isValidGraph(
+            if (builtin.mode != .fast) std.debug.assert(isValidGraph(
                 optimizer_entries.items(.neighbor_id),
                 num_nodes,
                 num_neighbors_per_node,
@@ -593,7 +593,7 @@ pub fn Index(comptime T: type, comptime N: usize) type {
             }
 
             const graph_data: []const usize = try allocator.dupe(usize, optimized_graph.entries.items(.neighbor_id));
-            if (builtin.mode != .ReleaseFast) std.debug.assert(isValidGraph(
+            if (builtin.mode != .fast) std.debug.assert(isValidGraph(
                 graph_data,
                 num_nodes,
                 config.graph_degree,
@@ -745,11 +745,11 @@ fn testIndexRoundTrip(comptime T: type, comptime N: usize) !void {
 
     // Cleanup files and directory created by the test to avoid leaving artifacts.
     // Remove dataset.npy and graph.npy then remove directory.
-    const dataset_file_path = try std.fs.path.join(std.testing.allocator, &[_][]const u8{ dir_path, IDX.DATASET_FILENAME });
+    const dataset_file_path = try std.Io.Dir.path.join(std.testing.allocator, &[_][]const u8{ dir_path, IDX.DATASET_FILENAME });
     defer std.testing.allocator.free(dataset_file_path);
     try cwd.deleteFile(std.testing.io, dataset_file_path);
 
-    const graph_file_path = try std.fs.path.join(std.testing.allocator, &[_][]const u8{ dir_path, IDX.GRAPH_FILENAME });
+    const graph_file_path = try std.Io.Dir.path.join(std.testing.allocator, &[_][]const u8{ dir_path, IDX.GRAPH_FILENAME });
     defer std.testing.allocator.free(graph_file_path);
     try cwd.deleteFile(std.testing.io, graph_file_path);
 

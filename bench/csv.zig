@@ -50,13 +50,13 @@ fn writeRowValues(
             }
         },
         .@"struct" => {
-            const fields = std.meta.fields(T);
-            if (fields.len != expected_count) return error.RowLengthMismatch;
-            if (fields.len > 0) {
-                try writeCsvValue(writer, @field(row, fields[0].name));
-                inline for (fields[1..]) |field| {
+            const field_names = @typeInfo(T).@"struct".field_names;
+            if (field_names.len != expected_count) return error.RowLengthMismatch;
+            if (field_names.len > 0) {
+                try writeCsvValue(writer, @field(row, field_names[0]));
+                inline for (field_names[1..]) |field_name| {
                     try writer.writeAll(",");
-                    try writeCsvValue(writer, @field(row, field.name));
+                    try writeCsvValue(writer, @field(row, field_name));
                 }
             }
         },

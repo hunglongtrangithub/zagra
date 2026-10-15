@@ -19,8 +19,8 @@ const HnswConfig = struct {
 };
 
 const HnswResult = struct {
-    construction_ns: u64,
-    avg_query_ns: u64,
+    construction_ns: i96,
+    avg_query_ns: i96,
     throughput_qps: f64,
     recall: f64,
 };
@@ -36,8 +36,8 @@ const ZagraConfig = struct {
 };
 
 const ZagraResult = struct {
-    construction_ns: u64,
-    avg_query_ns: u64,
+    construction_ns: i96,
+    avg_query_ns: i96,
     throughput_qps: f64,
     recall: f64,
 };
@@ -110,47 +110,49 @@ const AnnDataset = struct {
     /// - *_query.npy: query vectors (f32, shape [num_query, 128])
     /// - *_groundtruth.npy: ground truth neighbors (i32, shape [num_query, k])
     fn load(
+        io: std.Io,
         allocator: std.mem.Allocator,
         vectorset_dir_path: []const u8,
         vectorset_name: []const u8,
     ) !AnnDataset {
         // Get vector set directory
-        var dir = if (std.fs.path.isAbsolute(vectorset_dir_path))
-            try std.fs.openDirAbsolute(vectorset_dir_path, .{})
+        var dir = if (std.Io.Dir.path.isAbsolute(vectorset_dir_path))
+            try std.Io.Dir.openDirAbsolute(io, vectorset_dir_path, .{})
         else
-            try std.fs.cwd().openDir(vectorset_dir_path, .{});
-        defer dir.close();
+            try std.Io.Dir.cwd().openDir(io, vectorset_dir_path, .{});
+        defer dir.close(io);
 
         // Find sub-directory for the specified vector set
         var vectorset_dir = dir.openDir(
+            io,
             vectorset_name,
             .{ .iterate = true },
         ) catch |e| switch (e) {
             error.FileNotFound => return error.VectorSetDirNotFound,
             else => return e,
         };
-        defer vectorset_dir.close();
+        defer vectorset_dir.close(io);
 
-        var nullable_base_file: ?std.fs.File = null;
-        var nullable_query_file: ?std.fs.File = null;
-        var nullable_gt_file: ?std.fs.File = null;
+        var nullable_base_file: ?std.Io.File = null;
+        var nullable_query_file: ?std.Io.File = null;
+        var nullable_gt_file: ?std.Io.File = null;
         defer {
-            if (nullable_base_file) |f| f.close();
-            if (nullable_query_file) |f| f.close();
-            if (nullable_gt_file) |f| f.close();
+            if (nullable_base_file) |f| f.close(io);
+            if (nullable_query_file) |f| f.close(io);
+            if (nullable_gt_file) |f| f.close(io);
         }
 
-        var it: std.fs.Dir.Iterator = vectorset_dir.iterate();
-        while (try it.next()) |entry| {
+        var it: std.Io.Dir.Iterator = vectorset_dir.iterate();
+        while (try it.next(io)) |entry| {
             if (entry.kind != .file) continue;
             const entry_name = entry.name;
 
             if (std.mem.endsWith(u8, entry_name, "_base.npy")) {
-                nullable_base_file = vectorset_dir.openFile(entry_name, .{}) catch return error.OpenBaseFileFailed;
+                nullable_base_file = vectorset_dir.openFile(io, entry_name, .{}) catch return error.OpenBaseFileFailed;
             } else if (std.mem.endsWith(u8, entry_name, "_query.npy")) {
-                nullable_query_file = vectorset_dir.openFile(entry_name, .{}) catch return error.OpenQueryFileFailed;
+                nullable_query_file = vectorset_dir.openFile(io, entry_name, .{}) catch return error.OpenQueryFileFailed;
             } else if (std.mem.endsWith(u8, entry_name, "_groundtruth.npy")) {
-                nullable_gt_file = vectorset_dir.openFile(entry_name, .{}) catch return error.OpenGroundTruthFileFailed;
+                nullable_gt_file = vectorset_dir.openFile(io, entry_name, .{}) catch return error.OpenGroundTruthFileFailed;
             }
         }
 
@@ -160,6 +162,7 @@ const AnnDataset = struct {
 
         const base_array = loadZagraDataset(
             base_file,
+            io,
             allocator,
         ) catch |e| return switch (e) {
             error.InvalidArrayFile => error.InvalidBaseArrayFile,
@@ -170,6 +173,7 @@ const AnnDataset = struct {
         const query_array = loadNpyArray(
             f32,
             query_file,
+            io,
             allocator,
         ) catch |e| return switch (e) {
             error.InvalidArrayFile => error.InvalidQueryArrayFile,
@@ -183,6 +187,7 @@ const AnnDataset = struct {
         const groundtruth = loadNpyArray(
             i32,
             gt_file,
+            io,
             allocator,
         ) catch |e| return switch (e) {
             error.InvalidArrayFile => error.InvalidGroundTruthArrayFile,
@@ -214,11 +219,12 @@ const AnnDataset = struct {
     }
 
     fn loadZagraDataset(
-        file: std.fs.File,
+        file: std.Io.File,
+        io: std.Io,
         allocator: std.mem.Allocator,
     ) (error{UnsupportedDimension} || Error)!zagra.Dataset(f32, DIM) {
         var file_buffer: [4096]u8 = undefined;
-        var file_reader = file.reader(&file_buffer);
+        var file_reader = file.reader(io, &file_buffer);
         const reader = &file_reader.interface;
 
         return zagra.Dataset(f32, DIM).fromNpyFileReader(
@@ -235,11 +241,12 @@ const AnnDataset = struct {
 
     fn loadNpyArray(
         comptime T: type,
-        file: std.fs.File,
+        file: std.Io.File,
+        io: std.Io,
         allocator: std.mem.Allocator,
     ) Error!znpy.array.static.StaticArray(T, 2) {
         var file_buffer: [4096]u8 = undefined;
-        var file_reader = file.reader(&file_buffer);
+        var file_reader = file.reader(io, &file_buffer);
         const reader = &file_reader.interface;
 
         return znpy.array.StaticArray(T, 2).fromFileAlloc(
@@ -290,6 +297,7 @@ fn computeRecall(
 fn runHnswBenchmark(
     dataset: *const AnnDataset,
     allocator: std.mem.Allocator,
+    io: std.Io,
     cfg: HnswConfig,
     comptime k_val: usize,
 ) !HnswResult {
@@ -303,7 +311,7 @@ fn runHnswBenchmark(
 
     log.info("Building HNSW index (dim={d}, M={d}, ef_construction={d})...", .{ dim, cfg.M, cfg.ef_construction });
 
-    var timer = try std.time.Timer.start();
+    const construction_start = std.Io.Timestamp.now(io, .awake);
     var index = try hnsw.HierarchicalIndex.create(
         dim,
         num_base,
@@ -322,8 +330,8 @@ fn runHnswBenchmark(
         labels[i] = i;
     }
     try index.addPoints(base_data, labels, false);
-    const construction_ns = timer.read();
-    log.info("HNSW construction: {d}ms", .{construction_ns / std.time.ns_per_ms});
+    const construction_ns: i96 = construction_start.untilNow(io, .awake).nanoseconds;
+    log.info("HNSW construction: {d}ms", .{@as(i96, @divTrunc(construction_ns, std.time.ns_per_ms))});
 
     const out_labels = try allocator.alloc(usize, num_query * k_val);
     defer allocator.free(out_labels);
@@ -332,7 +340,7 @@ fn runHnswBenchmark(
     const out_counts = try allocator.alloc(usize, num_query);
     defer allocator.free(out_counts);
 
-    timer.reset();
+    const query_start = std.Io.Timestamp.now(io, .awake);
     const query_data = dataset.query_array.data_buffer;
     try index.searchKnnBatch(
         query_data,
@@ -343,8 +351,8 @@ fn runHnswBenchmark(
         num_query,
     );
 
-    const total_query_ns: u64 = timer.read();
-    const avg_query_ns = total_query_ns / num_query;
+    const total_query_ns: i96 = query_start.untilNow(io, .awake).nanoseconds;
+    const avg_query_ns = @divTrunc(total_query_ns, @as(i96, @intCast(num_query)));
     const throughput_qps = @as(f64, @floatFromInt(num_query)) / (@as(f64, @floatFromInt(total_query_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s)));
 
     log.info("HNSW: avg={d}ns, throughput={d:.1} qps", .{ avg_query_ns, throughput_qps });
@@ -369,6 +377,7 @@ fn runHnswBenchmark(
 fn runZagraBenchmark(
     dataset: *const AnnDataset,
     allocator: std.mem.Allocator,
+    io: std.Io,
     cfg: ZagraConfig,
     comptime k_val: usize,
 ) !ZagraResult {
@@ -388,15 +397,15 @@ fn runZagraBenchmark(
         cfg.block_size,
     );
 
-    var timer = try std.time.Timer.start();
+    const construction_start = std.Io.Timestamp.now(io, .awake);
     var index = try zagra.Index(f32, dim).build(
         dataset.base_array,
         build_config,
         allocator,
     );
     defer index.deinit(allocator);
-    const construction_ns = timer.read();
-    log.info("ZAGRA construction: {d}ms", .{construction_ns / std.time.ns_per_ms});
+    const construction_ns: i96 = construction_start.untilNow(io, .awake).nanoseconds;
+    log.info("ZAGRA construction: {d}ms", .{@as(i96, @divTrunc(construction_ns, std.time.ns_per_ms))});
 
     const search_config = zagra.index.SearchConfig{
         .k = k_val,
@@ -408,7 +417,7 @@ fn runZagraBenchmark(
 
     log.info("Running ZAGRA search ({d} queries, k={d})...", .{ num_query, k_val });
 
-    timer.reset();
+    const search_start = std.Io.Timestamp.now(io, .awake);
     var result = try index.search(
         dataset.query_array.asConst(),
         search_config,
@@ -419,9 +428,9 @@ fn runZagraBenchmark(
         result.neighbors.deinit(allocator);
         result.distances.deinit(allocator);
     }
-    const search_ns = timer.read();
+    const search_ns: i96 = search_start.untilNow(io, .awake).nanoseconds;
 
-    const avg_query_ns = search_ns / num_query;
+    const avg_query_ns = @divTrunc(search_ns, @as(i96, @intCast(num_query)));
     const throughput_qps = @as(f64, @floatFromInt(num_query)) / (@as(f64, @floatFromInt(search_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s)));
 
     log.info("ZAGRA: avg={d}ns, throughput={d:.1} qps", .{ avg_query_ns, throughput_qps });
@@ -453,30 +462,27 @@ const USAGE =
     \\
 ;
 
-fn printUsage(writer: *std.io.Writer, exe_name: []const u8) !void {
+fn printUsage(writer: *std.Io.Writer, exe_name: []const u8) !void {
     try writer.print(USAGE, .{exe_name});
     try writer.print("Available vectorsets:\n", .{});
-    inline for (std.meta.fieldNames(texmex.VectorSet)) |name| {
+    inline for (@typeInfo(texmex.VectorSet).@"enum".field_names) |name| {
         try writer.print("  {s}\n", .{name});
     }
 }
 
-pub fn main() !void {
-    // var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
-    // defer _ = gpa.deinit();
-    // const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    const allocator = std.heap.page_allocator;
-
-    var args = try std.process.argsWithAllocator(allocator);
+    var args = try init.minimal.args.iterateAllocator(allocator);
     defer args.deinit();
     const exe_path = args.next() orelse @src().file;
 
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer: std.Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    const exe_name = std.fs.path.basename(exe_path[0..]);
+    const exe_name = std.Io.Dir.path.basename(exe_path[0..]);
 
     const vectorset_dir = args.next() orelse {
         try stdout.print("Error: Missing <vectorset_dir>.\n", .{});
@@ -510,6 +516,7 @@ pub fn main() !void {
     }
 
     var dataset = try AnnDataset.load(
+        io,
         allocator,
         vectorset_dir,
         vectorset_name,
@@ -525,6 +532,7 @@ pub fn main() !void {
     const hnsw_result = try runHnswBenchmark(
         &dataset,
         allocator,
+        io,
         hnsw_config,
         k,
     );
@@ -541,11 +549,12 @@ pub fn main() !void {
     const zagra_result = try runZagraBenchmark(
         &dataset,
         allocator,
+        io,
         zagra_config,
         k,
     );
 
-    const timestamp = std.time.timestamp();
+    const timestamp: i64 = @intCast(std.Io.Timestamp.now(io, .real).nanoseconds);
     const bench_result = BenchmarkResult{
         .dataset = .{
             .name = dataset.name,
@@ -566,21 +575,21 @@ pub fn main() !void {
     };
 
     const results_dir = root.RESULTS_DIR;
-    std.fs.cwd().makePath(results_dir) catch |e| switch (e) {
+    std.Io.Dir.cwd().createDirPath(io, results_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return e,
     };
 
     // Write the whole bench result to JSON
     const output_path = if (result_id) |id|
-        try std.fmt.allocPrint(allocator, results_dir ++ "/hnsw_vs_zagra_{s}.json", .{id})
+        try allocator.print(results_dir ++ "/hnsw_vs_zagra_{s}.json", .{id})
     else
-        try std.fmt.allocPrint(allocator, results_dir ++ "/hnsw_vs_zagra_{d}.json", .{timestamp});
+        try allocator.print(results_dir ++ "/hnsw_vs_zagra_{d}.json", .{timestamp});
     defer allocator.free(output_path);
-    const output_file = try std.fs.cwd().createFile(output_path, .{});
-    defer output_file.close();
+    const output_file = try std.Io.Dir.cwd().createFile(io, output_path, .{});
+    defer output_file.close(io);
     var file_buffer: [4096]u8 = undefined;
-    var file_writer = output_file.writer(&file_buffer);
+    var file_writer = output_file.writer(io, &file_buffer);
     try std.json.Stringify.value(
         bench_result,
         .{ .whitespace = .indent_2 },

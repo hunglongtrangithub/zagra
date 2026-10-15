@@ -35,6 +35,7 @@ fn runBenchmark(
     block_size: usize,
     graph_degree: usize,
     allocator: std.mem.Allocator,
+    io: std.Io,
 ) !BenchmarkResult {
     const intermediate_degree = graph_degree * 2;
 
@@ -51,6 +52,7 @@ fn runBenchmark(
         dataset,
         build_config,
         allocator,
+        io,
     );
     defer allocator.free(idx.graph);
 
@@ -64,17 +66,16 @@ fn runBenchmark(
     };
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    var args = try std.process.argsWithAllocator(allocator);
+    var args = try init.minimal.args.iterateAllocator(allocator);
     defer args.deinit();
     const exe_path = args.next() orelse @src().file;
 
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer: std.Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     const result_id = args.next();
@@ -115,26 +116,26 @@ pub fn main() !void {
             config.block_size,
             graph_degree,
             allocator,
+            io,
         );
         try all_results.append(allocator, result);
     }
 
     const results_dir = root.RESULTS_DIR;
-    std.fs.cwd().makePath(results_dir) catch |e| switch (e) {
+    std.Io.Dir.cwd().createDirPath(io, results_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return e,
     };
-
     const result_name = "zagra_index_build";
     const csv_file_name = if (result_id) |id|
-        try std.fmt.allocPrint(allocator, "{s}/{s}_{s}.csv", .{ results_dir, result_name, id })
+        try allocator.print("{s}/{s}_{s}.csv", .{ results_dir, result_name, id })
     else
-        try std.fmt.allocPrint(allocator, "{s}/{s}_{d}.csv", .{ results_dir, result_name, std.time.timestamp() });
+        try allocator.print("{s}/{s}_{d}.csv", .{ results_dir, result_name, std.Io.Timestamp.now(io, .real).nanoseconds });
     defer allocator.free(csv_file_name);
-    const csv_file = try std.fs.cwd().createFile(csv_file_name, .{});
-    defer csv_file.close();
+    const csv_file = try std.Io.Dir.cwd().createFile(io, csv_file_name, .{});
+    defer csv_file.close(io);
     var csv_buffer: [1024]u8 = undefined;
-    var csv_writer = csv_file.writer(&csv_buffer);
+    var csv_writer = csv_file.writer(io, &csv_buffer);
     const csv_out = &csv_writer.interface;
 
     const headers = &[_][]const u8{

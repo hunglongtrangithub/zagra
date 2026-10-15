@@ -168,26 +168,11 @@ pub fn build(b: *std.Build) void {
         });
         const install_step = b.addInstallArtifact(bench_exe, .{ .dest_dir = .default });
         const bench_cmd = b.addRunArtifact(bench_exe);
-        if (b.args) |args| bench_cmd.addArgs(args);
+        bench_cmd.addPassthruArgs();
         const bench_step = b.step(bench_name, "Run the '" ++ bench_name ++ "' bench");
         bench_step.dependOn(&bench_cmd.step);
         bench_step.dependOn(&install_step.step);
     }
-
-    // Add a step to list all benchmarks
-    b.step("bench", "List all benchmarks").makeFn = struct {
-        fn make(bs: *std.Build.Step, _: std.Build.Step.MakeOptions) anyerror!void {
-            var stdout_buffer: [1024]u8 = undefined;
-            var stdout_writer = std.Io.File.stdout().writerStreaming(bs.owner.graph.io, &stdout_buffer);
-            const stdout = &stdout_writer.interface;
-            try stdout.print("Available benchmarks:\n", .{});
-            inline for (benchmarks) |bench_name| {
-                try stdout.print("- {s}\n", .{bench_name});
-            }
-            try stdout.print("Use `zig build <benchmark name> -- [args]` to run the benchmark.\n", .{});
-            try stdout.flush();
-        }
-    }.make;
 
     // Test Step
 

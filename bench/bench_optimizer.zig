@@ -38,6 +38,7 @@ fn runBenchmark(
     output_degree: usize,
     config: BenchmarkConfig,
     allocator: std.mem.Allocator,
+    io: std.Io,
 ) !BenchmarkResult {
     const intermediate_degree = output_degree * config.intermediate_degree_multiplier;
 
@@ -82,7 +83,7 @@ fn runBenchmark(
             .num_neighbors_per_node = num_neighbors_per_node,
             .num_nodes = num_nodes,
         },
-        nn_descent.num_threads,
+        nn_descent.effective_num_threads,
         nn_descent.threaded,
         nn_descent.num_nodes_per_block,
     );
@@ -98,17 +99,16 @@ fn runBenchmark(
     };
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    var args = try std.process.argsWithAllocator(allocator);
+    var args = try init.minimal.args.iterateAllocator(allocator);
     defer args.deinit();
     const exe_path = args.next() orelse @src().file;
 
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer: std.Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     const result_id = args.next();
@@ -166,26 +166,26 @@ pub fn main() !void {
                 output_degree,
                 bench_config,
                 allocator,
+                io,
             );
             try all_results.append(allocator, result);
         }
     }
 
     const results_dir = root.RESULTS_DIR;
-    std.fs.cwd().makePath(results_dir) catch |e| switch (e) {
+    std.Io.Dir.cwd().createDirPath(io, results_dir) catch |e| switch (e) {
         error.PathAlreadyExists => {},
         else => return e,
     };
-
     const result_name = "optimizer_summary";
     const summary_file_name = if (result_id) |id|
-        try std.fmt.allocPrint(allocator, "{s}/{s}_{s}.csv", .{ results_dir, result_name, id })
+        try allocator.print("{s}/{s}_{s}.csv", .{ results_dir, result_name, id })
     else
-        try std.fmt.allocPrint(allocator, "{s}/{s}_{d}.csv", .{ results_dir, result_name, std.time.timestamp() });
-    const summary_csv_file = try std.fs.cwd().createFile(summary_file_name, .{});
-    defer summary_csv_file.close();
+        try allocator.print("{s}/{s}_{d}.csv", .{ results_dir, result_name, std.Io.Timestamp.now(io, .real).nanoseconds });
+    const summary_csv_file = try std.Io.Dir.cwd().createFile(io, summary_file_name, .{});
+    defer summary_csv_file.close(io);
     var summary_csv_buffer: [1024]u8 = undefined;
-    var summary_csv_writer = summary_csv_file.writer(&summary_csv_buffer);
+    var summary_csv_writer = summary_csv_file.writer(io, &summary_csv_buffer);
     const summary_csv = &summary_csv_writer.interface;
 
     const headers = &[_][]const u8{

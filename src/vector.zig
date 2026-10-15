@@ -97,12 +97,12 @@ test "sqdist max distance has no overflow for all supported types and dims" {
     const ElemType = types.ElemType;
     const DimType = types.DimType;
 
-    inline for (std.meta.fields(ElemType)) |elem_tag| {
-        const elem: ElemType = @field(ElemType, elem_tag.name);
+    inline for (@typeInfo(ElemType).@"enum".field_names) |elem_name| {
+        const elem: ElemType = @field(ElemType, elem_name);
         const T = elem.toZigType();
 
-        inline for (std.meta.fields(DimType)) |dim_tag| {
-            const dim: DimType = @field(DimType, dim_tag.name);
+        inline for (@typeInfo(DimType).@"enum".field_names) |dim_name| {
+            const dim: DimType = @field(DimType, dim_name);
             const N = comptime dim.toDim();
 
             const V = Vector(T, N);

@@ -5,6 +5,9 @@ const csv = @import("csv.zig");
 const help = @import("help.zig");
 const root = @import("root.zig");
 
+/// Section separator used in printed output.
+const separator: [80]u8 = @splat('=');
+
 /// Benchmark configuration
 const BenchmarkConfig = struct {
     warmup_iterations: usize = 1000_000,
@@ -14,18 +17,18 @@ const BenchmarkConfig = struct {
 
 /// Benchmark result statistics
 const BenchmarkResult = struct {
-    min_ns: u64,
-    max_ns: u64,
-    mean_ns: u64,
-    median_ns: u64,
+    min_ns: std.Io.Duration,
+    max_ns: std.Io.Duration,
+    mean_ns: std.Io.Duration,
+    median_ns: std.Io.Duration,
     stddev_ns: f64,
 
     pub fn print(self: BenchmarkResult, writer: *std.Io.Writer, name: []const u8) !void {
         try writer.print("{s}:\n", .{name});
-        try writer.print("  Min:    {d:>10.2} ns\n", .{@as(f64, @floatFromInt(self.min_ns))});
-        try writer.print("  Max:    {d:>10.2} ns\n", .{@as(f64, @floatFromInt(self.max_ns))});
-        try writer.print("  Mean:   {d:>10.2} ns\n", .{@as(f64, @floatFromInt(self.mean_ns))});
-        try writer.print("  Median: {d:>10.2} ns\n", .{@as(f64, @floatFromInt(self.median_ns))});
+        try writer.print("  Min:    {d:>10.2} ns\n", .{@as(f64, @floatFromInt(self.min_ns.toNanoseconds()))});
+        try writer.print("  Max:    {d:>10.2} ns\n", .{@as(f64, @floatFromInt(self.max_ns.toNanoseconds()))});
+        try writer.print("  Mean:   {d:>10.2} ns\n", .{@as(f64, @floatFromInt(self.mean_ns.toNanoseconds()))});
+        try writer.print("  Median: {d:>10.2} ns\n", .{@as(f64, @floatFromInt(self.median_ns.toNanoseconds()))});
         try writer.print("  StdDev: {d:>10.2} ns\n", .{self.stddev_ns});
     }
 };
@@ -49,6 +52,7 @@ fn runBenchmark(
     },
     config: BenchmarkConfig,
     allocator: std.mem.Allocator,
+    io: std.Io,
 ) !BenchmarkResult {
     // Warmup
     for (0..config.warmup_iterations) |_| {
@@ -57,38 +61,47 @@ fn runBenchmark(
     }
 
     // Allocate array for timing results
-    var timings = try allocator.alloc(u64, config.measurement_iterations);
+    var timings = try allocator.alloc(std.Io.Duration, config.measurement_iterations);
     defer allocator.free(timings);
 
     // Measurement
-    var min: u64 = std.math.maxInt(u64);
-    var max: u64 = 0;
-    var total: u64 = 0;
+    var min: std.Io.Duration = .max;
+    var max: std.Io.Duration = .zero;
+    var total: i96 = 0;
 
+    var prev = std.Io.Timestamp.now(io, .awake);
     for (0..config.measurement_iterations) |i| {
-        var timer = try std.time.Timer.start();
         const result = func(args.v1, args.v2);
-        const elapsed = timer.read();
+        const now = std.Io.Timestamp.now(io, .awake);
         std.mem.doNotOptimizeAway(result);
 
+        const elapsed = prev.durationTo(now);
+        prev = now;
+
         timings[i] = elapsed;
-        min = @min(min, elapsed);
-        max = @max(max, elapsed);
-        total += elapsed;
+        if (elapsed.nanoseconds < min.nanoseconds) min = elapsed;
+        if (elapsed.nanoseconds > max.nanoseconds) max = elapsed;
+        total += elapsed.nanoseconds;
     }
 
-    const mean = total / config.measurement_iterations;
+    const mean: std.Io.Duration = .fromNanoseconds(
+        @divTrunc(total, @as(i96, @intCast(config.measurement_iterations))),
+    );
 
     // Calculate standard deviation
     var variance_sum: f64 = 0;
     for (timings) |timing| {
-        const diff = @as(f64, @floatFromInt(timing)) - @as(f64, @floatFromInt(mean));
+        const diff = @as(f64, @floatFromInt(timing.nanoseconds)) - @as(f64, @floatFromInt(mean.nanoseconds));
         variance_sum += diff * diff;
     }
     const stddev = @sqrt(variance_sum / @as(f64, @floatFromInt(config.measurement_iterations)));
 
     // Calculate median
-    std.mem.sort(u64, timings, {}, std.sort.asc(u64));
+    std.mem.sort(std.Io.Duration, timings, {}, struct {
+        fn lt(_: void, lhs: std.Io.Duration, rhs: std.Io.Duration) bool {
+            return lhs.nanoseconds < rhs.nanoseconds;
+        }
+    }.lt);
     const median = timings[config.measurement_iterations / 2];
 
     return BenchmarkResult{
@@ -106,6 +119,7 @@ fn benchmarkComparison(
     comptime N: usize,
     allocator: std.mem.Allocator,
     writer: *std.Io.Writer,
+    io: std.Io,
 ) !ComparisonResult {
     const VecType = zagra.Vector(T, N);
 
@@ -116,9 +130,9 @@ fn benchmarkComparison(
     const v1 = VecType.initRandom(random);
     const v2 = VecType.initRandom(random);
 
-    try writer.print("\n" ++ "=" ** 80 ++ "\n", .{});
+    try writer.print("\n{s}\n", .{separator});
     try writer.print("Benchmarking Vector({}, {d})\n", .{ T, N });
-    try writer.print("\n" ++ "=" ** 80 ++ "\n", .{});
+    try writer.print("\n{s}\n", .{separator});
     try writer.flush();
 
     // Benchmark naive implementation
@@ -134,6 +148,7 @@ fn benchmarkComparison(
         .{ .v1 = &v1, .v2 = &v2 },
         naive_config,
         allocator,
+        io,
     );
     try naive_result.print(writer, "Naive Implementation");
     try writer.flush();
@@ -153,13 +168,14 @@ fn benchmarkComparison(
         .{ .v1 = &v1, .v2 = &v2 },
         simd_config,
         allocator,
+        io,
     );
     try simd_result.print(writer, "SIMD Implementation");
     try writer.flush();
 
     // Calculate speedup
-    const speedup = @as(f64, @floatFromInt(naive_result.mean_ns)) /
-        @as(f64, @floatFromInt(simd_result.mean_ns));
+    const speedup = @as(f64, @floatFromInt(naive_result.mean_ns.toNanoseconds())) /
+        @as(f64, @floatFromInt(simd_result.mean_ns.toNanoseconds()));
 
     try writer.print("\n", .{});
     try writer.print("Speedup: {d:.2}x\n", .{speedup});
@@ -202,19 +218,18 @@ fn benchmarkComparison(
     };
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
     const result_name = "vector_simd";
 
-    var args = try std.process.argsWithAllocator(allocator);
+    var args = try init.minimal.args.iterateAllocator(allocator);
     defer args.deinit();
     const exe_path = args.next() orelse @src().file;
 
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer: std.Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     const result_id = args.next();
@@ -224,32 +239,29 @@ pub fn main() !void {
     try stdout.print("SIMD Vector Distance Benchmark Suite\n", .{});
 
     const results = [_]ComparisonResult{
-        try benchmarkComparison(f32, 128, allocator, stdout),
-        try benchmarkComparison(f32, 256, allocator, stdout),
-        try benchmarkComparison(f32, 512, allocator, stdout),
+        try benchmarkComparison(f32, 128, allocator, stdout, io),
+        try benchmarkComparison(f32, 256, allocator, stdout, io),
+        try benchmarkComparison(f32, 512, allocator, stdout, io),
     };
 
-    try stdout.print("\n" ++ "=" ** 80 ++ "\n", .{});
+    try stdout.print("\n{s}\n", .{separator});
     try stdout.print("Benchmark complete!\n", .{});
-    try stdout.print("\n" ++ "=" ** 80 ++ "\n", .{});
+    try stdout.print("\n{s}\n", .{separator});
 
     try stdout.flush();
 
     const results_dir = root.RESULTS_DIR;
-    std.fs.cwd().makePath(results_dir) catch |e| switch (e) {
-        error.PathAlreadyExists => {},
-        else => return e,
-    };
+    try std.Io.Dir.cwd().createDirPath(io, results_dir);
 
     const csv_file_name = if (result_id) |id|
-        try std.fmt.allocPrint(allocator, "{s}/{s}_{s}.csv", .{ results_dir, result_name, id })
+        try allocator.print("{s}/{s}_{s}.csv", .{ results_dir, result_name, id })
     else
-        try std.fmt.allocPrint(allocator, "{s}/{s}_{d}.csv", .{ results_dir, result_name, std.time.timestamp() });
-    const csv_file = try std.fs.cwd().createFile(csv_file_name, .{});
-    defer csv_file.close();
+        try allocator.print("{s}/{s}_{d}.csv", .{ results_dir, result_name, std.Io.Timestamp.now(io, .real).nanoseconds });
+    const csv_file = try std.Io.Dir.cwd().createFile(io, csv_file_name, .{});
+    defer csv_file.close(io);
 
     var file_buffer: [1024]u8 = undefined;
-    var file_writer = csv_file.writer(&file_buffer);
+    var file_writer = csv_file.writer(io, &file_buffer);
     const file = &file_writer.interface;
 
     const headers = &[_][]const u8{
@@ -271,10 +283,10 @@ pub fn main() !void {
                 "naive",
                 result.element_type,
                 result.vector_length,
-                result.naive.min_ns,
-                result.naive.max_ns,
-                result.naive.mean_ns,
-                result.naive.median_ns,
+                result.naive.min_ns.toNanoseconds(),
+                result.naive.max_ns.toNanoseconds(),
+                result.naive.mean_ns.toNanoseconds(),
+                result.naive.median_ns.toNanoseconds(),
                 result.naive.stddev_ns,
                 result.speedup,
             },
@@ -286,10 +298,10 @@ pub fn main() !void {
                 "simd",
                 result.element_type,
                 result.vector_length,
-                result.simd.min_ns,
-                result.simd.max_ns,
-                result.simd.mean_ns,
-                result.simd.median_ns,
+                result.simd.min_ns.toNanoseconds(),
+                result.simd.max_ns.toNanoseconds(),
+                result.simd.mean_ns.toNanoseconds(),
+                result.simd.median_ns.toNanoseconds(),
                 result.simd.stddev_ns,
                 result.speedup,
             },

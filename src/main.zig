@@ -33,7 +33,7 @@ pub fn main(init: std.process.Init) !void {
     const stdout = &stdout_writer.interface;
 
     const exe_path = args.next() orelse @src().file;
-    const exe_name = std.fs.path.basename(exe_path[0..]);
+    const exe_name = std.Io.Dir.path.basename(exe_path[0..]);
 
     const vector_count_str = blk: {
         const first_arg = args.next() orelse {

@@ -34,7 +34,7 @@ pub fn checkHelpWithUsage(
     const help_args = [_][]const u8{ "--help", "-h" };
     for (help_args) |help_arg| {
         if (std.mem.eql(u8, a, help_arg)) {
-            const exe_name = std.fs.path.basename(exe_path[0..]);
+            const exe_name = std.Io.Dir.path.basename(exe_path[0..]);
             if (custom_usage) |u| {
                 try stdout.print(u, .{exe_name});
             } else {

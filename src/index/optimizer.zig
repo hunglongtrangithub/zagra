@@ -70,8 +70,8 @@ pub const Optimizer = struct {
                 self: *const @This(),
                 node_id: usize,
                 comptime field: std.meta.FieldEnum(Entry),
-            ) []std.meta.fieldInfo(Entry, field).type {
-                if (builtin.mode != .ReleaseFast) std.debug.assert(node_id < self.num_nodes);
+            ) []@FieldType(Entry, @tagName(field)) {
+                if (builtin.mode != .fast) std.debug.assert(node_id < self.num_nodes);
                 const start = node_id * self.num_neighbors_per_node;
                 return self.entries.items(field)[start .. start + self.num_neighbors_per_node];
             }
@@ -305,7 +305,7 @@ pub const Optimizer = struct {
         two_hop_neighbors_buffer: []usize,
         num_two_hop_neighbors_per_node: usize,
     ) void {
-        if (builtin.mode != .ReleaseFast) std.debug.assert(two_hop_neighbors_buffer.len == self.num_threads * num_two_hop_neighbors_per_node);
+        if (builtin.mode != .fast) std.debug.assert(two_hop_neighbors_buffer.len == self.num_threads * num_two_hop_neighbors_per_node);
         const block_start = @min(block_id * self.num_nodes_per_block, self.neighbors_list.num_nodes);
         const block_end = @min(block_start + self.num_nodes_per_block, self.neighbors_list.num_nodes);
 
@@ -341,7 +341,7 @@ pub const Optimizer = struct {
     ) void {
         const num_nodes = neighbors_list.num_nodes;
         const degree = neighbors_list.num_neighbors_per_node;
-        if (builtin.mode != .ReleaseFast) {
+        if (builtin.mode != .fast) {
             std.debug.assert(node_id_start <= node_id_end and node_id_end <= neighbors_list.num_nodes);
             std.debug.assert(two_hop_neighbors_buffer.len == (degree -| 1) * (degree -| 1));
         }
@@ -388,7 +388,7 @@ pub const Optimizer = struct {
             for (0..degree) |neighbor_rank| {
                 const neighbor_idx = degree - 1 - neighbor_rank;
                 const neighbor_id: usize = neighbor_ids[neighbor_idx];
-                if (builtin.mode != .ReleaseFast) std.debug.assert(neighbor_id < num_nodes);
+                if (builtin.mode != .fast) std.debug.assert(neighbor_id < num_nodes);
 
                 var detour_count: usize = 0;
                 // We only count detours with neighbor_rank_hop1 and neighbor_rank_hop2 of at most neighbor_rank - 1,
@@ -462,7 +462,7 @@ pub const Optimizer = struct {
         node_id_start: usize,
         node_id_end: usize,
     ) void {
-        if (builtin.mode != .ReleaseFast) {
+        if (builtin.mode != .fast) {
             std.debug.assert(input_graph.num_nodes == output_graph.num_nodes);
             std.debug.assert(node_id_start <= node_id_end and node_id_end <= input_graph.num_nodes);
             std.debug.assert(output_graph.num_neighbors_per_node <= input_graph.num_neighbors_per_node);
@@ -502,7 +502,7 @@ pub const Optimizer = struct {
                     if (candidate_detour_count != current_detour_count) continue;
 
                     const candidate_neighbor_id = input_neighbor_ids[neighbor_idx];
-                    if (builtin.mode != .ReleaseFast) std.debug.assert(candidate_neighbor_id < num_nodes);
+                    if (builtin.mode != .fast) std.debug.assert(candidate_neighbor_id < num_nodes);
 
                     // Skip if the neighbor ID is a duplicate. Otherwise add this neighbor to the output.
                     if (std.mem.indexOfScalar(
@@ -606,7 +606,7 @@ pub const Optimizer = struct {
     ) void {
         const num_nodes = pruned_graph.num_nodes;
         const degree = pruned_graph.num_neighbors_per_node;
-        if (builtin.mode != .ReleaseFast) {
+        if (builtin.mode != .fast) {
             std.debug.assert(reverse_neighbor_counts.len == num_nodes);
             std.debug.assert(reverse_neighbor_ids.len == num_nodes * degree);
             std.debug.assert(node_id_start <= node_id_end and node_id_end <= num_nodes);
@@ -616,7 +616,7 @@ pub const Optimizer = struct {
         for (node_id_start..node_id_end) |node_id_src| {
             const neighbor_ids: []const usize = pruned_graph.getEntryFieldSlice(node_id_src, .neighbor_id);
             for (neighbor_ids) |node_id_dst| {
-                if (builtin.mode != .ReleaseFast) std.debug.assert(node_id_dst < num_nodes);
+                if (builtin.mode != .fast) std.debug.assert(node_id_dst < num_nodes);
                 // Atomically increment the counter and get the previous value (position to write)
                 // FIXME: reverse_neighbor_counts and reverse_neighbor_ids lack per-element
                 // cache-line padding. Adjacent 8-byte elements share 64-byte cache lines,
@@ -704,7 +704,7 @@ pub const Optimizer = struct {
     ) void {
         const num_nodes = pruned_graph.num_nodes;
         const degree = pruned_graph.num_neighbors_per_node;
-        if (builtin.mode != .ReleaseFast) {
+        if (builtin.mode != .fast) {
             std.debug.assert(reverse_neighbor_counts.len == num_nodes);
             std.debug.assert(reverse_neighbor_ids.len == num_nodes * degree);
             std.debug.assert(node_id_start <= node_id_end and node_id_end <= num_nodes);
@@ -728,7 +728,7 @@ pub const Optimizer = struct {
             for (0..num_reverse_neighbors) |neighbor_idx| {
                 if (current_neighbor_idx >= degree) break;
                 const neighbor_id = reverse_neighbor_ids[node_id * degree + neighbor_idx];
-                if (builtin.mode != .ReleaseFast) std.debug.assert(neighbor_id < num_nodes);
+                if (builtin.mode != .fast) std.debug.assert(neighbor_id < num_nodes);
 
                 // Only add if it's not a duplicate
                 if (std.mem.indexOfScalar(
@@ -764,7 +764,7 @@ test "count detours" {
         0, 1, 3,
         0, 1, 2,
     };
-    const detour_counts_data = [_]usize{0} ** 12;
+    const detour_counts_data: [12]usize = @splat(0);
 
     var entries = std.MultiArrayList(Optimizer.NeighborsList(true).Entry).empty;
     defer entries.deinit(std.testing.allocator);
