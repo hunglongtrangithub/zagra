@@ -121,21 +121,25 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
         /// Accepts both C-order and F-order arrays:
         /// - C-order: dims[0] = num_queries, dims[1] = N
         /// - F-order: dims[0] = N, dims[1] = num_queries
-        fn verifyQueriesArray(queries: *const ConstStaticArray(T, 2)) ?usize {
+        fn verifyQueriesArray(queries: *const ConstStaticArray(T, 2)) error{
+            UnalignedQueriesBuffer,
+            InvalidCLayoutDimension,
+            InvalidFLayoutDimension,
+        }!usize {
             if (!std.mem.isAligned(@intFromPtr(queries.data_buffer.ptr), 64)) {
-                return null;
+                return error.UnalignedQueriesBuffer;
             }
 
             switch (queries.shape.order) {
                 .C => {
                     if (queries.shape.dims[1] != N) {
-                        return null;
+                        return error.InvalidCLayoutDimension;
                     }
                     return queries.shape.dims[0];
                 },
                 .F => {
                     if (queries.shape.dims[0] != N) {
-                        return null;
+                        return error.InvalidFLayoutDimension;
                     }
                     return queries.shape.dims[1];
                 },
@@ -166,7 +170,7 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
             if (config.internal_k < config.k) return SearchError.InvalidSearchConfig;
             if (config.internal_k < config.search_width) return SearchError.InvalidSearchConfig;
 
-            const num_queries = verifyQueriesArray(queries) orelse return SearchError.InvalidQueriesArray;
+            const num_queries = verifyQueriesArray(queries) catch return SearchError.InvalidQueriesArray;
             // Will seed each query with a different seed: from seed to seed + num_queries - 1. Guard against overflow of seed.
             _ = std.math.add(
                 u64,
@@ -309,7 +313,7 @@ pub fn Searcher(comptime T: type, comptime N: usize) type {
             const search_buffer_size = config.internal_k + config.search_width * self.num_neighbors_per_node;
 
             if (builtin.mode != .fast) {
-                std.debug.assert(verifyQueriesArray(queries) != null);
+                _ = verifyQueriesArray(queries) catch unreachable;
                 std.debug.assert(neighbors.shape.dims[0] == num_queries and neighbors.shape.dims[1] == k and neighbors.shape.order == .C);
                 std.debug.assert(distances.shape.dims[0] == num_queries and distances.shape.dims[1] == k and distances.shape.order == .C);
 
